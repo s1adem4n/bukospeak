@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// The first launch: the name, then where the channel is; `done` once there is enough to join.
+/// The first launch's sheet: the name, then where the channel is, until there is enough to join.
 /// The pages slide within one screen, so the button and the keyboard stay where they are.
 struct OnboardingView: View {
-    let done: () -> Void
-
     @Environment(Call.self) private var call
+    @Environment(\.dismiss) private var dismiss
     @State private var step = Step.name
     @FocusState private var focused: Field?
 
@@ -17,8 +16,6 @@ struct OnboardingView: View {
         case name, server, roomKey
     }
 
-    // Without a navigation stack: the system's, backed by UIKit, vanishes at once when the
-    // onboarding ends instead of fading out.
     var body: some View {
         VStack(spacing: 0) {
             // Always as high, so the pages stand still when the back button comes and goes.
@@ -55,7 +52,6 @@ struct OnboardingView: View {
             .disabled(!isReady)
             .padding()
         }
-        .background(Color(.systemBackground))
         .task { focused = .name }
     }
 
@@ -88,9 +84,16 @@ struct OnboardingView: View {
                     .textContentType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .submitLabel(.next)
+                    // With the room key there already, the server's return ends it as the key's would.
+                    .submitLabel(settings.isComplete ? .done : .next)
                     .focused($focused, equals: .server)
-                    .onSubmit { focused = .roomKey }
+                    .onSubmit {
+                        if settings.isComplete {
+                            proceed()
+                        } else {
+                            focused = .roomKey
+                        }
+                    }
                 SecureField("Raumschlüssel", text: $settings.roomKey)
                     .submitLabel(.done)
                     .focused($focused, equals: .roomKey)
@@ -118,7 +121,7 @@ struct OnboardingView: View {
         case .name: go(to: .channel)
         case .channel:
             focused = nil
-            done()
+            dismiss()
         }
     }
 

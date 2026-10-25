@@ -6,6 +6,8 @@ struct ChannelView: View {
     @Environment(Call.self) private var call
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsSettings = false
+    /// Whether the welcome sheet asks for what a join needs, as on the first launch.
+    @State private var isOnboarding = false
     /// Where the logo on the start screen becomes the microphone button of the call.
     @Namespace private var stage
 
@@ -38,6 +40,11 @@ struct ChannelView: View {
         .sheet(isPresented: $showsSettings) {
             SettingsView()
         }
+        .sheet(isPresented: $isOnboarding) {
+            OnboardingView()
+                .interactiveDismissDisabled()
+        }
+        .onAppear { isOnboarding = !call.settings.isComplete }
         .alert(failure ?? "", isPresented: showsFailure) {
             if let server = call.changedServer {
                 Button("Abbrechen", role: .cancel) {}
