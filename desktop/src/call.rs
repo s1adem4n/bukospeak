@@ -147,7 +147,7 @@ pub struct Call {
     commands: Option<mpsc::Sender<Command>>,
     worker: Option<thread::JoinHandle<()>>,
     /// The number of the call the worker should play; 0 for none. A join that comes back with
-    /// another leaves at once instead of playing.
+    /// another doesn't play, and the leave after it ends it.
     current: Arc<AtomicU64>,
     numbers: u64,
     /// The join under way or the call up, by its number, and its server.
@@ -310,6 +310,7 @@ impl Call {
                 self.left_call = call;
             }
             Event::Device(number, error) => {
+                tracing::warn!("{error}");
                 if self.number() == Some(number) {
                     self.notice = Some(notice(&error));
                 }
@@ -333,7 +334,6 @@ impl Call {
         self.phase = Phase::Joining;
         self.notice = None;
         self.current.store(number, Ordering::Relaxed);
-        self.engine.set_muted(self.muted);
         // The engine stops watching on a join.
         self.send(Command::Join { number, join, trust });
     }
@@ -345,9 +345,9 @@ impl Call {
         match result {
             Ok(()) => {
                 self.joined = true;
-                self.phase = if self.engine_state == State::Reconnecting { Phase::Reconnecting } else { Phase::Connected };
+                self.follow();
             }
-            // The engine had a call for the audio that didn't start.
+            // The engine has a call for the audio that didn't start; the leave ends it.
             Err(Failure::Audio) => self.end(Some(Failure::Audio)),
             Err(failure) => {
                 self.call = None;
@@ -365,7 +365,6 @@ impl Call {
         if self.call.is_none() || self.leaves > 0 || channel.call() <= self.left_call {
             return;
         }
-        let changed = channel.state() != self.engine_state;
         self.engine_state = channel.state();
         self.you = channel.you();
         self.members = channel.members().to_vec();
@@ -379,13 +378,21 @@ impl Call {
             };
             return self.end(Some(failure));
         }
-        if changed && self.joined {
-            match self.engine_state {
-                State::Connected => self.phase = Phase::Connected,
-                State::Reconnecting => self.phase = Phase::Reconnecting,
-                // Out of the channel without a loss is a leave, which ended the call here already.
-                State::Out => {}
-            }
+        self.follow();
+    }
+
+    /// Shows the call as the engine has it, once its join came back: up only once the engine
+    /// entered the channel too, so a call shows connected with who is in it.
+    fn follow(&mut self) {
+        if !self.joined {
+            return;
+        }
+        match self.engine_state {
+            State::Connected => self.phase = Phase::Connected,
+            State::Reconnecting => self.phase = Phase::Reconnecting,
+            // Not entered yet: the update that tells who is in the call is still on its way. A
+            // call left or lost ended here before its last update.
+            State::Out => {}
         }
     }
 
@@ -478,16 +485,10 @@ struct Worker {
 
 impl Worker {
     fn run(mut self, inbox: &mpsc::Receiver<Command>) {
-        let mut devices = Devices::default();
         let mut playing: Option<Box<dyn Playing>> = None;
         for command in inbox {
             match command {
-                Command::Join { number, join, trust } => {
-                    devices.clone_from(&join.devices);
-                    // The leave before a join stopped it already; dropped here all the same.
-                    drop(playing.take());
-                    playing = self.join(number, join, trust, &devices);
-                }
+                Command::Join { number, join, trust } => playing = self.join(number, join, trust),
                 Command::Leave => {
                     // The audio stops before the call, so nothing plays into a call that is gone.
                     playing = None;
@@ -496,15 +497,16 @@ impl Worker {
                 }
                 Command::Watch { server, room_key } => match self.known.get(&server) {
                     Ok(Some(pin)) => self.engine.watch(server, room_key, pin),
-                    // A server never joined isn't trusted yet; one unreadable, not now.
-                    Ok(None) | Err(_) => self.engine.unwatch(),
+                    // A server never joined isn't trusted yet.
+                    Ok(None) => self.engine.unwatch(),
+                    // Who is in the channel is a glance before joining; a join tells the user.
+                    Err(error) => {
+                        tracing::warn!("{error}");
+                        self.engine.unwatch();
+                    }
                 },
                 Command::Unwatch => self.engine.unwatch(),
                 Command::SetDevice(direction, device) => {
-                    match direction {
-                        Direction::Input => devices.input.clone_from(&device),
-                        Direction::Output => devices.output.clone_from(&device),
-                    }
                     if let Some(playing) = &playing {
                         playing.set_device(direction, device);
                     }
@@ -517,23 +519,31 @@ impl Worker {
 
     /// Joins, pins the server and starts the call's audio, and tells the call how it went; the
     /// audio returned plays the call until the next leave.
-    fn join(&mut self, number: u64, join: Join, trust: Option<Fingerprint>, devices: &Devices) -> Option<Box<dyn Playing>> {
-        let Join { server, name, room_key, .. } = join;
-        let Ok(pinned) = self.known.get(&server) else {
-            return self.joined(number, Err(Failure::KnownServers));
+    fn join(&mut self, number: u64, join: Join, trust: Option<Fingerprint>) -> Option<Box<dyn Playing>> {
+        let Join { server, name, room_key, devices } = join;
+        let pinned = match self.known.get(&server) {
+            Ok(pinned) => pinned,
+            Err(error) => {
+                tracing::warn!("{error}");
+                return self.joined(number, Err(Failure::KnownServers));
+            }
         };
-        let pin = trust.or(pinned);
-        let Joined { fingerprint, microphone, speaker } = match self.engine.join(JoinConfig { server: server.clone(), name, room_key, pin })
-        {
+        let config = JoinConfig { server: server.clone(), name, room_key, pin: trust.or(pinned) };
+        let Joined { fingerprint, microphone, speaker } = match self.engine.join(config) {
             Ok(joined) => joined,
-            Err(error) => return self.joined(number, Err(failure(error, server))),
+            Err(error) => {
+                tracing::warn!("joining {server}: {error}");
+                return self.joined(number, Err(failure(error, server)));
+            }
         };
         if self.current.load(Ordering::Relaxed) != number {
-            // Left while joining: the call ends before it plays.
-            self.engine.leave();
-            return self.joined(number, Ok(()));
+            // Left while joining: the leave after this join ends the call before it plays.
+            return None;
         }
-        if pinned != Some(fingerprint) && self.known.insert(&server, fingerprint).is_err() {
+        if pinned != Some(fingerprint)
+            && let Err(error) = self.known.insert(&server, fingerprint)
+        {
+            tracing::warn!("{error}");
             self.tell(Event::Notice(Notice::PinNotKept));
         }
         let happenings = self.happenings.clone();
@@ -541,13 +551,14 @@ impl Worker {
             // Closed only when the call is dropped, which stops the audio.
             let _ = happenings.unbounded_send(Happening(Event::Device(number, error)));
         });
-        match self.player.play(microphone, speaker, devices, report) {
+        match self.player.play(microphone, speaker, &devices, report) {
             Ok(playing) => {
                 self.tell(Event::Joined(number, Ok(())));
                 Some(playing)
             }
-            Err(_) => {
-                self.engine.leave();
+            Err(error) => {
+                tracing::warn!("the audio didn't start: {error}");
+                // The call leaves on this failure, which ends the engine's call.
                 self.joined(number, Err(Failure::Audio))
             }
         }

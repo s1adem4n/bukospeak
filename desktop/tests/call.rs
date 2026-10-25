@@ -2,7 +2,7 @@
 
 use std::process;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,11 +37,13 @@ fn serve() -> Server {
     Server { _runtime: runtime, address, fingerprint: identity.fingerprint() }
 }
 
-/// Plays nothing, but holds the call's ends as the devices would, and counts the calls played.
+/// Plays nothing, but holds the call's ends as the devices would, and counts the calls played;
+/// or fails to start, as devices may.
 #[derive(Clone, Default)]
 struct StandIn {
     played: Arc<AtomicUsize>,
     playing: Arc<AtomicUsize>,
+    fails: Arc<AtomicBool>,
 }
 
 struct Played {
@@ -51,6 +53,9 @@ struct Played {
 
 impl Player for StandIn {
     fn play(&mut self, microphone: Microphone, speaker: Speaker, _: &Devices, _: Report) -> std::io::Result<Box<dyn Playing>> {
+        if self.fails.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("the stand-in fails"));
+        }
         self.played.fetch_add(1, Ordering::Relaxed);
         self.playing.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(Played { _ends: (microphone, speaker), playing: Arc::clone(&self.playing) }))
@@ -130,7 +135,7 @@ fn join(server: &Server, name: &str, room_key: &str) -> Join {
 }
 
 fn connected(call: &Call) -> bool {
-    *call.phase() == Phase::Connected && !call.members().is_empty()
+    *call.phase() == Phase::Connected
 }
 
 #[test]
@@ -196,6 +201,21 @@ fn a_leave_during_the_join_ends_the_call_before_it_plays_and_the_next_join_is_cl
 }
 
 #[test]
+fn quitting_during_a_join_leaves_the_channel() {
+    let server = serve();
+    let mut other = App::new("quit-other");
+    other.join(&server, "second", ROOM_KEY);
+    other.until("the other's call", connected);
+
+    let mut app = App::new("quit");
+    app.join(&server, "first", ROOM_KEY);
+    // Waits for the join under way and leaves.
+    drop(app);
+    other.settle();
+    assert_eq!(other.names(), ["second"]);
+}
+
+#[test]
 fn a_changed_certificate_is_trusted_only_as_presented() {
     let server = serve();
     let mut app = App::new("certificate");
@@ -209,6 +229,27 @@ fn a_changed_certificate_is_trusted_only_as_presented() {
     app.call.trust(join(&server, "first", ROOM_KEY));
     app.until("the call", connected);
     assert_eq!(KnownServers::at(app.known.clone()).get(&server.address).unwrap(), Some(server.fingerprint));
+}
+
+#[test]
+fn audio_that_doesnt_start_fails_the_call_and_leaves() {
+    let server = serve();
+    let mut other = App::new("audio-other");
+    other.join(&server, "second", ROOM_KEY);
+    other.until("the other's call", connected);
+
+    let mut app = App::new("audio");
+    app.devices.fails.store(true, Ordering::Relaxed);
+    app.join(&server, "first", ROOM_KEY);
+    app.until("the failure", |call| *call.phase() == Phase::Failed(Failure::Audio));
+    app.settle();
+    assert!(app.call.members().is_empty());
+    other.until("the other alone again", |call| call.members().len() == 1);
+
+    app.devices.fails.store(false, Ordering::Relaxed);
+    app.join(&server, "first", ROOM_KEY);
+    app.until("the call", connected);
+    assert_eq!(app.names(), ["second", "first"]);
 }
 
 #[test]
