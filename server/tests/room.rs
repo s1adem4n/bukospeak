@@ -190,6 +190,24 @@ async fn a_lost_member_shows_reconnecting_and_comes_back_or_leaves() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_member_nothing_comes_from_shows_reconnecting_until_it_is_heard_again() {
+    let server = serve();
+    let mut first = Session::join(config(&server, "first")).await.unwrap();
+    let relay = Relay::new(server.address).await;
+    let second = Session::join(JoinConfig { server: relay.address.to_string(), ..config(&server, "second") }).await.unwrap();
+    assert!(matches!(next(&mut first).await, Event::Joined(_)));
+
+    // Well before the connection would time out.
+    let soon = Duration::from_secs(5);
+    relay.cut.store(true, Ordering::Relaxed);
+    let Event::Changed(silent) = next_within(&mut first, soon).await else { panic!("the second member leaves") };
+    assert_eq!((silent.id, silent.reconnecting), (second.you(), true));
+    relay.cut.store(false, Ordering::Relaxed);
+    let Event::Changed(heard) = next_within(&mut first, soon).await else { panic!("the second member leaves") };
+    assert_eq!((heard.id, heard.reconnecting), (second.you(), false));
+}
+
 async fn next_within(session: &mut Session, within: Duration) -> Event {
     timeout(within, session.next_event()).await.expect("an event in time").unwrap()
 }

@@ -3,16 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ResumeToken, ServerMessage};
-use bukospeak_proto::{ALPN, Fingerprint, IDLE_TIMEOUT, MemberId, PROTOCOL_VERSION, SERVER_NAME, audio};
+use bukospeak_proto::{ALPN, Fingerprint, IDLE_TIMEOUT, KEEP_ALIVE, MemberId, PROTOCOL_VERSION, SERVER_NAME, audio};
 use bytes::Bytes;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use tokio::sync::mpsc;
 
 use crate::pin::PinVerifier;
-
-/// Often enough to keep NAT and Tailscale paths open, and well within the idle timeout.
-const KEEP_ALIVE: Duration = Duration::from_secs(5);
 
 /// How long a join may take, from resolving the server to its Welcome.
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -131,6 +128,12 @@ impl Session {
     /// A handle that sends this member's audio, for the thread that encodes it.
     pub fn audio_sender(&self) -> AudioSender {
         AudioSender { connection: Arc::new(Mutex::new(self.connection.clone())) }
+    }
+
+    /// How many datagrams came over the connection so far, keep-alives' acknowledgements among
+    /// them: while it stands still, nothing comes from the server.
+    pub fn received(&self) -> u64 {
+        self.connection.stats().udp_rx.datagrams
     }
 
     /// Mutes or unmutes this member for the others to see; the microphone's silence is its own.

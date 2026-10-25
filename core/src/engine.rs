@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use bukospeak_proto::{Fingerprint, MemberId};
+use bukospeak_proto::{Fingerprint, MemberId, SILENT_AFTER};
 use rtrb::{Producer, RingBuffer};
 use tokio::runtime::Runtime;
 use tokio::sync::{oneshot, watch};
@@ -251,6 +251,9 @@ async fn run(
     let mut watch = tokio::time::interval(SPEAKING_EVERY);
     watch.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let start = Instant::now();
+    // When something last came from the server, by the count of what came then.
+    let (mut received, mut heard) = (link.session.received(), Instant::now());
+    let mut silent = false;
     // A failed send means the engine is gone, and with it the listener; the call ends soon.
     let tell = |event| _ = events.send(event);
 
@@ -266,10 +269,20 @@ async fn run(
             }
             _ = watch.tick() => {
                 deliveries.retry();
+                let count = link.session.received();
+                if count != received {
+                    (received, heard) = (count, Instant::now());
+                }
+                if silent != (heard.elapsed() >= SILENT_AFTER) {
+                    silent = !silent;
+                    speakers.clear();
+                    tell(if silent { Event::Reconnecting } else { Event::Heard });
+                }
                 let mut now = speaking.members(you);
                 // Voices of members that left, or were in the lost session, may still play out.
                 now.retain(|id| *id == you || members.contains(id));
-                if now != speakers {
+                // Cut off from the others, nobody shows speaking.
+                if !silent && now != speakers {
                     speakers.clone_from(&now);
                     tell(Event::Speaking(now));
                 }
@@ -323,6 +336,7 @@ async fn run(
                 you = link.session.you();
                 members = others(&link.session);
                 speakers.clear();
+                (received, heard, silent) = (link.session.received(), Instant::now(), false);
                 tell(Event::Entered { you, members: link.session.members().to_vec() });
             }
             Err(rejoin) => return tell(Event::Lost(Lost { connection: lost, rejoin })),
@@ -401,6 +415,7 @@ impl Deliveries {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
     use bukospeak_proto::audio::{Level, SAMPLE_RATE};
@@ -464,10 +479,12 @@ mod tests {
     }
 
     /// A UDP relay in front of a server that can turn to another, as a server's address does
-    /// when the server restarts elsewhere.
+    /// when the server restarts elsewhere, or be cut both ways, as a phone's path is when it
+    /// loses the network.
     struct Relay {
         address: SocketAddr,
         upstream: Arc<Mutex<SocketAddr>>,
+        cut: Arc<AtomicBool>,
     }
 
     impl Relay {
@@ -476,29 +493,42 @@ mod tests {
             let (front, back) = runtime.block_on(async { (bind().await, bind().await) });
             let address = front.local_addr().unwrap();
             let upstream = Arc::new(Mutex::new(upstream));
+            let cut = Arc::new(AtomicBool::new(false));
             let client = Arc::new(Mutex::new(None));
             // Datagrams the relay can't pass on are lost, as on any path.
             runtime.spawn({
-                let (front, back, upstream, client) = (Arc::clone(&front), Arc::clone(&back), Arc::clone(&upstream), Arc::clone(&client));
+                let (front, back, upstream, cut, client) =
+                    (Arc::clone(&front), Arc::clone(&back), Arc::clone(&upstream), Arc::clone(&cut), Arc::clone(&client));
                 async move {
                     let mut datagram = [0; 65536];
                     while let Ok((length, from)) = front.recv_from(&mut datagram).await {
                         *client.lock().unwrap() = Some(from);
                         let to = *upstream.lock().unwrap();
-                        let _ = back.send_to(&datagram[..length], to).await;
+                        if !cut.load(Ordering::Relaxed) {
+                            let _ = back.send_to(&datagram[..length], to).await;
+                        }
                     }
                 }
             });
-            runtime.spawn(async move {
-                let mut datagram = [0; 65536];
-                while let Ok((length, _)) = back.recv_from(&mut datagram).await {
-                    let to = *client.lock().unwrap();
-                    if let Some(to) = to {
-                        let _ = front.send_to(&datagram[..length], to).await;
+            runtime.spawn({
+                let cut = Arc::clone(&cut);
+                async move {
+                    let mut datagram = [0; 65536];
+                    while let Ok((length, _)) = back.recv_from(&mut datagram).await {
+                        let to = *client.lock().unwrap();
+                        if let Some(to) = to
+                            && !cut.load(Ordering::Relaxed)
+                        {
+                            let _ = front.send_to(&datagram[..length], to).await;
+                        }
                     }
                 }
             });
-            Self { address, upstream }
+            Self { address, upstream, cut }
+        }
+
+        fn cut(&self, cut: bool) {
+            self.cut.store(cut, Ordering::Relaxed);
         }
 
         fn turn_to(&self, upstream: SocketAddr) {
@@ -592,6 +622,25 @@ mod tests {
             }
         });
         assert_eq!(from, you);
+    }
+
+    #[test]
+    fn a_server_nothing_comes_from_shows_reconnecting_until_it_is_heard_again() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let address = serve(&server, &identity).local_addr().unwrap();
+        let relay = Relay::new(&server, address);
+        let (engine, updates) = engine();
+        let _joined = engine.join(config(relay.address, &identity, "first")).unwrap();
+        let (you, _) = entered(&updates);
+
+        relay.cut(true);
+        let stalled = Instant::now();
+        announced(&updates, Announcement::Reconnecting);
+        assert!(stalled.elapsed() < Duration::from_secs(5), "noticed after {:?}", stalled.elapsed());
+        relay.cut(false);
+        let back = announced(&updates, Announcement::Reconnected);
+        assert_eq!((back.state(), back.you()), (State::Connected, Some(you)));
     }
 
     #[test]

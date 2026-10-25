@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bukospeak_proto::control::{self, ClientMessage, MAX_NAME_CHARS, Member, Rejection, ResumeToken, ServerMessage};
-use bukospeak_proto::{MemberId, PROTOCOL_VERSION, audio};
+use bukospeak_proto::{KEEP_ALIVE, MemberId, PROTOCOL_VERSION, SILENT_AFTER, audio};
 use bytes::Bytes;
 use quinn::{Connection, ConnectionError, Endpoint, Incoming, RecvStream, SendStream};
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 
 /// More than a group of friends needs, and few enough that relaying to all stays cheap.
 const MAX_MEMBERS: usize = 16;
@@ -108,6 +108,7 @@ impl Room {
                     () = deliver(send, outbox) => {}
                     () = self.relay(id, &connection) => {}
                     () = self.listen(id, &connection, recv) => {}
+                    () = self.notice_silence(id, &connection) => {}
                 }
                 if is_lost(&connection) && self.reconnecting(id, &connection) {
                     tokio::time::sleep(RESUME_GRACE).await;
@@ -209,6 +210,22 @@ impl Room {
         }
     }
 
+    /// Shows the member reconnecting while nothing comes from it for [`SILENT_AFTER`], and back
+    /// once something does again; the connection's end ends it.
+    async fn notice_silence(&self, id: MemberId, connection: &Connection) {
+        let mut check = tokio::time::interval(KEEP_ALIVE / 2);
+        let (mut received, mut heard) = (connection.stats().udp_rx.datagrams, Instant::now());
+        loop {
+            check.tick().await;
+            let now = connection.stats().udp_rx.datagrams;
+            if now != received {
+                (received, heard) = (now, Instant::now());
+            }
+            let silent = heard.elapsed() >= SILENT_AFTER;
+            self.change(id, connection, |peer| peer.reconnecting = silent);
+        }
+    }
+
     /// Shows the member as reconnecting while its place is held, if it is still on the lost
     /// `connection`; whether it is.
     fn reconnecting(&self, id: MemberId, connection: &Connection) -> bool {
@@ -219,13 +236,17 @@ impl Room {
         changed
     }
 
-    /// Changes the member and tells everyone, if it is still on `connection`; whether it is.
+    /// Changes the member and tells everyone if that changed it, if it is still on `connection`;
+    /// whether it is.
     fn change(&self, id: MemberId, connection: &Connection, change: impl FnOnce(&mut Peer)) -> bool {
         let mut members = self.members.lock().expect("the members lock is never poisoned");
         let Some(peer) = members.peers.get_mut(&id).filter(|peer| peer.is_on(connection)) else { return false };
+        let before = peer.member(id);
         change(peer);
         let member = peer.member(id);
-        members.tell(&ServerMessage::Changed { member });
+        if member != before {
+            members.tell(&ServerMessage::Changed { member });
+        }
         true
     }
 

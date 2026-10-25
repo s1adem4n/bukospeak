@@ -233,10 +233,12 @@ final class Call: NSObject {
         }
     }
 
-    /// Plays the call on the microphone and speaker exactly while it is connected, not held and
-    /// its audio session active: CallKit may activate the session before the join is done.
+    /// Plays the call on the microphone and speaker exactly while it is up, not held and its
+    /// audio session active: CallKit may activate the session before the join is done. It plays
+    /// on while reconnecting, which a dropout of seconds may be, and the engine keeps them.
     private func updateAudio() {
-        let plays = phase == .connected && !isHeld && isSessionActive && !isInterrupted
+        let isUp = phase == .connected || phase == .reconnecting
+        let plays = isUp && !isHeld && isSessionActive && !isInterrupted
         guard plays != isPlaying else { return }
         if plays {
             do throws(AudioError) {

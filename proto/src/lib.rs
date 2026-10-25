@@ -19,6 +19,14 @@ pub const ALPN: &[u8] = b"bukospeak/1";
 /// its pinned fingerprint, not by this name.
 pub const SERVER_NAME: &str = "bukospeak";
 
+/// How often a client sends at least a keep-alive, so the server notices soon when nothing
+/// comes from it.
+pub const KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Three keep-alives missed: a connection nothing came over this long shows reconnecting on
+/// either side, long before it times out.
+pub const SILENT_AFTER: std::time::Duration = KEEP_ALIVE.saturating_mul(3);
+
 /// A connection that stays silent this long is gone, on either side; clients send keep-alives
 /// well within it.
 pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);

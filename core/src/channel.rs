@@ -1,7 +1,7 @@
 //! The channel as this member sees it, kept from the engine's events: who is in it, who speaks,
 //! and whether the call is up; and what to tell the user aloud about each change.
 
-use std::fmt;
+use std::{fmt, mem};
 
 use bukospeak_proto::MemberId;
 use bukospeak_proto::control::Member;
@@ -23,8 +23,11 @@ pub(crate) enum Event {
     Left(MemberId),
     /// Who speaks now, in id order, this member among them; sent when it changes.
     Speaking(Vec<MemberId>),
-    /// The connection was lost, and the engine joins again.
+    /// Nothing came from the server for a while, or the connection was lost and the engine joins
+    /// again.
     Reconnecting,
+    /// Something came from the server again before the connection was lost.
+    Heard,
     /// The call ended with a leave.
     Ended,
     /// The call ended without a leave.
@@ -113,9 +116,13 @@ impl Channel {
                 None
             }
             Event::Reconnecting => {
-                self.state = State::Reconnecting;
+                let was = mem::replace(&mut self.state, State::Reconnecting);
                 self.speaking.clear();
-                Some(Announcement::Reconnecting)
+                (was == State::Connected).then_some(Announcement::Reconnecting)
+            }
+            Event::Heard => {
+                self.state = State::Connected;
+                Some(Announcement::Reconnected)
             }
             Event::Ended | Event::Lost(_) => {
                 *self = Self::default();
@@ -221,6 +228,20 @@ mod tests {
         assert_eq!(back.to_string(), "Wieder verbunden");
         assert_eq!(channel.you(), Some(MemberId(4)));
         assert_eq!(names(&channel), ["second", "first"]);
+    }
+
+    #[test]
+    fn a_silent_server_shows_reconnecting_once_until_it_is_heard_again() {
+        let mut channel = Channel::default();
+        channel.apply(&entered(1, &[member(1, "first")]));
+        assert_eq!(channel.apply(&Event::Reconnecting), Some(Announcement::Reconnecting));
+        // Then the connection is lost too.
+        assert_eq!(channel.apply(&Event::Reconnecting), None);
+        assert_eq!(channel.state(), State::Reconnecting);
+
+        assert_eq!(channel.apply(&Event::Heard), Some(Announcement::Reconnected));
+        assert_eq!(channel.state(), State::Connected);
+        assert_eq!(names(&channel), ["first"]);
     }
 
     #[test]
