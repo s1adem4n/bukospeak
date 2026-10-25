@@ -4,7 +4,7 @@
 use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    Animation, AnimationExt, App, FontWeight, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled, Window, div, relative,
+    Animation, AnimationExt, App, FontWeight, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled, Window, div,
 };
 
 use crate::ui::glyph::Glyph;
@@ -31,14 +31,14 @@ impl RenderOnce for Avatar {
             .size(self.size)
             .flex_none()
             .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
             .bg(background)
             .text_color(initial_color)
-            .text_size(self.size * 0.44)
-            // As high as the letter, so it sits in the middle and not on the line's lower part.
-            .line_height(relative(1.))
+            // One line as high as the circle: Inter puts a capital's middle on the middle of its
+            // line, so the letter is centered to the pixel, which centering a box around the
+            // letter's own fractional height is not.
+            .text_center()
+            .line_height(self.size)
+            .text_size((self.size * 0.44).round())
             .font_weight(FontWeight::SEMIBOLD)
             .child(initial)
     }
