@@ -43,12 +43,17 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ctrl-C, or the SIGTERM a container stop sends.
+/// Ctrl-C, or on Unix the SIGTERM a container stop sends.
 async fn shutdown() {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut terminate = signal(SignalKind::terminate()).expect("installing the SIGTERM handler");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = terminate.recv() => {}
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate()).expect("installing the SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
     }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.expect("installing the Ctrl-C handler");
 }
