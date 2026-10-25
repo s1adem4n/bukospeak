@@ -3,7 +3,8 @@
 //! The capture callback owns it and hands it one 10 ms frame at a time. It suppresses noise
 //! with RNNoise, lets the gate decide, and encodes every frame, sent or not, so the encoder
 //! stays warm and the frame index counts the sender's whole timeline. Nothing here allocates
-//! after construction.
+//! after construction but the first frame on each thread, where RNNoise's FFT sets up its plans
+//! and scratch buffers in thread-locals.
 
 use bukospeak_proto::audio::{FRAME_SAMPLES, Level, MAX_OPUS_LEN, SAMPLE_RATE};
 use nnnoiseless::DenoiseState;
