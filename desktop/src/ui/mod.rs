@@ -3,6 +3,7 @@
 
 mod certificate;
 mod channel;
+mod client;
 mod glyph;
 mod member;
 mod settings;
@@ -10,23 +11,20 @@ mod text;
 pub mod theme;
 mod welcome;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use bukospeak_audio_desktop::Direction;
-use bukospeak_desktop::call::{Call, Failure, Happening, Phase};
-use bukospeak_desktop::settings::{self as stored, Settings};
-use futures::StreamExt;
-use futures::channel::mpsc::UnboundedReceiver;
+use bukospeak_desktop::call::{Failure, Phase};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants};
 use gpui_kit::component::input::{Copy, Cut, InputEvent, InputState, Paste, SelectAll};
 use gpui_kit::component::native_menu::NativeMenu;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, Size, Theme, TitleBar, h_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, FontWeight, Image, ImageFormat, InteractiveElement, IntoElement,
-    ParentElement, Render, Styled, Subscription, Task, Window, actions, div,
+    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, FontWeight, Image, ImageFormat, InteractiveElement, IntoElement,
+    ParentElement, Render, Styled, Subscription, Window, WindowBounds, WindowOptions, actions, div, px, size,
 };
 
+pub use crate::ui::client::Client;
+use crate::ui::client::RoomKeyRead;
 pub use crate::ui::glyph::Assets;
 use crate::ui::glyph::Glyph;
 
@@ -43,6 +41,23 @@ actions!(
 
 /// The key context of the window's content, which Back is bound in.
 pub const CONTEXT: &str = "Main";
+
+/// Opens the window, which shows the client.
+pub fn open(client: Entity<Client>, cx: &mut App) {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(380.), px(560.)), cx))),
+        window_min_size: Some(size(px(320.), px(440.))),
+        app_id: Some("bukospeak".into()),
+        // The content draws the title bar, so it reaches up to the window's edge.
+        ..TitleBar::window_options()
+    };
+    gpui_kit::open_window(options, cx, |window, cx| {
+        Theme::sync_system_appearance(Some(window), cx);
+        cx.new(|cx| Main::new(client, window, cx))
+    })
+    .expect("the window opens");
+    cx.activate(true);
+}
 
 /// What went wrong with the settings themselves, beside the call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,164 +130,88 @@ enum Screen {
 }
 
 pub struct Main {
-    call: Call,
-    settings: Settings,
-    settings_path: PathBuf,
-    /// The room key; None until the keyring answered, or one is given before.
-    room_key: Option<String>,
+    client: Entity<Client>,
     screen: Screen,
-    trouble: Option<Trouble>,
     mark: Arc<Image>,
     focus: FocusHandle,
-    _happenings: Task<()>,
-    _room_key: Task<()>,
+    _client: [Subscription; 2],
     _appearance: Subscription,
 }
 
 impl Main {
-    pub fn new(
-        call: Call,
-        mut happenings: UnboundedReceiver<Happening>,
-        settings: Settings,
-        settings_path: PathBuf,
-        trouble: Option<Trouble>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        call.set_noise_suppression(settings.noise_suppression);
-        call.set_echo_cancellation(settings.echo_cancellation);
-        let happenings = cx.spawn(async move |this, cx| {
-            while let Some(happening) = happenings.next().await {
-                let applied = this.update(cx, |main, cx| {
-                    main.call.happen(happening);
-                    main.watch();
-                    cx.notify();
-                });
-                if applied.is_err() {
-                    break;
-                }
-            }
-        });
-        // The keyring may ask the system, and the system the user: not on the window's thread.
-        let room_key = cx.spawn_in(window, async move |this, cx| {
-            let read = cx.background_spawn(async { stored::room_key() }).await;
-            // The window may be gone before the keyring answered.
-            let _ = this.update_in(cx, |main, window, cx| main.read_room_key(read, window, cx));
-        });
+    pub fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let observed = cx.observe(&client, |_, _, cx| cx.notify());
+        let read = cx.subscribe_in(&client, window, |main, _, _: &RoomKeyRead, window, cx| main.read_room_key(window, cx));
         let appearance = cx.observe_window_appearance(window, |_, window, cx| Theme::sync_system_appearance(Some(window), cx));
+        // A closed window no longer shows who is in the channel.
+        cx.on_release(|main, cx| main.client.update(cx, |client, _| client.set_lobby(false))).detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut main = Self {
-            call,
-            settings,
-            settings_path,
-            room_key: None,
+            client,
             screen: Screen::Channel,
-            trouble,
             mark: Arc::new(Image::from_bytes(ImageFormat::Png, MARK.to_vec())),
             focus,
-            _happenings: happenings,
-            _room_key: room_key,
+            _client: [observed, read],
             _appearance: appearance,
         };
-        if main.settings.name.trim().is_empty() {
-            main.welcome(Step::Name, window, cx);
-        } else if main.settings.server.trim().is_empty() {
-            main.welcome(Step::Place, window, cx);
+        match main.missing(cx) {
+            Some(step) => main.welcome(step, window, cx),
+            None => main.show_channel(cx),
         }
         main
     }
 
-    /// Takes in the room key the keyring kept, unless one was given meanwhile, into an open
-    /// form's field too while it is empty; asks for it if there is none.
-    fn read_room_key(&mut self, read: Result<Option<String>, stored::Error>, window: &mut Window, cx: &mut Context<Self>) {
-        let key = read.unwrap_or_else(|error| {
-            tracing::warn!("the room key isn't readable: {error}");
-            self.trouble = Some(Trouble::RoomKeyUnreadable);
-            None
-        });
-        if self.room_key.is_some() {
-            return;
+    /// Takes the room key the keyring kept into an open form's field while it is empty; asks
+    /// for it if there is none.
+    fn read_room_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.client.read(cx).room_key().to_owned();
+        match &self.screen {
+            Screen::Welcome(form, _) | Screen::Settings(form, _) => {
+                if form.value(Field::RoomKey, cx).is_empty() {
+                    form.room_key.update(cx, |input, cx| input.set_value(key, window, cx));
+                }
+            }
+            Screen::Channel => {
+                if let Some(step) = self.missing(cx) {
+                    self.welcome(step, window, cx);
+                }
+            }
         }
-        let key = key.unwrap_or_default();
-        if let Screen::Welcome(form, _) | Screen::Settings(form, _) = &self.screen
-            && form.value(Field::RoomKey, cx).is_empty()
-        {
-            form.room_key.update(cx, |input, cx| input.set_value(key.clone(), window, cx));
-        }
-        self.room_key = Some(key);
-        if matches!(self.screen, Screen::Channel)
-            && let Some(step) = self.missing()
-        {
-            self.welcome(step, window, cx);
-        }
-        self.watch();
-        cx.notify();
     }
 
-    fn room_key(&self) -> &str {
-        self.room_key.as_deref().unwrap_or_default()
-    }
-
-    /// The welcome's step that asks for what is missing to join, if anything is.
-    fn missing(&self) -> Option<Step> {
-        if self.settings.name.trim().is_empty() {
+    /// The welcome's step that asks for what is missing to join, if anything is; the room key
+    /// only once the keyring answered.
+    fn missing(&self, cx: &App) -> Option<Step> {
+        let client = self.client.read(cx);
+        let settings = &client.settings;
+        if settings.name.trim().is_empty() {
             Some(Step::Name)
+        } else if settings.server.trim().is_empty() || client.is_room_key_read() && !settings.is_complete(client.room_key()) {
+            Some(Step::Place)
         } else {
-            (!self.settings.is_complete(self.room_key())).then_some(Step::Place)
+            None
         }
     }
 
     fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.missing() {
+        match self.missing(cx) {
             Some(step) => self.welcome(step, window, cx),
-            None => {
-                self.trouble = None;
-                self.call.join(self.settings.join(self.room_key()));
-            }
+            None => self.client.update(cx, |client, cx| client.join(cx)),
         }
-        cx.notify();
-    }
-
-    fn trust(&mut self, cx: &mut Context<Self>) {
-        self.call.trust(self.settings.join(self.room_key()));
-        cx.notify();
-    }
-
-    fn leave(&mut self, cx: &mut Context<Self>) {
-        self.call.leave();
-        self.watch();
-        cx.notify();
-    }
-
-    fn toggle_mute(&mut self, cx: &mut Context<Self>) {
-        self.call.set_muted(!self.call.is_muted());
-        cx.notify();
-    }
-
-    fn dismiss(&mut self, cx: &mut Context<Self>) {
-        self.call.dismiss();
-        self.watch();
-        cx.notify();
-    }
-
-    /// Watches who is in the channel while it is shown from outside.
-    fn watch(&mut self) {
-        let outside = matches!(self.call.phase(), Phase::Idle | Phase::Failed(_)) && matches!(self.screen, Screen::Channel);
-        let channel = (outside && self.settings.is_complete(self.room_key()))
-            .then(|| (self.settings.server.trim().to_owned(), self.room_key().to_owned()));
-        self.call.watch(channel);
     }
 
     /// Fields holding what is set now; Enter goes on from each as the screen they are on says.
     fn form(&self, window: &mut Window, cx: &mut Context<Self>) -> Form {
-        let mut input = |value: &str, placeholder: &'static str, masked: bool| {
-            let value = value.to_owned();
+        let client = self.client.read(cx);
+        let values = [client.settings.name.clone(), client.settings.server.clone(), client.room_key().to_owned()];
+        let [name, server, room_key] = values;
+        let mut input = |value: String, placeholder: &'static str, masked: bool| {
             cx.new(|cx| InputState::new(window, cx).default_value(value).placeholder(placeholder).masked(masked))
         };
-        let name = input(&self.settings.name, "Name", false);
-        let server = input(&self.settings.server, "server.example:9988", false);
-        let room_key = input(self.room_key(), "Raumschlüssel", true);
+        let name = input(name, "Name", false);
+        let server = input(server, "server.example:9988", false);
+        let room_key = input(room_key, "Raumschlüssel", true);
         let events = [(Field::Name, &name), (Field::Server, &server), (Field::RoomKey, &room_key)]
             .into_iter()
             .map(|(field, input)| {
@@ -299,12 +238,25 @@ impl Main {
         }
     }
 
+    /// Shows a screen other than the channel, so who is in it isn't watched meanwhile.
+    fn show(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        self.screen = screen;
+        self.client.update(cx, |client, _| client.set_lobby(false));
+        cx.notify();
+    }
+
+    /// Shows the channel, from outside it while not in the call; the focus goes from the
+    /// fields of the screen before.
+    fn show_channel(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Channel;
+        self.client.update(cx, |client, _| client.set_lobby(true));
+        cx.notify();
+    }
+
     fn welcome(&mut self, step: Step, window: &mut Window, cx: &mut Context<Self>) {
         let form = self.form(window, cx);
         form.focus_empty(step.fields(), window, cx);
-        self.screen = Screen::Welcome(form, step);
-        self.watch();
-        cx.notify();
+        self.show(Screen::Welcome(form, step), cx);
     }
 
     /// From the name on to the place, once there is a name.
@@ -315,6 +267,14 @@ impl Main {
         }
         *step = Step::Place;
         form.focus_empty(Step::Place.fields(), window, cx);
+        cx.notify();
+    }
+
+    /// From the place back to the name.
+    fn previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Screen::Welcome(form, step @ Step::Place) = &mut self.screen else { return };
+        *step = Step::Name;
+        form.focus_empty(Step::Name.fields(), window, cx);
         cx.notify();
     }
 
@@ -329,80 +289,31 @@ impl Main {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.call.dismiss();
-        self.screen = Screen::Settings(self.form(window, cx), self.audio(window, cx));
+        self.client.update(cx, |client, cx| client.dismiss(cx));
+        let screen = Screen::Settings(self.form(window, cx), self.audio(window, cx));
         window.focus(&self.focus, cx);
-        self.watch();
-        cx.notify();
+        self.show(screen, cx);
     }
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.keep(window, cx);
-        self.watch();
-        cx.notify();
     }
 
-    /// Takes in what the form says, keeps it, and goes back to the channel, which takes the
-    /// focus from the form's fields.
+    /// Keeps what the form says and goes back to the channel, which takes the focus from the
+    /// form's fields.
     fn keep(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Screen::Welcome(form, _) | Screen::Settings(form, _)) = std::mem::replace(&mut self.screen, Screen::Channel) else {
             return;
         };
         window.focus(&self.focus, cx);
-        let settings = Settings { name: form.value(Field::Name, cx), server: form.value(Field::Server, cx), ..self.settings.clone() };
-        if settings != self.settings {
-            if let Err(error) = settings.save(&self.settings_path) {
-                tracing::warn!("{error}");
-                self.trouble = Some(Trouble::NotSaved);
-            }
-            self.settings = settings;
-        }
-        let room_key = form.value(Field::RoomKey, cx);
-        if room_key != self.room_key() {
-            self.room_key = Some(room_key.clone());
-            cx.spawn(async move |this, cx| {
-                let kept = cx.background_spawn(async move { stored::set_room_key(&room_key) }).await;
-                if let Err(error) = kept {
-                    tracing::warn!("the room key isn't kept: {error}");
-                    // The window may be gone before the keyring answered.
-                    let _ = this.update(cx, |main, cx| {
-                        main.trouble = Some(Trouble::RoomKeyNotKept);
-                        cx.notify();
-                    });
-                }
-            })
-            .detach();
-        }
-    }
-
-    /// Changes a setting the call takes at once, and keeps it.
-    fn change(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        edit(&mut self.settings);
-        if let Err(error) = self.settings.save(&self.settings_path) {
-            tracing::warn!("{error}");
-            self.trouble = Some(Trouble::NotSaved);
-        }
-        cx.notify();
-    }
-
-    fn set_device(&mut self, direction: Direction, id: Option<String>, cx: &mut Context<Self>) {
-        self.change(|settings| settings.set_device_id(direction, id), cx);
-        self.call.set_device(direction, self.settings.device(direction));
-    }
-
-    fn set_noise_suppression(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.change(|settings| settings.noise_suppression = on, cx);
-        self.call.set_noise_suppression(on);
-    }
-
-    fn set_echo_cancellation(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.change(|settings| settings.echo_cancellation = on, cx);
-        self.call.set_echo_cancellation(on);
+        let [name, server, room_key] = [Field::Name, Field::Server, Field::RoomKey].map(|field| form.value(field, cx));
+        self.client.update(cx, |client, cx| client.keep(name, server, room_key, cx));
+        self.show_channel(cx);
     }
 
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.call.phase(), Phase::Failed(Failure::CertificateChanged { .. })) {
-            self.dismiss(cx);
+        if matches!(self.client.read(cx).call.phase(), Phase::Failed(Failure::CertificateChanged { .. })) {
+            self.client.update(cx, |client, cx| client.dismiss(cx));
             return;
         }
         match &self.screen {
@@ -410,14 +321,6 @@ impl Main {
             Screen::Welcome(_, Step::Place) => self.previous(window, cx),
             Screen::Welcome(_, Step::Name) | Screen::Channel => cx.propagate(),
         }
-    }
-
-    /// From the place back to the name.
-    fn previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Screen::Welcome(form, step @ Step::Place) = &mut self.screen else { return };
-        *step = Step::Name;
-        form.focus_empty(Step::Name.fields(), window, cx);
-        cx.notify();
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> TitleBar {
@@ -463,7 +366,8 @@ impl Main {
     /// trouble.
     fn render_message(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme();
-        let message = match (self.call.notice(), self.trouble) {
+        let client = self.client.read(cx);
+        let message = match (client.call.notice(), client.trouble) {
             (Some(notice), _) => text::notice(notice),
             (None, Some(trouble)) => text::trouble(trouble),
             (None, None) => return None,
@@ -488,8 +392,8 @@ impl Render for Main {
             Screen::Welcome(form, step) => self.render_welcome(form, *step, cx).into_any_element(),
             Screen::Settings(form, audio) => self.render_settings(form, audio, cx).into_any_element(),
         };
-        let certificate = match self.call.phase() {
-            Phase::Failed(Failure::CertificateChanged { pinned, presented, .. }) => Some(self.render_certificate(*pinned, *presented, cx)),
+        let certificate = match *self.client.read(cx).call.phase() {
+            Phase::Failed(Failure::CertificateChanged { pinned, presented, .. }) => Some(self.render_certificate(pinned, presented, cx)),
             _ => None,
         };
         let theme = cx.theme();

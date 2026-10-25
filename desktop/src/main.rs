@@ -10,11 +10,10 @@ use std::io::IsTerminal;
 use bukospeak_desktop::call::{Call, DesktopPlayer};
 use bukospeak_desktop::known_servers::KnownServers;
 use bukospeak_desktop::settings::Settings;
-use gpui_kit::component::{Theme, TitleBar};
-use gpui_kit::{AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
+use gpui_kit::{AppContext, KeyBinding};
 use tracing_subscriber::EnvFilter;
 
-use crate::ui::{Back, CONTEXT, Main, Trouble};
+use crate::ui::{Back, CONTEXT, Client, Trouble};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -45,18 +44,7 @@ fn main() {
             }
         })
         .detach();
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(380.), px(560.)), cx))),
-            window_min_size: Some(size(px(320.), px(440.))),
-            app_id: Some("bukospeak".into()),
-            // The content draws the title bar, so it reaches up to the window's edge.
-            ..TitleBar::window_options()
-        };
-        gpui_kit::open_window(options, cx, |window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
-            cx.new(|cx| Main::new(call, happenings, settings, settings_path, trouble, window, cx))
-        })
-        .expect("the window opens");
-        cx.activate(true);
+        let client = cx.new(|cx| Client::new(call, happenings, settings, settings_path, trouble, cx));
+        ui::open(client, cx);
     });
 }

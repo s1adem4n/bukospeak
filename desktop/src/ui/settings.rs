@@ -12,6 +12,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, Subscription, Task, Window, div, px,
 };
 
+use crate::ui::client::Client;
 use crate::ui::{Form, Main, Screen, edit_menu, theme};
 
 /// How far a row's label lies inside the card, and the group's title with it.
@@ -69,7 +70,7 @@ pub(super) struct Audio {
 impl Main {
     pub(super) fn audio(&self, window: &mut Window, cx: &mut Context<Self>) -> Audio {
         let select = |direction: Direction, window: &mut Window, cx: &mut Context<Self>| {
-            let kept = self.settings.device_id(direction).map(str::to_owned);
+            let kept = self.client.read(cx).settings.device_id(direction).map(str::to_owned);
             let select = cx.new(|cx| {
                 // Until the devices are listed only the kept one is known, by its id.
                 let known = Choice { id: kept.clone(), title: kept.clone().unwrap_or_else(|| "Standard".into()).into(), missing: false };
@@ -79,7 +80,7 @@ impl Main {
             });
             let events = cx.subscribe_in(&select, window, move |main, _, event: &SelectEvent<Vec<Choice>>, _, cx| {
                 let SelectEvent::Confirm(Some(id)) = event else { return };
-                main.set_device(direction, id.clone(), cx);
+                main.client.update(cx, |client, cx| client.set_device(direction, id.clone(), cx));
             });
             (select, events)
         };
@@ -100,7 +101,7 @@ impl Main {
                 for (select, devices, direction) in
                     [(&audio.input, &inputs, Direction::Input), (&audio.output, &outputs, Direction::Output)]
                 {
-                    let kept = main.settings.device_id(direction).map(str::to_owned);
+                    let kept = main.client.read(cx).settings.device_id(direction).map(str::to_owned);
                     select.update(cx, |select, cx| {
                         select.set_items(
                             choices(devices.iter().map(|device| (device.id.to_string(), device.name.clone())), kept.as_deref()),
@@ -118,13 +119,14 @@ impl Main {
     pub(super) fn render_settings(&self, form: &Form, audio: &Audio, cx: &mut Context<Self>) -> impl IntoElement {
         let field = |input: &Entity<InputState>| Input::new(input).appearance(false).large().context_menu(edit_menu).into_any_element();
         let device = |id: &'static str, select: &DeviceSelect| Select::new(select).id(id).appearance(false).large().into_any_element();
-        let switch = |id: &'static str, on: bool, set: fn(&mut Main, bool, &mut Context<Main>)| {
-            let main = cx.entity().downgrade();
+        let settings = &self.client.read(cx).settings;
+        let switch = |id: &'static str, on: bool, set: fn(&mut Client, bool, &mut Context<Client>)| {
+            let client = self.client.downgrade();
             div()
                 .pr_2()
                 .child(Switch::new(id).checked(on).on_change(move |on, _, cx| {
                     // The window may be gone with the click.
-                    let _ = main.update(cx, |main, cx| set(main, *on, cx));
+                    let _ = client.update(cx, |client, cx| set(client, *on, cx));
                 }))
                 .into_any_element()
         };
@@ -148,8 +150,8 @@ impl Main {
                     vec![
                         Row::field("Mikrofon", device("input", &audio.input)),
                         Row::field("Ausgabe", device("output", &audio.output)),
-                        Row::switch("Rauschunterdrückung", switch("noise", self.settings.noise_suppression, Main::set_noise_suppression)),
-                        Row::switch("Echounterdrückung", switch("echo", self.settings.echo_cancellation, Main::set_echo_cancellation)),
+                        Row::switch("Rauschunterdrückung", switch("noise", settings.noise_suppression, Client::set_noise_suppression)),
+                        Row::switch("Echounterdrückung", switch("echo", settings.echo_cancellation, Client::set_echo_cancellation)),
                     ],
                     cx,
                 )),

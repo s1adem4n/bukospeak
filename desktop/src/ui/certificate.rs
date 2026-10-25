@@ -64,14 +64,14 @@ impl Main {
                                     .secondary()
                                     .rounded(ButtonRounded::Medium)
                                     .label("Abbrechen")
-                                    .on_click(cx.listener(|main, _, _, cx| main.dismiss(cx))),
+                                    .on_click(cx.listener(|main, _, _, cx| main.client.update(cx, |client, cx| client.dismiss(cx)))),
                             )
                             .child(
                                 Button::new("trust")
                                     .danger()
                                     .rounded(ButtonRounded::Medium)
                                     .label("Vertrauen")
-                                    .on_click(cx.listener(|main, _, _, cx| main.trust(cx))),
+                                    .on_click(cx.listener(|main, _, _, cx| main.client.update(cx, |client, cx| client.trust(cx)))),
                             ),
                     )
                     .with_animation("certificate", Animation::new(theme::APPEAR).with_easing(gpui_kit::ease_out_quint()), |card, delta| {

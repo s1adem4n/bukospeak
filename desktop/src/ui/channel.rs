@@ -14,41 +14,27 @@ use crate::ui::{Main, Tone, control, primary, text, theme};
 
 impl Main {
     pub(super) fn render_channel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<Row> = if self.call.is_in_call() {
-            let you = self.call.you();
-            let members = self.call.members().iter();
+        let call = &self.client.read(cx).call;
+        let rows: Vec<Row> = if call.is_in_call() {
+            let you = call.you();
+            let members = call.members().iter();
             members
                 .map(|member| {
                     let yours = Some(member.id) == you;
                     // One's own as set here, before the server tells it back.
-                    let muted = if yours { self.call.is_muted() } else { member.muted };
-                    let speaks = self.call.speaking().contains(&member.id);
+                    let muted = if yours { call.is_muted() } else { member.muted };
+                    let speaks = call.speaking().contains(&member.id);
                     Row::new(member.id.0, member.name.clone(), speaks, muted, member.reconnecting).yours(yours)
                 })
                 .collect()
         } else {
-            let present = self.call.present().iter();
+            let present = call.present().iter();
             present.map(|member| Row::new(member.id.0, member.name.clone(), false, member.muted, member.reconnecting)).collect()
         };
-        let list = if rows.is_empty() { self.render_empty(cx) } else { self.render_list(rows) };
+        let reconnecting = *call.phase() == Phase::Reconnecting;
+        let list = if rows.is_empty() { self.render_empty(cx) } else { render_list(rows, reconnecting) };
         let message = self.render_message(cx).map(|message| div().px(theme::GUTTER).pb_2().child(message));
         v_flex().flex_1().min_h_0().child(list).children(message).child(self.render_bar(cx))
-    }
-
-    fn render_list(&self, rows: Vec<Row>) -> AnyElement {
-        div()
-            .id("members")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .px(theme::GUTTER - theme::ROW_INSET)
-            .py_1()
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .when(*self.call.phase() == Phase::Reconnecting, |list| list.opacity(theme::RECONNECTING_OPACITY))
-            .children(rows)
-            .into_any_element()
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -67,7 +53,9 @@ impl Main {
     /// How the call is, on the left; on the right Beitreten, or in the call mute and leave.
     fn render_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (status, color) = match self.call.phase() {
+        let client = self.client.read(cx);
+        let call = &client.call;
+        let (status, color) = match call.phase() {
             Phase::Idle => ("Nicht verbunden", theme.muted_foreground),
             Phase::Joining => ("Verbinde…", theme.muted_foreground),
             Phase::Connected => ("Verbunden", theme::speaking(theme.is_dark())),
@@ -75,20 +63,20 @@ impl Main {
             Phase::Failed(failure) => (text::failure(failure), theme.danger),
         };
         let (surface, quiet) = (theme.muted, theme.muted_foreground);
-        let actions: Vec<AnyElement> = if self.call.is_in_call() {
-            let mute = if self.call.is_muted() {
+        let actions: Vec<AnyElement> = if call.is_in_call() {
+            let mute = if call.is_muted() {
                 control("mute", Glyph::MicOff, "Stummschaltung aufheben", Tone::Off, cx)
             } else {
                 control("mute", Glyph::Mic, "Stummschalten", Tone::Plain, cx)
             };
             vec![
-                mute.on_click(cx.listener(|main, _, _, cx| main.toggle_mute(cx))).into_any_element(),
+                mute.on_click(cx.listener(|main, _, _, cx| main.client.update(cx, |client, cx| client.toggle_mute(cx)))).into_any_element(),
                 control("leave", Glyph::PhoneOff, "Verlassen", Tone::End, cx)
-                    .on_click(cx.listener(|main, _, _, cx| main.leave(cx)))
+                    .on_click(cx.listener(|main, _, _, cx| main.client.update(cx, |client, cx| client.leave(cx))))
                     .into_any_element(),
             ]
         } else {
-            let joining = *self.call.phase() == Phase::Joining;
+            let joining = *call.phase() == Phase::Joining;
             vec![
                 primary("join", "Beitreten")
                     .h(theme::CONTROL)
@@ -121,8 +109,25 @@ impl Main {
                             .child(div().flex_none().size_1p5().rounded_full().bg(color))
                             .child(div().truncate().child(status)),
                     )
-                    .child(div().text_size(theme::TEXT_XS).text_color(quiet).truncate().child(self.settings.server.clone())),
+                    .child(div().text_size(theme::TEXT_XS).text_color(quiet).truncate().child(client.settings.server.clone())),
             )
             .children(actions)
     }
+}
+
+/// Who is in the channel, faded while the call reconnects.
+fn render_list(rows: Vec<Row>, reconnecting: bool) -> AnyElement {
+    div()
+        .id("members")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px(theme::GUTTER - theme::ROW_INSET)
+        .py_1()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .when(reconnecting, |list| list.opacity(theme::RECONNECTING_OPACITY))
+        .children(rows)
+        .into_any_element()
 }
