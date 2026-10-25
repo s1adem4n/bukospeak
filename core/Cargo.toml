@@ -14,7 +14,7 @@ bytes.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 
 [lints]
 workspace = true

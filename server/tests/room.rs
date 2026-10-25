@@ -75,3 +75,16 @@ async fn the_first_join_learns_the_fingerprint_and_a_changed_one_is_refused() {
     let Err(Error::FingerprintChanged { pinned, presented }) = joined else { panic!("joined despite a changed certificate") };
     assert_eq!((pinned, presented), (stale, server.fingerprint));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_server_that_never_answers_times_the_join_out() {
+    let identity = Identity::generate().unwrap();
+    let silent = endpoint(&identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let server = Server { address: silent.local_addr().unwrap(), fingerprint: identity.fingerprint() };
+    // It completes the handshake but never reads the Hello.
+    tokio::spawn(async move {
+        let connection = silent.accept().await.unwrap().await.unwrap();
+        connection.closed().await;
+    });
+    assert!(matches!(Session::join(config(&server, "first")).await, Err(Error::TimedOut)));
+}

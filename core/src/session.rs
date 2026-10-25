@@ -14,6 +14,9 @@ use crate::pin::PinVerifier;
 /// Often enough to keep NAT and Tailscale paths open, and well within the idle timeout.
 const KEEP_ALIVE: Duration = Duration::from_secs(5);
 
+/// How long a join may take, from resolving the server to its Welcome.
+pub const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct JoinConfig {
     /// The server as `host:port`.
     pub server: String,
@@ -41,6 +44,8 @@ pub enum Error {
     Protocol(&'static str),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("the server didn't answer within {} s", JOIN_TIMEOUT.as_secs())]
+    TimedOut,
 }
 
 /// What happens in the channel after the join.
@@ -64,7 +69,13 @@ pub struct Session {
 }
 
 impl Session {
+    /// Joins the channel, or fails if the server doesn't welcome this member within
+    /// [`JOIN_TIMEOUT`].
     pub async fn join(config: JoinConfig) -> Result<Self, Error> {
+        tokio::time::timeout(JOIN_TIMEOUT, Self::join_unbounded(config)).await.unwrap_or(Err(Error::TimedOut))
+    }
+
+    async fn join_unbounded(config: JoinConfig) -> Result<Self, Error> {
         let server = tokio::net::lookup_host(&config.server).await?.next().ok_or_else(|| Error::Resolve(config.server.clone()))?;
         let endpoint = Endpoint::client(unspecified_like(server))?;
 

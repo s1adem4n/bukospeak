@@ -21,7 +21,7 @@ A datagram is a 7-byte header and the Opus packet:
 | Bytes | Field |
 |---|---|
 | 0–1 | sender's id, stamped by the server |
-| 2–5 | frame index on the sender's 10 ms timeline: it counts every encoded frame, sent or not, so it is a timestamp |
+| 2–5 | frame index on the sender's 10 ms timeline: it counts every encoded frame, sent or not, so it is a timestamp. It keeps counting while the audio engine rebuilds its streams, since the capture outlives them; a receiver that sees it start over treats it as a new timeline |
 | 6 | bit 7: last frame of a talkspurt; bits 0–6: the frame's level in −dBov, as in RFC 6464 |
 
 ## Threads

@@ -79,7 +79,9 @@ async fn join(server: String, name: String, room_key: String) -> anyhow::Result<
             }
             Event::Left(id) => {
                 speaking.remove(&id);
-                println!("{} left", names.remove(&id).unwrap_or_default());
+                if let Some(name) = names.remove(&id) {
+                    println!("{name} left");
+                }
             }
             Event::Audio(frame) => {
                 let name = names.get(&frame.from).map_or("someone", String::as_str);

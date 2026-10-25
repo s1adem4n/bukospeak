@@ -137,8 +137,10 @@ impl JitterBuffer {
             && distance(over, packet.index) <= -(SLOTS as i64)
             && self.oldest_pending().is_none()
         {
-            // Far behind the last talkspurt is no straggler: the sender's timeline started over.
+            // Far behind the last talkspurt is no straggler: the sender's timeline started over,
+            // and the delays measured on the old one don't compare with the new.
             self.state = State::Idle { over: None, waited };
+            self.jitter = Jitter::default();
         }
         if let State::Idle { over, waited } = self.state
             && self.oldest_pending().is_none()
@@ -280,7 +282,9 @@ impl JitterBuffer {
 
     /// Frames held from `next` on, counting the gaps between them.
     fn ahead(&self, next: u32) -> u32 {
-        self.newest_pending().map_or(0, |newest| distance(next, newest) as u32 + 1)
+        // A next talkspurt held already doesn't make this one too full.
+        let end = self.pending_frames().filter(|packet| packet.last).map(|packet| packet.index).min_by_key(|&index| distance(next, index));
+        end.or_else(|| self.newest_pending()).map_or(0, |newest| distance(next, newest) as u32 + 1)
     }
 
     fn should_drop(&self, next: u32, level: Level) -> bool {
@@ -346,15 +350,16 @@ fn slot(index: u32) -> usize {
     index as usize % SLOTS
 }
 
-/// The spread of the arrival delay over the last two seconds, in [`Jitter::BUCKETS`] buckets of
-/// 200 ms.
+/// The spread of the arrival delay over the last 200 frames received, two seconds of speech, in
+/// [`Jitter::BUCKETS`] buckets of [`Jitter::BUCKET_FRAMES`]. Counting frames rather than time
+/// keeps the estimate through pauses, so a talkspurt starts with the delay the last one needed.
 ///
 /// A frame's relative delay is its arrival time minus its place on the sender's timeline. The
 /// clocks' offset cancels out of the spread, and their drift barely shows in two seconds.
 #[derive(Default)]
 struct Jitter {
     buckets: [Option<Bucket>; Jitter::BUCKETS],
-    newest: u64,
+    received: u64,
     /// The last frame's index, and its place on a timeline that doesn't wrap around.
     last: Option<(u32, i64)>,
 }
@@ -368,14 +373,15 @@ struct Bucket {
 
 impl Jitter {
     const BUCKETS: usize = 10;
-    const BUCKET_US: u64 = 200_000;
+    const BUCKET_FRAMES: u64 = 20;
 
     fn observe(&mut self, index: u32, arrival_us: u64) {
         // Unwrapped, an index wrapping around to 0 doesn't look like a jump of 497 days.
         let unwrapped = self.last.map_or(i64::from(index), |(last, unwrapped)| unwrapped + distance(last, index));
         self.last = Some((index, unwrapped));
         let delay = arrival_us as i64 - unwrapped * FRAME_US as i64;
-        let id = arrival_us / Self::BUCKET_US;
+        let id = self.received / Self::BUCKET_FRAMES;
+        self.received += 1;
         let bucket = &mut self.buckets[id as usize % Self::BUCKETS];
         match bucket {
             Some(bucket) if bucket.id == id => {
@@ -384,11 +390,11 @@ impl Jitter {
             }
             _ => *bucket = Some(Bucket { id, min: delay, max: delay }),
         }
-        self.newest = id.max(self.newest);
     }
 
     fn target(&self) -> u32 {
-        let recent = self.buckets.iter().flatten().filter(|bucket| bucket.id + Self::BUCKETS as u64 > self.newest);
+        let newest = self.received.saturating_sub(1) / Self::BUCKET_FRAMES;
+        let recent = self.buckets.iter().flatten().filter(|bucket| bucket.id + Self::BUCKETS as u64 > newest);
         let (min, max) = recent.fold((i64::MAX, i64::MIN), |(min, max), bucket| (min.min(bucket.min), max.max(bucket.max)));
         if min > max {
             return MIN_TARGET;
@@ -540,6 +546,23 @@ mod tests {
         }
         assert_eq!(Played::from(buffer.pop()), Played::Frame(100 - SLOTS as u32));
         assert_eq!(buffer.stats().discarded, 0);
+    }
+
+    #[test]
+    fn a_next_talkspurt_held_already_doesn_t_make_this_one_too_full() {
+        let mut buffer = JitterBuffer::default();
+        for index in (0..14).chain(20..30) {
+            buffer.insert(packet(index, index == 13 || index == 29, 0));
+        }
+        let played: Vec<Played> = (0..14).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, (0..14).map(Played::Frame).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_target_holds_through_a_pause() {
+        let simulation = Simulation { jitter_us: 40_000, ..Simulation::default() };
+        let (_, buffer) = simulation.run((0..500).chain(1000..1001), 15 * SECOND_US);
+        assert_eq!(buffer.target(), 5);
     }
 
     #[test]
