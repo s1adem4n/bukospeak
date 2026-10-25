@@ -104,7 +104,9 @@ impl Channel {
         match event {
             Event::Entered { call, you, members } => {
                 let rejoined = self.state == State::Reconnecting;
-                *self = Self { call: *call, state: State::Connected, you: Some(*you), members: members.clone(), ..Self::default() };
+                let present = mem::take(&mut self.present);
+                *self =
+                    Self { call: *call, state: State::Connected, you: Some(*you), members: members.clone(), present, ..Self::default() };
                 rejoined.then_some(Announcement::Reconnected)
             }
             Event::Joined(member) => {
@@ -133,8 +135,9 @@ impl Channel {
                 self.state = State::Connected;
                 Some(Announcement::Reconnected)
             }
+            // Who is present is the watch's, which may have started again before the leave ended.
             Event::Ended | Event::Lost(_) => {
-                *self = Self { call: self.call, ..Self::default() };
+                *self = Self { call: self.call, present: mem::take(&mut self.present), ..Self::default() };
                 None
             }
             Event::Present(members) => {
@@ -265,6 +268,20 @@ mod tests {
             assert_eq!(channel.state(), State::Out);
             assert_eq!(channel.you(), None);
             assert_eq!(names(&channel), [] as [&str; 0]);
+        }
+    }
+
+    #[test]
+    fn only_the_watch_tells_who_is_present() {
+        let lost = || Lost { connection: Error::TimedOut, rejoin: Error::TimedOut };
+        for end in [Event::Ended, Event::Lost(lost())] {
+            let mut channel = Channel::default();
+            channel.apply(&Event::Present(vec![member(1, "first")]));
+            channel.apply(&entered(2, &[member(1, "first"), member(2, "second")]));
+            // The watch, started again on leaving, tells who is there before the leave ends.
+            channel.apply(&Event::Present(vec![member(1, "first"), member(2, "second")]));
+            channel.apply(&end);
+            assert_eq!(channel.present(), [member(1, "first"), member(2, "second")]);
         }
     }
 }
