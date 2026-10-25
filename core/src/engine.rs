@@ -87,7 +87,10 @@ impl Engine {
 
     /// Joins the channel, after leaving the call before if there is one.
     pub fn join(&self, config: JoinConfig) -> Result<Joined, Error> {
-        self.leave();
+        // Held until the call is in place, so a leave meanwhile, say from the listener's
+        // thread, waits for the join and then ends its call instead of missing it.
+        let mut call = self.call.lock().expect("the call lock is never poisoned");
+        self.end(call.take());
         // libopus creates codecs without fail for the fixed formats asked for.
         let capture = Capture::new().expect("the encoder can be created");
         let mixer = Mixer::new().expect("the decoders can be created");
@@ -101,7 +104,7 @@ impl Engine {
 
         let (stop, stopped) = oneshot::channel();
         let task = self.runtime.spawn(run(session, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
-        *self.call.lock().expect("the call lock is never poisoned") = Some(Call { stop, task });
+        *call = Some(Call { stop, task });
         Ok(Joined {
             you,
             members,
@@ -113,15 +116,20 @@ impl Engine {
 
     /// Leaves the call, if there is one, once the server knows.
     pub fn leave(&self) {
-        let Some(call) = self.call.lock().expect("the call lock is never poisoned").take() else { return };
-        // A call that ended by itself no longer listens.
-        let _ = call.stop.send(());
-        self.runtime.block_on(call.task).expect("the call task doesn't panic");
+        let mut call = self.call.lock().expect("the call lock is never poisoned");
+        self.end(call.take());
     }
 
     /// Whether the microphone's noise is suppressed (the default), or sent as captured.
     pub fn set_noise_suppression(&self, on: bool) {
         self.settings.noise_suppression.store(on, Ordering::Relaxed);
+    }
+
+    fn end(&self, call: Option<Call>) {
+        let Some(call) = call else { return };
+        // A call that ended by itself no longer listens.
+        let _ = call.stop.send(());
+        self.runtime.block_on(call.task).expect("the call task doesn't panic");
     }
 }
 
