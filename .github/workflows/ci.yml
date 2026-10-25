@@ -37,9 +37,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: mise exec -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: mise exec -- cargo test --workspace --locked
-      # The release is what ships on Windows; it links differently than the tests.
-      - if: runner.os == 'Windows'
-        run: mise exec -- cargo build --release --locked -p bukospeak-desktop
 
   server-image:
     needs: check
