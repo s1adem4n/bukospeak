@@ -53,11 +53,16 @@ jobs:
       - run: dotnet tool install --global vpk --version 1.3.39-g8d2844f
       # Only what is installed: the app.
       - run: mkdir staging && cp target/release/bukospeak-desktop.exe staging/
+      # The tag's message, which the release and the installed app show as what it brings.
+      - run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
       # The last release, if there is one, from which the update is packed as a delta too.
       - run: vpk download github --repoUrl "$REPOSITORY" --token "$GH_TOKEN"
       - run: >-
           vpk pack --packId BukoSpeak --packVersion "$VERSION" --packTitle BukoSpeak
           --packDir staging --mainExe bukospeak-desktop.exe --icon desktop/windows/icon.ico
+          --releaseNotes notes.md
       - run: >-
           vpk upload github --repoUrl "$REPOSITORY" --token "$GH_TOKEN" --publish --merge
           --tag "$GITHUB_REF_NAME" --releaseName "BukoSpeak $VERSION"
@@ -104,15 +109,25 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ env.FOLDER }}.tar.gz
 
-  # The archives go to the release the Windows job made, the Windows one among them.
+  # The archives go to the release the Windows job made, the Windows one among them, then the
+  # tag's message as its notes and the checksums of all its files.
   attach:
     needs: [windows, archive]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: archives
           merge-multiple: true
-      - run: gh release upload "$GITHUB_REF_NAME" archives/* --repo "$GITHUB_REPOSITORY"
+      - run: gh release upload "$GITHUB_REF_NAME" archives/*
+      - run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+      - run: |
+          gh release download "$GITHUB_REF_NAME" --dir release
+          (cd release && sha256sum -- * > ../SHA256SUMS)
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS
