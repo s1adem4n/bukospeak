@@ -19,6 +19,10 @@ pub const ALPN: &[u8] = b"bukospeak/1";
 /// its pinned fingerprint, not by this name.
 pub const SERVER_NAME: &str = "bukospeak";
 
+/// A connection that stays silent this long is gone, on either side; clients send keep-alives
+/// well within it.
+pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// The UDP port the server listens on unless told otherwise. TeamSpeak's 9987 is taken next to it.
 pub const DEFAULT_PORT: u16 = 9988;
 

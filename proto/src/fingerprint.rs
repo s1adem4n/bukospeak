@@ -44,7 +44,9 @@ impl FromStr for Fingerprint {
         let mut bytes = [0; 32];
         let mut pairs = text.trim().split(':');
         for byte in &mut bytes {
-            let pair = pairs.next().filter(|pair| pair.len() == 2).ok_or(ParseFingerprintError)?;
+            // from_str_radix alone would take a sign, as in "+f".
+            let pair = pairs.next().filter(|pair| pair.len() == 2 && pair.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            let pair = pair.ok_or(ParseFingerprintError)?;
             *byte = u8::from_str_radix(pair, 16).map_err(|_| ParseFingerprintError)?;
         }
         if pairs.next().is_some() {
@@ -65,7 +67,9 @@ mod tests {
     }
 
     #[test]
-    fn turns_away_a_short_one() {
+    fn turns_away_a_short_or_signed_one() {
         assert!("ab:cd".parse::<Fingerprint>().is_err());
+        let signed = Fingerprint::of(b"certificate").to_string().replacen(|digit: char| digit.is_ascii_hexdigit(), "+", 1);
+        assert!(signed.parse::<Fingerprint>().is_err());
     }
 }

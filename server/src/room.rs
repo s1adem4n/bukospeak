@@ -57,8 +57,13 @@ impl Room {
     /// Lets a connection join once its Hello checks out, and relays for it until it leaves.
     async fn admit(&self, incoming: Incoming) -> anyhow::Result<()> {
         let connection = incoming.await?;
-        let (mut send, mut recv) = timeout(HELLO_TIMEOUT, connection.accept_bi()).await??;
-        let Some(ClientMessage::Hello { version, name, room_key }) = timeout(HELLO_TIMEOUT, control::read(&mut recv)).await?? else {
+        let (mut send, recv, hello) = timeout(HELLO_TIMEOUT, async {
+            let (send, mut recv) = connection.accept_bi().await?;
+            let hello = control::read(&mut recv).await?;
+            anyhow::Ok((send, recv, hello))
+        })
+        .await??;
+        let Some(ClientMessage::Hello { version, name, room_key }) = hello else {
             anyhow::bail!("the stream ended before a Hello");
         };
 
@@ -93,7 +98,8 @@ impl Room {
         if room_key != self.room_key {
             return Err(Rejection::RoomKey);
         }
-        if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
+        // Control characters would let a name rewrite the terminals and logs that show it.
+        if name.is_empty() || name.chars().count() > MAX_NAME_CHARS || name.chars().any(char::is_control) {
             return Err(Rejection::Name);
         }
         Ok(())
@@ -108,6 +114,7 @@ impl Room {
         let id = members.next_id();
         let member = Member { id, name: name.to_owned() };
         for peer in members.peers.values() {
+            // A peer whose outbox is gone is leaving and needs no news.
             let _ = peer.control.send(ServerMessage::Joined { member: member.clone() });
         }
 
@@ -123,6 +130,7 @@ impl Room {
         let mut members = self.members.lock().expect("the members lock is never poisoned");
         let Some(peer) = members.peers.remove(&id) else { return };
         for other in members.peers.values() {
+            // A peer whose outbox is gone is leaving and needs no news.
             let _ = other.control.send(ServerMessage::Left { id });
         }
         tracing::info!(id = id.0, name = peer.name, "left");

@@ -78,17 +78,25 @@ pub enum Playout<'a> {
     Conceal,
 }
 
+/// What the buffer did with a sender's frames since it was created.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
+    /// Frames played as they arrived.
     pub played: u64,
+    /// Lost frames recovered by FEC.
     pub recovered: u64,
+    /// Lost frames concealed.
     pub concealed: u64,
+    /// Frames skipped because the buffer held too many.
     pub dropped: u64,
+    /// Concealed frames played in addition, because the buffer held too few or waited for a late one.
     pub inserted: u64,
     /// Frames that arrived after their turn or beyond the window held, and were thrown away.
     pub discarded: u64,
 }
 
+/// One sender's jitter buffer: [`insert`](Self::insert) frames as they arrive and
+/// [`pop`](Self::pop) what to play every 10 ms.
 pub struct JitterBuffer {
     /// Frames by index modulo [`SLOTS`]. A slot keeps its frame until another overwrites it;
     /// whether the frame is still to play follows from the state.
@@ -121,9 +129,17 @@ impl Default for JitterBuffer {
 }
 
 impl JitterBuffer {
+    /// Takes a frame that arrived, unless its turn has passed or it lies beyond the window held.
     pub fn insert(&mut self, packet: Packet) {
         // A late frame still tells how much the delay spreads.
         self.jitter.observe(packet.index, packet.arrival_us);
+        if let State::Idle { over: Some(over), waited } = self.state
+            && distance(over, packet.index) <= -(SLOTS as i64)
+            && self.oldest_pending().is_none()
+        {
+            // Far behind the last talkspurt is no straggler: the sender's timeline started over.
+            self.state = State::Idle { over: None, waited };
+        }
         if let State::Idle { over, waited } = self.state
             && self.oldest_pending().is_none()
         {
@@ -162,9 +178,9 @@ impl JitterBuffer {
             },
         };
 
-        if let Some(packet) = self.pending(next) {
-            let level = packet.level;
-            if self.should_drop(next, level) {
+        if let Some(&Packet { level, last, .. }) = self.pending(next) {
+            // Dropping the last frame would lose the talkspurt's end.
+            if !last && self.should_drop(next, level) {
                 self.since_adjustment = 0;
                 self.stats.dropped += 1;
                 self.state = State::Playing { next: next.wrapping_add(1), concealed: 0 };
@@ -177,31 +193,26 @@ impl JitterBuffer {
                 self.state = State::Playing { next, concealed };
                 return Playout::Conceal;
             }
-            return self.play(next);
+            return self.play(next, last);
         }
 
         let following = next.wrapping_add(1);
         if self.pending(following).is_some() {
             self.stats.recovered += 1;
             self.state = State::Playing { next: following, concealed: 0 };
-            return Playout::Fec(self.slots[slot(following)].as_ref().expect("the following frame is held").opus());
+            return Playout::Fec(self.opus(following));
         }
 
-        match self.oldest_pending().map(|oldest| distance(next, oldest)) {
+        match self.oldest_pending() {
             // Nothing ahead: the frame is late, or the talkspurt's last one was lost. Waiting
             // for it inserts a frame.
-            None => {
-                self.stats.inserted += 1;
-                self.conceal(next, concealed)
-            }
-            Some(gap) if gap > i64::from(MAX_GAP) => {
-                self.state = State::Idle { over: Some(next.wrapping_sub(1)), waited: 0 };
+            None => self.conceal(next, concealed, true),
+            // Starting over at the frames ahead: those in the gap are too late to play.
+            Some(oldest) if distance(next, oldest) > i64::from(MAX_GAP) => {
+                self.state = State::Idle { over: Some(oldest.wrapping_sub(1)), waited: 0 };
                 Playout::Silent
             }
-            Some(_) => {
-                self.stats.concealed += 1;
-                self.conceal(following, concealed)
-            }
+            Some(_) => self.conceal(following, concealed, false),
         }
     }
 
@@ -239,18 +250,29 @@ impl JitterBuffer {
         }
     }
 
-    fn play(&mut self, index: u32) -> Playout<'_> {
+    fn play(&mut self, index: u32, last: bool) -> Playout<'_> {
         self.stats.played += 1;
-        let last = self.pending(index).expect("the frame is held").last;
         self.state =
             if last { State::Idle { over: Some(index), waited: 0 } } else { State::Playing { next: index.wrapping_add(1), concealed: 0 } };
-        Playout::Frame(self.slots[slot(index)].as_ref().expect("the frame is held").opus())
+        Playout::Frame(self.opus(index))
     }
 
-    fn conceal(&mut self, next: u32, concealed: u32) -> Playout<'static> {
-        if concealed + 1 >= GIVE_UP_AFTER {
-            self.state = State::Idle { over: Some(next.wrapping_sub(1)), waited: 0 };
+    /// The Opus packet of a frame known to be held.
+    fn opus(&self, index: u32) -> &[u8] {
+        self.slots[slot(index)].as_ref().expect("the frame is held").opus()
+    }
+
+    /// Conceals a frame, inserted or lost, with `next` to play after it; or gives up on the
+    /// talkspurt, `next` included.
+    fn conceal(&mut self, next: u32, concealed: u32, inserted: bool) -> Playout<'static> {
+        if concealed >= GIVE_UP_AFTER {
+            self.state = State::Idle { over: Some(next), waited: 0 };
             return Playout::Silent;
+        }
+        if inserted {
+            self.stats.inserted += 1;
+        } else {
+            self.stats.concealed += 1;
         }
         self.state = State::Playing { next, concealed: concealed + 1 };
         Playout::Conceal
@@ -270,8 +292,12 @@ impl JitterBuffer {
         (1..DROP_WINDOW).filter_map(|offset| self.pending(next.wrapping_add(offset))).all(|packet| packet.level <= level)
     }
 
+    /// Not once the talkspurt's last frame is held: then the buffer runs dry on purpose.
     fn should_insert(&self, next: u32, level: Level) -> bool {
-        self.ahead(next) + 1 < self.target() && level >= QUIET && self.since_adjustment >= ADJUST_EVERY
+        self.ahead(next) + 1 < self.target()
+            && level >= QUIET
+            && self.since_adjustment >= ADJUST_EVERY
+            && !self.pending_frames().any(|packet| packet.last)
     }
 
     /// Whether a frame with this index is still to play: it lies in the window of [`SLOTS`]
@@ -329,6 +355,8 @@ fn slot(index: u32) -> usize {
 struct Jitter {
     buckets: [Option<Bucket>; Jitter::BUCKETS],
     newest: u64,
+    /// The last frame's index, and its place on a timeline that doesn't wrap around.
+    last: Option<(u32, i64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -343,7 +371,10 @@ impl Jitter {
     const BUCKET_US: u64 = 200_000;
 
     fn observe(&mut self, index: u32, arrival_us: u64) {
-        let delay = arrival_us as i64 - i64::from(index) * FRAME_US as i64;
+        // Unwrapped, an index wrapping around to 0 doesn't look like a jump of 497 days.
+        let unwrapped = self.last.map_or(i64::from(index), |(last, unwrapped)| unwrapped + distance(last, index));
+        self.last = Some((index, unwrapped));
+        let delay = arrival_us as i64 - unwrapped * FRAME_US as i64;
         let id = arrival_us / Self::BUCKET_US;
         let bucket = &mut self.buckets[id as usize % Self::BUCKETS];
         match bucket {
@@ -363,7 +394,8 @@ impl Jitter {
             return MIN_TARGET;
         }
         let spread = (max - min) as u64;
-        (spread.div_ceil(FRAME_US) as u32 + 1).clamp(MIN_TARGET, MAX_TARGET)
+        // Clamped before the cast, so a huge spread can't truncate to a small target.
+        (spread.div_ceil(FRAME_US) + 1).clamp(MIN_TARGET.into(), MAX_TARGET.into()) as u32
     }
 }
 
@@ -471,7 +503,8 @@ mod tests {
         let (played, buffer) = simulation.run(0..50, SECOND_US);
         let end = played.iter().position(|played| *played == Played::Frame(48)).unwrap();
         let concealed = played[end + 1..].iter().take_while(|played| **played == Played::Conceal).count();
-        assert_eq!(concealed as u32, GIVE_UP_AFTER - 1);
+        assert_eq!(concealed as u32, GIVE_UP_AFTER);
+        assert_eq!(buffer.stats().inserted, u64::from(GIVE_UP_AFTER));
         assert!(played[end + 1 + concealed..].iter().all(|played| *played == Played::Silent));
         assert!(!buffer.is_playing());
     }
@@ -510,6 +543,77 @@ mod tests {
     }
 
     #[test]
+    fn a_talkspurt_s_last_frame_is_never_dropped() {
+        let mut buffer = JitterBuffer::default();
+        // The quietest frame in reach, with the next talkspurt held far enough ahead to drop.
+        for index in (0..12).chain([20]) {
+            let level = Level::new(if index == 11 { 90 } else { 20 });
+            buffer.insert(Packet::new(index, index == 11, level, u64::from(index) * FRAME_US, &index.to_be_bytes()).unwrap());
+        }
+        let played: Vec<Played> = (0..12).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, (0..12).map(Played::Frame).collect::<Vec<_>>());
+        assert!(!buffer.is_playing());
+    }
+
+    #[test]
+    fn a_talkspurt_drains_its_end_without_inserting() {
+        let mut buffer = JitterBuffer::default();
+        // Early frames come 50 ms late now and then, which raises the target to 6.
+        let arrival_us = |index: u32| u64::from(index) * FRAME_US + if index < 20 && index % 4 == 3 { 50_000 } else { 0 };
+        let mut arrivals: Vec<u32> = (0..=60).collect();
+        arrivals.sort_by_key(|&index| arrival_us(index));
+        let mut arrivals = arrivals.into_iter().peekable();
+        let mut draining = Vec::new();
+        for tick in 0..100 {
+            while let Some(index) = arrivals.next_if(|&index| arrival_us(index) <= tick * FRAME_US) {
+                buffer.insert(Packet::new(index, index == 60, Level::new(60), arrival_us(index), &index.to_be_bytes()).unwrap());
+            }
+            let played = Played::from(buffer.pop());
+            if arrivals.peek().is_none() {
+                draining.push(played);
+            }
+        }
+        assert_eq!(buffer.target(), 6);
+        assert!(draining.contains(&Played::Frame(60)));
+        assert!(!draining.contains(&Played::Conceal), "concealed while draining: {draining:?}");
+    }
+
+    #[test]
+    fn a_frame_given_up_on_is_discarded_when_it_comes() {
+        let mut buffer = JitterBuffer::default();
+        buffer.insert(packet(0, false, 0));
+        while buffer.pop() != Playout::Silent || buffer.stats().played == 0 {}
+        buffer.insert(packet(1, false, SECOND_US));
+        assert!((0..5).all(|_| buffer.pop() == Playout::Silent));
+        assert_eq!(buffer.stats().discarded, 1);
+    }
+
+    #[test]
+    fn frames_in_a_gap_started_over_from_are_discarded() {
+        let mut buffer = JitterBuffer::default();
+        buffer.insert(packet(0, false, 0));
+        buffer.insert(packet(1, false, FRAME_US));
+        buffer.insert(packet(20, false, 2 * FRAME_US));
+        buffer.insert(packet(21, true, 3 * FRAME_US));
+        let played: Vec<Played> = (0..3).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, [Played::Frame(0), Played::Frame(1), Played::Silent]);
+        buffer.insert(packet(2, false, 4 * FRAME_US));
+        let played: Vec<Played> = (0..2).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, [Played::Frame(20), Played::Frame(21)]);
+    }
+
+    #[test]
+    fn a_timeline_that_starts_over_plays_again() {
+        let mut buffer = JitterBuffer::default();
+        buffer.insert(packet(1000, true, 0));
+        assert_eq!(Played::from(buffer.pop()), Played::Frame(1000));
+        buffer.insert(packet(0, false, FRAME_US));
+        buffer.insert(packet(1, true, 2 * FRAME_US));
+        let played: Vec<Played> = (0..2).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, [Played::Frame(0), Played::Frame(1)]);
+    }
+
+    #[test]
     fn frames_play_in_order_across_the_index_wrapping_around() {
         let mut buffer = JitterBuffer::default();
         for (offset, index) in [u32::MAX - 1, u32::MAX, 0, 1].into_iter().enumerate() {
@@ -517,6 +621,7 @@ mod tests {
         }
         let played: Vec<Played> = (0..5).map(|_| buffer.pop().into()).collect();
         assert_eq!(played, [Played::Frame(u32::MAX - 1), Played::Frame(u32::MAX), Played::Frame(0), Played::Frame(1), Played::Silent]);
+        assert_eq!(buffer.target(), MIN_TARGET);
     }
 
     #[test]
