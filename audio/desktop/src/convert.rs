@@ -1,9 +1,12 @@
 //! Between a device's format and the call's 48 kHz mono: channels mixed down or copied out, and
-//! the rate converted in 10 ms chunks when the device runs at another. Nothing here allocates
+//! the rate converted in 10 ms chunks when the device runs at another, and the times the
+//! platform tells for the device's samples carried over to the call's. Nothing here allocates
 //! after construction.
 //!
 //! The input and the output device each run on their own clock; the few ppm between them and
 //! the senders' clocks are the jitter buffers' to absorb, so the ratio here is fixed.
+
+use std::time::{Duration, Instant};
 
 use bukospeak_core::proto::audio::{FRAME_SAMPLES, SAMPLE_RATE};
 use rubato::audioadapter_buffers::direct::SequentialSlice;
@@ -29,8 +32,10 @@ pub enum Error {
 /// From the input device's samples to the call's.
 pub struct Input {
     channels: usize,
-    /// 10 ms at the device's rate, mixed down to mono.
+    rate: u32,
+    /// 10 ms at the device's rate, mixed down to mono, and when its first sample was captured.
     chunk: Box<[f32]>,
+    captured: Instant,
     filled: usize,
     resampling: Option<Resampling>,
 }
@@ -38,6 +43,7 @@ pub struct Input {
 /// From the call's samples to the output device's.
 pub struct Output {
     channels: usize,
+    rate: u32,
     /// 10 ms at the device's rate, in mono.
     chunk: Box<[f32]>,
     played: usize,
@@ -48,18 +54,27 @@ pub struct Output {
 struct Resampling {
     fft: Fft<f32>,
     frame: Box<[f32]>,
+    /// How much later a sample comes out than it went in.
+    delay: Duration,
 }
 
 impl Input {
     pub fn new(device: Format) -> Result<Self, Error> {
         let chunk = chunk_len(device)?;
         let resampling = Resampling::new(device.rate, SAMPLE_RATE)?;
-        Ok(Self { channels: device.channels, chunk: vec![0.0; chunk].into(), filled: 0, resampling })
+        let (channels, rate) = (device.channels, device.rate);
+        // Told anew with the first sample of each chunk.
+        let captured = Instant::now();
+        Ok(Self { channels, rate, chunk: vec![0.0; chunk].into(), captured, filled: 0, resampling })
     }
 
-    /// Takes the device's interleaved samples and hands `call` them at 48 kHz mono.
-    pub fn push(&mut self, samples: &[f32], mut call: impl FnMut(&[f32])) {
-        for frame in samples.chunks_exact(self.channels) {
+    /// Takes the device's interleaved samples, the first of them captured at `captured`, and
+    /// hands `call` them at 48 kHz mono, with when the first of those was captured.
+    pub fn push(&mut self, samples: &[f32], captured: Instant, mut call: impl FnMut(&[f32], Instant)) {
+        for (n, frame) in samples.chunks_exact(self.channels).enumerate() {
+            if self.filled == 0 {
+                self.captured = captured + duration_of(n, self.rate);
+            }
             self.chunk[self.filled] = frame.iter().sum::<f32>() / self.channels as f32;
             self.filled += 1;
             if self.filled == self.chunk.len() {
@@ -67,9 +82,9 @@ impl Input {
                 match &mut self.resampling {
                     Some(resampling) => {
                         process(&mut resampling.fft, &self.chunk, &mut resampling.frame);
-                        call(&resampling.frame);
+                        call(&resampling.frame, self.captured - resampling.delay);
                     }
-                    None => call(&self.chunk),
+                    None => call(&self.chunk, self.captured),
                 }
             }
         }
@@ -80,20 +95,22 @@ impl Output {
     pub fn new(device: Format) -> Result<Self, Error> {
         let chunk = chunk_len(device)?;
         let resampling = Resampling::new(SAMPLE_RATE, device.rate)?;
-        Ok(Self { channels: device.channels, chunk: vec![0.0; chunk].into(), played: chunk, resampling })
+        Ok(Self { channels: device.channels, rate: device.rate, chunk: vec![0.0; chunk].into(), played: chunk, resampling })
     }
 
-    /// Fills the device's interleaved samples with what `call` fills in at 48 kHz mono.
-    pub fn pull(&mut self, samples: &mut [f32], mut call: impl FnMut(&mut [f32])) {
-        for frame in samples.chunks_exact_mut(self.channels) {
+    /// Fills the device's interleaved samples, the first of which plays at `plays`, with what
+    /// `call` fills in at 48 kHz mono, told when the first of those plays.
+    pub fn pull(&mut self, samples: &mut [f32], plays: Instant, mut call: impl FnMut(&mut [f32], Instant)) {
+        for (n, frame) in samples.chunks_exact_mut(self.channels).enumerate() {
             if self.played == self.chunk.len() {
                 self.played = 0;
+                let plays = plays + duration_of(n, self.rate);
                 match &mut self.resampling {
                     Some(resampling) => {
-                        call(&mut resampling.frame);
+                        call(&mut resampling.frame, plays + resampling.delay);
                         process(&mut resampling.fft, &resampling.frame, &mut self.chunk);
                     }
-                    None => call(&mut self.chunk),
+                    None => call(&mut self.chunk, plays),
                 }
             }
             frame.fill(self.chunk[self.played]);
@@ -112,7 +129,8 @@ impl Resampling {
         let fft = Fft::new(from as usize, to as usize, chunk_in, 1, FixedSync::Both)?;
         // 10 ms at either rate is a whole multiple of the rates' smallest common step.
         assert_eq!((fft.input_frames_next(), fft.output_frames_next()), (chunk_in, to as usize / 100), "the chunks are 10 ms");
-        Ok(Some(Self { fft, frame: vec![0.0; FRAME_SAMPLES].into() }))
+        let delay = duration_of(fft.output_delay(), to);
+        Ok(Some(Self { fft, frame: vec![0.0; FRAME_SAMPLES].into(), delay }))
     }
 }
 
@@ -121,6 +139,11 @@ fn process(fft: &mut Fft<f32>, from: &[f32], to: &mut [f32]) {
     let frames = to.len();
     let mut output = SequentialSlice::new_mut(to, 1, frames).expect("a mono slice holds its length");
     fft.process_into_buffer(&input, &mut output, None).expect("the chunks have the sizes the resampler was made for");
+}
+
+/// How long `samples` take at `rate`.
+fn duration_of(samples: usize, rate: u32) -> Duration {
+    Duration::from_nanos(samples as u64 * 1_000_000_000 / u64::from(rate))
 }
 
 /// Samples in 10 ms at the device's rate.
@@ -168,14 +191,15 @@ mod tests {
 
         let mut call = Vec::new();
         for buffer in captured.chunks(device.channels * 333) {
-            input.push(buffer, |frame| call.extend_from_slice(frame));
+            input.push(buffer, Instant::now(), |frame, _| call.extend_from_slice(frame));
         }
         assert_eq!(call.len(), SAMPLE_RATE as usize, "one second at 48 kHz");
 
         let mut sent = call.iter();
         let mut played = vec![0.0; captured.len()];
         for buffer in played.chunks_mut(device.channels * 333) {
-            output.pull(buffer, |frame| frame.iter_mut().for_each(|sample| *sample = sent.next().copied().unwrap_or(0.0)));
+            output
+                .pull(buffer, Instant::now(), |frame, _| frame.iter_mut().for_each(|sample| *sample = sent.next().copied().unwrap_or(0.0)));
         }
         (call, played)
     }
@@ -191,12 +215,12 @@ mod tests {
     fn stereo_is_mixed_down_and_copied_out() {
         let mut input = Input::new(Format { channels: 2, rate: SAMPLE_RATE }).unwrap();
         let mut call = Vec::new();
-        input.push(&[0.2, 0.4].repeat(FRAME_SAMPLES), |frame| call.extend_from_slice(frame));
+        input.push(&[0.2, 0.4].repeat(FRAME_SAMPLES), Instant::now(), |frame, _| call.extend_from_slice(frame));
         assert!(call.iter().all(|&sample| (sample - 0.3).abs() < 1e-6));
 
         let mut output = Output::new(Format { channels: 2, rate: SAMPLE_RATE }).unwrap();
         let mut played = [0.0; 6];
-        output.pull(&mut played, |frame| frame.iter_mut().enumerate().for_each(|(n, sample)| *sample = n as f32));
+        output.pull(&mut played, Instant::now(), |frame, _| frame.iter_mut().enumerate().for_each(|(n, sample)| *sample = n as f32));
         assert_eq!(played, [0.0, 0.0, 1.0, 1.0, 2.0, 2.0]);
     }
 
@@ -212,6 +236,35 @@ mod tests {
             }
             let rms = rms(settled(&played));
             assert!((0.33..0.38).contains(&rms), "{rate} Hz: rms {rms}");
+        }
+    }
+
+    #[test]
+    fn the_call_is_told_when_its_frames_were_captured_and_play() {
+        for rate in [SAMPLE_RATE, 44_100] {
+            let device = Format { channels: 2, rate };
+            let (mut input, mut output) = (Input::new(device).unwrap(), Output::new(device).unwrap());
+            let delay = |resampling: &Option<Resampling>| resampling.as_ref().map_or(Duration::ZERO, |resampling| resampling.delay);
+            let (captured_delay, played_delay) = (delay(&input.resampling), delay(&output.resampling));
+            let start = Instant::now();
+            let mut samples = vec![0.0; 2 * 333];
+            let (mut captured, mut played) = (Vec::new(), Vec::new());
+            for buffer in 0..100 {
+                let at = start + duration_of(buffer * 333, rate);
+                input.push(&samples, at, |_, captured_at| captured.push(captured_at));
+                output.pull(&mut samples, at, |_, plays| played.push(plays));
+            }
+            for (frame, (&captured, &plays)) in captured.iter().zip(&played).enumerate() {
+                let at = start + frame as u32 * Duration::from_millis(10);
+                let off = |told: Instant, at: Instant| told.max(at) - told.min(at);
+                // Within what rounding the samples' times to nanoseconds loses.
+                assert!(off(captured + captured_delay, at) <= Duration::from_micros(1), "{rate} Hz: frame {frame} captured off");
+                assert!(off(plays, at + played_delay) <= Duration::from_micros(1), "{rate} Hz: frame {frame} plays off");
+            }
+            // The output asks for a chunk as it starts playing it, the input hands one over once
+            // it is full.
+            let chunks = 100 * 333 / (rate as usize / 100);
+            assert_eq!((captured.len(), played.len()), (chunks, chunks + 1), "{rate} Hz");
         }
     }
 

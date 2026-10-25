@@ -10,13 +10,16 @@ mod lease;
 use std::fmt;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bukospeak_core::proto::audio::SAMPLE_RATE;
 use bukospeak_core::{Microphone, Speaker};
 pub use cpal::DeviceId;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, ErrorKind, Host, SampleFormat, Stream, StreamConfig, SupportedBufferSize, SupportedStreamConfigRange};
+use cpal::{
+    BufferSize, ErrorKind, Host, InputCallbackInfo, OutputCallbackInfo, SampleFormat, Stream, StreamConfig, SupportedBufferSize,
+    SupportedStreamConfigRange,
+};
 
 use crate::convert::Format;
 use crate::lease::{Half, Lease};
@@ -244,7 +247,18 @@ fn build_input(
     let config = config(direction, device.supported_input_configs().map_err(|error| Error::Device(direction, error))?)?;
     let mut input = convert::Input::new(format(config)).map_err(|error| Error::Format(direction, error))?;
     let stream = device
-        .build_input_stream(config, move |samples: &[f32], _: &_| input.push(samples, |frame| microphone.push(frame)), broke, None)
+        .build_input_stream(
+            config,
+            move |samples: &[f32], info: &InputCallbackInfo| {
+                // The stream's clock may have an origin of its own; how long ago the samples
+                // were captured is the same on any.
+                let timestamp = info.timestamp();
+                let captured = Instant::now() - timestamp.callback.duration_since(timestamp.capture);
+                input.push(samples, captured, |frame, captured| microphone.push(frame, captured));
+            },
+            broke,
+            None,
+        )
         .map_err(|error| Error::Device(direction, error))?;
     stream.play().map_err(|error| Error::Device(direction, error))?;
     Ok(stream)
@@ -261,7 +275,16 @@ fn build_output(
     let config = config(direction, device.supported_output_configs().map_err(|error| Error::Device(direction, error))?)?;
     let mut output = convert::Output::new(format(config)).map_err(|error| Error::Format(direction, error))?;
     let stream = device
-        .build_output_stream(config, move |samples: &mut [f32], _: &_| output.pull(samples, |frame| speaker.pull(frame)), broke, None)
+        .build_output_stream(
+            config,
+            move |samples: &mut [f32], info: &OutputCallbackInfo| {
+                let timestamp = info.timestamp();
+                let plays = Instant::now() + timestamp.playback.duration_since(timestamp.callback);
+                output.pull(samples, plays, |frame, plays| speaker.pull(frame, plays));
+            },
+            broke,
+            None,
+        )
         .map_err(|error| Error::Device(direction, error))?;
     stream.play().map_err(|error| Error::Device(direction, error))?;
     Ok(stream)

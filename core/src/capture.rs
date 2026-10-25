@@ -6,11 +6,14 @@
 //! sender's whole timeline. Nothing here allocates after construction but the first frame on
 //! each thread, where RNNoise's FFT sets up its plans and scratch buffers in thread-locals.
 
+use std::time::Instant;
+
 use bukospeak_proto::audio::{FRAME_SAMPLES, Level, MAX_OPUS_LEN, SAMPLE_RATE};
 use nnnoiseless::DenoiseState;
 use opus::{Application, Bitrate, Channels, Encoder, Signal};
 
 use crate::conditioner::{Conditioner, Conditioning};
+use crate::echo::Tap;
 use crate::gate::{Decision, Gate};
 use crate::limiter::limit;
 
@@ -61,15 +64,24 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn new(conditioning: Conditioning) -> Result<Self, opus::Error> {
+    /// Makes the capture, and where the engine conditions the signal, the speaker's end of what
+    /// it played, whose echo the capture cancels.
+    pub fn new(conditioning: Conditioning) -> Result<(Self, Option<Tap>), opus::Error> {
         let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
         encoder.set_bitrate(Bitrate::Bits(BITRATE))?;
         encoder.set_signal(Signal::Voice)?;
         encoder.set_inband_fec(true)?;
         encoder.set_packet_loss_perc(EXPECTED_LOSS_PERCENT)?;
-        Ok(Self {
+        let (conditioner, tap) = match conditioning {
+            Conditioning::Engine => {
+                let (conditioner, tap) = Conditioner::new();
+                (Some(conditioner), Some(tap))
+            }
+            Conditioning::Platform => (None, None),
+        };
+        let capture = Self {
             denoiser: DenoiseState::new(),
-            conditioner: (conditioning == Conditioning::Engine).then(Conditioner::new),
+            conditioner,
             encoder,
             gate: Gate::default(),
             noise_suppression: true,
@@ -77,7 +89,8 @@ impl Capture {
             preroll: [None; PREROLL],
             scaled: [0.0; FRAME_SAMPLES],
             denoised: [0.0; FRAME_SAMPLES],
-        })
+        };
+        Ok((capture, tap))
     }
 
     /// Whether the frames sent are RNNoise's output (the default) or the input as captured, for
@@ -94,15 +107,17 @@ impl Capture {
         }
     }
 
-    /// Takes a captured frame, with what the speaker played meanwhile if its echo is the
-    /// engine's to cancel, and hands `send` what the gate lets through: nothing, the frame, or,
-    /// when speech starts, the pre-roll and then the frame.
-    pub fn process(
-        &mut self,
-        input: &[f32; FRAME_SAMPLES],
-        played: Option<&[f32; FRAME_SAMPLES]>,
-        mut send: impl FnMut(&Encoded),
-    ) -> Result<(), opus::Error> {
+    /// Counts `samples` the platform's capture callback hands over, the first of them captured
+    /// at `at`, which aligns the speaker's echo with them where the engine cancels it.
+    pub fn captured(&mut self, samples: usize, at: Instant) {
+        if let Some(conditioner) = &mut self.conditioner {
+            conditioner.captured(samples, at);
+        }
+    }
+
+    /// Takes a captured frame and hands `send` what the gate lets through: nothing, the frame,
+    /// or, when speech starts, the pre-roll and then the frame.
+    pub fn process(&mut self, input: &[f32; FRAME_SAMPLES], mut send: impl FnMut(&Encoded)) -> Result<(), opus::Error> {
         let index = self.take_index();
         // A NaN, infinite or huge sample from a faulty driver would turn RNNoise's state to NaN for
         // good, and NaN in its spectrum is undefined behavior in its FFT: clip to full scale, as an
@@ -111,7 +126,7 @@ impl Capture {
             *scaled = if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) };
         });
         if let Some(conditioner) = &mut self.conditioner {
-            conditioner.filter(&mut self.scaled, played);
+            conditioner.filter(&mut self.scaled);
         }
         self.scaled.iter_mut().for_each(|sample| *sample *= PCM_SCALE);
         let voice_probability = self.denoiser.process_frame(&mut self.denoised, &self.scaled);
@@ -148,10 +163,13 @@ impl Capture {
     }
 
     /// Ends what input that stopped left unfinished, so capture can resume later: the pre-roll
-    /// is stale by then, and a talkspurt the gate holds open gets a silent last frame, which
-    /// `send` is handed.
+    /// is stale by then, the speaker's echo is aligned anew with what is captured then, and a
+    /// talkspurt the gate holds open gets a silent last frame, which `send` is handed.
     pub fn end(&mut self, send: impl FnOnce(&Encoded)) -> Result<(), opus::Error> {
         self.preroll = [None; PREROLL];
+        if let Some(conditioner) = &mut self.conditioner {
+            conditioner.stopped();
+        }
         if !self.gate.end() {
             return Ok(());
         }
@@ -192,11 +210,11 @@ mod tests {
     }
 
     fn capture_with(signal: &[f32], noise_suppression: bool, conditioning: Conditioning) -> Vec<Encoded> {
-        let mut capture = Capture::new(conditioning).unwrap();
+        let (mut capture, _) = Capture::new(conditioning).unwrap();
         capture.set_noise_suppression(noise_suppression);
         let mut sent = Vec::new();
         for frame in signal.as_chunks().0 {
-            capture.process(frame, None, |encoded| sent.push(*encoded)).unwrap();
+            capture.process(frame, |encoded| sent.push(*encoded)).unwrap();
         }
         sent
     }
@@ -278,15 +296,15 @@ mod tests {
 
     #[test]
     fn conditioned_speech_is_captured_without_allocating() {
-        let mut capture = Capture::new(Conditioning::Engine).unwrap();
+        let (mut capture, _tap) = Capture::new(Conditioning::Engine).unwrap();
         let signal = voice(2 * SECOND, 0.3);
         let (first, rest) = signal.as_chunks().0.split_first().unwrap();
         // RNNoise sets up its FFT on the first frame.
-        capture.process(first, None, |_| ()).unwrap();
+        capture.process(first, |_| ()).unwrap();
         let mut sent = 0;
         assert_no_alloc::assert_no_alloc(|| {
             for frame in rest {
-                capture.process(frame, None, |_| sent += 1).unwrap();
+                capture.process(frame, |_| sent += 1).unwrap();
             }
         });
         assert!(sent >= 150, "only {sent} frames of 2 s of speech sent");
@@ -294,10 +312,10 @@ mod tests {
 
     #[test]
     fn ending_in_speech_sends_a_silent_last_frame_and_capture_starts_anew() {
-        let mut capture = Capture::new(Conditioning::Platform).unwrap();
+        let (mut capture, _) = Capture::new(Conditioning::Platform).unwrap();
         let mut sent = Vec::new();
         for frame in voice(SECOND, 0.3).as_chunks().0 {
-            capture.process(frame, None, |encoded| sent.push(*encoded)).unwrap();
+            capture.process(frame, |encoded| sent.push(*encoded)).unwrap();
         }
         assert!(!sent.last().unwrap().last, "still speaking");
         capture.end(|encoded| sent.push(*encoded)).unwrap();
@@ -311,7 +329,7 @@ mod tests {
         assert!(nothing, "a closed gate has nothing to end");
         let mut resumed = Vec::new();
         for frame in voice(SECOND, 0.3).as_chunks().0 {
-            capture.process(frame, None, |encoded| resumed.push(*encoded)).unwrap();
+            capture.process(frame, |encoded| resumed.push(*encoded)).unwrap();
         }
         // The input settles anew before the gate opens again, after the frame ended on.
         let first = resumed[0].index;

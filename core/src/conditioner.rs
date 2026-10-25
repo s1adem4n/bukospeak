@@ -18,7 +18,9 @@ use sonora_agc2::noise_level_estimator::NoiseLevelEstimator;
 use sonora_agc2::saturation_protector::SaturationProtector;
 use sonora_agc2::speech_level_estimator::{AdaptiveDigitalConfig, SpeechLevelEstimator};
 
-use crate::echo::EchoCanceller;
+use std::time::Instant;
+
+use crate::echo::{self, EchoCanceller, Reference, Tap};
 
 /// Who conditions the microphone's signal: takes out the rumble below the voice and the
 /// speaker's echo, and evens out its level.
@@ -31,13 +33,16 @@ pub enum Conditioning {
 }
 
 pub struct Conditioner {
-    /// The high-pass filter alone, and with AEC3 after it, for when the speaker's echo is
-    /// cancelled.
+    /// The high-pass filter, for while the speaker's echo isn't cancelled, and the frame it
+    /// works on, in the form it takes.
     high_pass: HighPassFilter,
-    echo: EchoCanceller,
-    echo_cancellation: bool,
-    /// The frame the high-pass filter works on, in the form it takes.
     filtered: [Vec<f32>; 1],
+    /// AEC3, which has the high-pass filter before it; what the speaker played, and the frame
+    /// of it read for the frame captured.
+    echo: EchoCanceller,
+    reference: Reference,
+    played: [f32; FRAME_SAMPLES],
+    echo_cancellation: bool,
     noise: NoiseLevelEstimator,
     speech: SpeechLevelEstimator,
     saturation: SaturationProtector,
@@ -48,19 +53,24 @@ pub struct Conditioner {
 }
 
 impl Conditioner {
-    pub fn new() -> Self {
+    /// Makes the conditioner, and the speaker's end of what it played, whose echo it cancels.
+    pub fn new() -> (Self, Tap) {
         let config = AdaptiveDigitalConfig::default();
-        Self {
+        let (tap, reference) = echo::reference();
+        let conditioner = Self {
             high_pass: HighPassFilter::new(SAMPLE_RATE as i32, 1),
-            echo: EchoCanceller::new(),
-            echo_cancellation: true,
             filtered: [vec![0.0; FRAME_SAMPLES]],
+            echo: EchoCanceller::new(),
+            reference,
+            played: [0.0; FRAME_SAMPLES],
+            echo_cancellation: true,
             noise: NoiseLevelEstimator::default(),
             speech: SpeechLevelEstimator::new(&config, ADJACENT_SPEECH_FRAMES_THRESHOLD),
             saturation: SaturationProtector::new(SATURATION_PROTECTOR_INITIAL_HEADROOM_DB, ADJACENT_SPEECH_FRAMES_THRESHOLD),
             gain: AdaptiveDigitalGainController::new(config, ADJACENT_SPEECH_FRAMES_THRESHOLD),
             envelope: FixedDigitalLevelEstimator::new(FRAME_SAMPLES),
-        }
+        };
+        (conditioner, tap)
     }
 
     /// Whether the speaker's echo is cancelled (the default) or left, for a headset whose own
@@ -69,16 +79,26 @@ impl Conditioner {
         self.echo_cancellation = on;
     }
 
-    /// Filters a frame, as captured, in −1.0..=1.0; and with what the speaker played meanwhile,
-    /// if it plays, takes out its echo. AEC3 hears what it played even while echo cancellation
-    /// is off, so it has its delay when turned on.
-    pub fn filter(&mut self, frame: &mut [f32; FRAME_SAMPLES], played: Option<&[f32; FRAME_SAMPLES]>) {
-        if let Some(played) = played {
-            self.echo.render(played);
-            if self.echo_cancellation {
-                self.echo.capture(frame);
-                return;
-            }
+    /// Counts `samples` the platform's capture callback hands over, the first of them captured
+    /// at `at`, which aligns what the speaker played with them.
+    pub fn captured(&mut self, samples: usize, at: Instant) {
+        self.reference.captured(samples, at);
+    }
+
+    /// For when the platform's capture callback stops calling.
+    pub fn stopped(&mut self) {
+        self.reference.stopped();
+    }
+
+    /// Filters the next frame captured, in −1.0..=1.0, and takes out the speaker's echo.
+    pub fn filter(&mut self, frame: &mut [f32; FRAME_SAMPLES]) {
+        // Read while echo cancellation is off too, so the ring doesn't fill and drop what the
+        // speaker plays once it's on again.
+        self.reference.read(&mut self.played);
+        if self.echo_cancellation {
+            self.echo.render(&self.played);
+            self.echo.capture(frame);
+            return;
         }
         self.filtered[0].copy_from_slice(frame);
         self.high_pass.process_channels(&mut self.filtered);
@@ -112,6 +132,8 @@ impl Conditioner {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use bukospeak_proto::audio::Level;
 
     use super::*;
@@ -122,14 +144,15 @@ mod tests {
 
     /// Conditions a signal, speech throughout, and returns its frames' levels after the gain.
     fn levels(signal: &[f32], speech_probability: f32) -> Vec<Level> {
-        let mut conditioner = Conditioner::new();
+        // Nothing plays, which AEC3 hears as silence.
+        let (mut conditioner, _tap) = Conditioner::new();
         signal
             .as_chunks()
             .0
             .iter()
             .map(|frame| {
                 let mut frame = *frame;
-                conditioner.filter(&mut frame, None);
+                conditioner.filter(&mut frame);
                 let mut frame = frame.map(|sample| sample * PCM_SCALE);
                 conditioner.gain(&mut frame, speech_probability);
                 Level::of(&frame.map(|sample| sample / PCM_SCALE))
@@ -163,21 +186,49 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_takes_out_hum() {
+    fn the_filter_takes_out_hum_with_echo_cancellation_and_without() {
         let hum: Vec<f32> = (0..SECOND).map(|n| 0.5 * (std::f32::consts::TAU * 50.0 * n as f32 / SAMPLE_RATE as f32).sin()).collect();
-        let mut conditioner = Conditioner::new();
-        let filtered: Vec<f32> = hum
-            .as_chunks()
-            .0
-            .iter()
-            .flat_map(|frame| {
-                let mut frame = *frame;
-                conditioner.filter(&mut frame, None);
-                frame
-            })
-            .collect();
-        // After the filter's first 100 ms, 50 Hz at −9 dBov falls by over 20 dB.
-        let after = Level::of(&filtered[SECOND / 10..]).minus_dbov();
-        assert!(after >= Level::of(&hum).minus_dbov() + 20, "hum at −{after} dBov after the filter");
+        for echo_cancellation in [true, false] {
+            let (mut conditioner, _tap) = Conditioner::new();
+            conditioner.set_echo_cancellation(echo_cancellation);
+            let filtered: Vec<f32> = hum
+                .as_chunks()
+                .0
+                .iter()
+                .flat_map(|frame| {
+                    let mut frame = *frame;
+                    conditioner.filter(&mut frame);
+                    frame
+                })
+                .collect();
+            // After the filter's first 100 ms, 50 Hz at −9 dBov falls by over 20 dB.
+            let after = Level::of(&filtered[SECOND / 10..]).minus_dbov();
+            assert!(after >= Level::of(&hum).minus_dbov() + 20, "hum at −{after} dBov after the filter");
+        }
+    }
+
+    #[test]
+    fn echo_cancellation_turned_on_again_cancels_within_seconds() {
+        let (mut conditioner, mut tap) = Conditioner::new();
+        let far = voice(40 * SECOND, 0.3);
+        let frames = far.as_chunks::<FRAME_SAMPLES>().0;
+        let start = Instant::now();
+        let (mut captured, mut cancelled) = (Vec::new(), Vec::new());
+        for (index, played) in frames.iter().enumerate() {
+            let now = start + Duration::from_millis(10 * index as u64);
+            // Each frame plays 30 ms after it is mixed, and its echo is captured as it plays.
+            tap.push(played, now + Duration::from_millis(30));
+            let echo = index.checked_sub(3).map_or([0.0; FRAME_SAMPLES], |played| frames[played].map(|sample| 0.5 * sample));
+            conditioner.set_echo_cancellation(!(10..20).contains(&(index / 100)));
+            conditioner.captured(FRAME_SAMPLES, now);
+            let mut frame = echo;
+            conditioner.filter(&mut frame);
+            captured.extend_from_slice(&echo);
+            cancelled.extend_from_slice(&frame);
+        }
+        let energy = |samples: &[f32]| samples.iter().map(|sample| sample * sample).sum::<f32>();
+        let seconds = 25 * SECOND..40 * SECOND;
+        let suppression = 10.0 * (energy(&captured[seconds.clone()]) / energy(&cancelled[seconds])).log10();
+        assert!(suppression >= 30.0, "{suppression:.1} dB once on again");
     }
 }

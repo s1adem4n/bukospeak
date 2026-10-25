@@ -22,7 +22,6 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::capture::Capture;
 use crate::channel::{Announcement, Channel, Event, Lost};
 use crate::conditioner::Conditioning;
-use crate::echo;
 use crate::jitter::Packet;
 use crate::microphone::{Microphone, Settings};
 use crate::playout::Mixer;
@@ -140,15 +139,8 @@ impl Engine {
         self.end(call.take());
         self.unwatch();
         // libopus creates codecs without fail for the fixed formats asked for.
-        let capture = Capture::new(self.conditioning).expect("the encoder can be created");
+        let (capture, tap) = Capture::new(self.conditioning).expect("the encoder can be created");
         let mixer = Mixer::new().expect("the decoders can be created");
-        let (tap, played) = match self.conditioning {
-            Conditioning::Engine => {
-                let (tap, played) = echo::reference();
-                (Some(tap), Some(played))
-            }
-            Conditioning::Platform => (None, None),
-        };
 
         let mut muted = self.muted.subscribe();
         let entry = Entry { muted: *muted.borrow_and_update(), resume: None };
@@ -171,7 +163,7 @@ impl Engine {
         *call = Some(Running { stop, task });
         Ok(Joined {
             fingerprint,
-            microphone: Microphone::new(capture, played, frames, uplink, Arc::clone(&self.settings), Arc::clone(&speaking)),
+            microphone: Microphone::new(capture, frames, uplink, Arc::clone(&self.settings), Arc::clone(&speaking)),
             speaker: Speaker::new(mixer, speaker_downlink, speaking, tap),
         })
     }
@@ -553,10 +545,10 @@ mod tests {
         let mut next = Instant::now();
         for (step, captured) in signal.chunks(480).enumerate() {
             let (first_half, second_half) = captured.split_at(if step % 2 == 0 { 441 } else { 39 });
-            talking.microphone.push(first_half);
-            talking.microphone.push(second_half);
+            talking.microphone.push(first_half, Instant::now());
+            talking.microphone.push(second_half, Instant::now());
             let mut played = vec![0.0; if step % 2 == 0 { 400 } else { 560 }];
-            hearing.speaker.pull(&mut played);
+            hearing.speaker.pull(&mut played, Instant::now());
             heard.extend(played);
             next += FRAME;
             thread::sleep(next.saturating_duration_since(Instant::now()));
@@ -590,7 +582,7 @@ mod tests {
 
         // The microphone of the first join sends over the second.
         let mut listener = server.block_on(Session::join(config(new, &identity, "listener"))).unwrap();
-        joined.microphone.push(&voice(SAMPLE_RATE as usize, 0.3));
+        joined.microphone.push(&voice(SAMPLE_RATE as usize, 0.3), Instant::now());
         let from = server.block_on(async {
             loop {
                 match tokio::time::timeout(Duration::from_secs(5), listener.next_event()).await.expect("audio within 5 s").unwrap() {

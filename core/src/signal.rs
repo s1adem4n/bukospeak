@@ -12,11 +12,6 @@ const RATE: f32 = SAMPLE_RATE as f32;
 /// A synthetic voice that RNNoise takes for speech: a 120 Hz pulse train with vibrato, shaped
 /// by the formants of an "a" and spoken in four syllables a second, peaking at `peak`.
 pub fn voice(samples: usize, peak: f32) -> Vec<f32> {
-    voice_at(120.0, samples, peak)
-}
-
-/// Another speaker's [`voice`], at `pitch` Hz.
-pub fn voice_at(pitch: f32, samples: usize, peak: f32) -> Vec<f32> {
     // Frequency and bandwidth of the first three formants of "a", in Hz.
     const FORMANTS: [(f32, f32); 3] = [(700.0, 130.0), (1220.0, 70.0), (2600.0, 160.0)];
     let mut resonators = [(0.0f32, 0.0f32); 3];
@@ -24,7 +19,7 @@ pub fn voice_at(pitch: f32, samples: usize, peak: f32) -> Vec<f32> {
     let voice: Vec<f32> = (0..samples)
         .map(|n| {
             let t = n as f32 / RATE;
-            phase += (pitch + 8.0 * (TAU * 5.0 * t).sin()) / RATE;
+            phase += (120.0 + 8.0 * (TAU * 5.0 * t).sin()) / RATE;
             let pulse = if phase >= 1.0 {
                 phase -= 1.0;
                 1.0
@@ -50,7 +45,12 @@ pub fn voice_at(pitch: f32, samples: usize, peak: f32) -> Vec<f32> {
 
 /// White noise of uniform amplitude up to `peak`, the same on every run.
 pub fn noise(samples: usize, peak: f32) -> Vec<f32> {
-    let mut state = 0x2545_f491_u32;
+    noise_from(0x2545_f491, samples, peak)
+}
+
+/// Another [`noise`], unrelated to it, from the nonzero `seed`.
+pub fn noise_from(seed: u32, samples: usize, peak: f32) -> Vec<f32> {
+    let mut state = seed;
     (0..samples)
         .map(|_| {
             state ^= state << 13;

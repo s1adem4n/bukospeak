@@ -98,6 +98,7 @@ pub fn heard(played: &[Played]) -> Vec<u32> {
 }
 
 /// A speaker and a microphone in a room, each on a device of its own, at 48 kHz on its clock.
+#[derive(Clone, Copy)]
 pub struct Room {
     /// The output device's clock runs this many parts per million fast, or slow if negative.
     pub output_drift_ppm: f64,
@@ -110,8 +111,18 @@ pub struct Room {
     pub input_latency_us: u64,
     /// The ways the speaker's sound reaches the microphone: after how long, and how loud.
     pub echo: &'static [(u64, f32)],
-    /// Each callback runs late by up to this much, uniformly.
+    /// Each callback runs late by up to this much, uniformly, which may turn the order of the
+    /// two devices' callbacks.
     pub callback_jitter_us: u64,
+    /// The times the platform tells for the devices' samples are off by up to this much, either
+    /// way, uniformly.
+    pub timestamp_jitter_us: u64,
+    /// Runs of input buffers the platform loses, as `(first, count)`: the device captured them,
+    /// but they never reach the callback.
+    pub input_lost: &'static [(usize, usize)],
+    /// Output callbacks that come so late, as `(callback, buffers)`, that the device plays this
+    /// many buffers of silence before what they ask for.
+    pub output_stalls: &'static [(usize, usize)],
 }
 
 impl Default for Room {
@@ -125,14 +136,18 @@ impl Default for Room {
             input_latency_us: 10_000,
             echo: &[(2_000, 0.5), (9_000, 0.15)],
             callback_jitter_us: 3_000,
+            timestamp_jitter_us: 200,
+            input_lost: &[],
+            output_stalls: &[],
         }
     }
 }
 
 impl Room {
-    /// Runs both devices for `duration_us`, in the order of their callbacks: the speaker plays
-    /// what `play` fills, and the microphone hands `capture` `near` and the speaker's echo. Each
-    /// is told when its callback runs.
+    /// Runs both devices for `duration_us`, in the order their callbacks run: the speaker plays
+    /// what `play` fills, and the microphone hands `capture` `near` and the speaker's echo.
+    /// `play` is told when the first of its samples plays, and `capture` when the first of its
+    /// samples was captured, in time since the devices started, as the platform tells it.
     pub fn run(
         &self,
         near: &[f32],
@@ -141,43 +156,64 @@ impl Room {
         mut capture: impl FnMut(Duration, &[f32]),
     ) {
         let mut random = SEED;
-        let mut late =
-            move || if self.callback_jitter_us == 0 { 0.0 } else { (next_random(&mut random) % self.callback_jitter_us) as f64 / 1e6 };
+        let mut uniform = move |range_us: u64| {
+            if range_us == 0 { 0.0 } else { (next_random(&mut random) % (range_us + 1)) as f64 / 1e6 }
+        };
         let output_rate = f64::from(SAMPLE_RATE) * (1.0 + self.output_drift_ppm / 1e6);
         let input_rate = f64::from(SAMPLE_RATE) * (1.0 + self.input_drift_ppm / 1e6);
         let duration = duration_us as f64 / 1e6;
         let (output_latency, input_latency) = (self.output_latency_us as f64 / 1e6, self.input_latency_us as f64 / 1e6);
+        let told = |at: f64, noise: f64| Duration::from_secs_f64((at + noise).max(0.0));
+        // What the output device played, sample by sample, silences included.
         let mut played: Vec<f32> = Vec::new();
         let mut captured = vec![0.0; self.input_buffer];
         let (mut outputs, mut inputs) = (0usize, 0usize);
+        let (mut output_late, mut input_late) = (uniform(self.callback_jitter_us), uniform(self.callback_jitter_us));
         loop {
-            // The output device asks for its next buffer once it starts playing the one before.
-            let output_at = (outputs * self.output_buffer) as f64 / output_rate;
+            // Where the next output buffer starts on what the device plays, after the silences
+            // up to it.
+            let output_start = outputs * self.output_buffer + self.silence_through(outputs);
+            // The output device asks for a buffer its latency before it plays it.
+            let output_plays = output_start as f64 / output_rate + output_latency;
+            let output_runs = output_plays - output_latency + output_late;
             // The input device hands over a buffer once its last sample is captured.
-            let input_at = ((inputs + 1) * self.input_buffer) as f64 / input_rate + input_latency;
-            if output_at.min(input_at) >= duration {
+            let input_captured = (inputs * self.input_buffer) as f64 / input_rate;
+            let input_runs = ((inputs + 1) * self.input_buffer) as f64 / input_rate + input_latency + input_late;
+            if output_runs.min(input_runs) >= duration {
                 return;
             }
-            if output_at <= input_at {
-                let start = played.len();
-                played.resize(start + self.output_buffer, 0.0);
-                play(Duration::from_secs_f64(output_at + late()), &mut played[start..]);
+            if output_runs <= input_runs {
+                played.resize(output_start + self.output_buffer, 0.0);
+                let noise = uniform(2 * self.timestamp_jitter_us) - self.timestamp_jitter_us as f64 / 1e6;
+                play(told(output_plays, noise), &mut played[output_start..]);
                 outputs += 1;
+                output_late = uniform(self.callback_jitter_us);
             } else {
-                for (offset, sample) in captured.iter_mut().enumerate() {
-                    let index = inputs * self.input_buffer + offset;
-                    let at = index as f64 / input_rate;
-                    let echo: f32 = self
-                        .echo
-                        .iter()
-                        .map(|&(delay_us, gain)| gain * sample_at(&played, (at - output_latency - delay_us as f64 / 1e6) * output_rate))
-                        .sum();
-                    *sample = near.get(index).copied().unwrap_or(0.0) + echo;
+                let lost = self.input_lost.iter().any(|&(first, count)| (first..first + count).contains(&inputs));
+                if !lost {
+                    for (offset, sample) in captured.iter_mut().enumerate() {
+                        let index = inputs * self.input_buffer + offset;
+                        let at = index as f64 / input_rate;
+                        let echo: f32 = self
+                            .echo
+                            .iter()
+                            .map(|&(delay_us, gain)| gain * sample_at(&played, (at - output_latency - delay_us as f64 / 1e6) * output_rate))
+                            .sum();
+                        *sample = near.get(index).copied().unwrap_or(0.0) + echo;
+                    }
+                    let noise = uniform(2 * self.timestamp_jitter_us) - self.timestamp_jitter_us as f64 / 1e6;
+                    capture(told(input_captured, noise), &captured);
                 }
-                capture(Duration::from_secs_f64(input_at + late()), &captured);
                 inputs += 1;
+                input_late = uniform(self.callback_jitter_us);
             }
         }
+    }
+
+    /// The samples of silence the output device played up to what the callback with this
+    /// number asks for.
+    fn silence_through(&self, callback: usize) -> usize {
+        self.output_stalls.iter().filter(|&&(stalled, _)| stalled <= callback).map(|&(_, buffers)| buffers * self.output_buffer).sum()
     }
 }
 

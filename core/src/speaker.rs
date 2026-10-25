@@ -7,7 +7,7 @@ use bukospeak_proto::MemberId;
 use bukospeak_proto::audio::FRAME_SAMPLES;
 use rtrb::Consumer;
 
-use crate::echo::Tap;
+use crate::echo::{Tap, duration_of};
 use crate::jitter::Packet;
 use crate::playout::Mixer;
 use crate::speaking::Speaking;
@@ -38,22 +38,23 @@ impl Speaker {
         Self { mixer, downlink, frame: [0.0; FRAME_SAMPLES], played: FRAME_SAMPLES, speaking, tap, stopped: false }
     }
 
-    pub fn pull(&mut self, mut samples: &mut [f32]) {
-        if let Some(tap) = &mut self.tap {
-            tap.played(Instant::now(), samples.len());
-        }
+    /// Fills samples for the platform to play, the first of them at `plays`, as the platform
+    /// tells it.
+    pub fn pull(&mut self, mut samples: &mut [f32], plays: Instant) {
         if self.stopped {
             self.stopped = false;
             self.flush();
         }
+        let mut filled = 0;
         while !samples.is_empty() {
             if self.played == FRAME_SAMPLES {
-                self.render();
+                self.render(plays + duration_of(filled));
             }
             let take = (FRAME_SAMPLES - self.played).min(samples.len());
             let (now, rest) = samples.split_at_mut(take);
             now.copy_from_slice(&self.frame[self.played..][..take]);
             self.played += take;
+            filled += take;
             samples = rest;
         }
     }
@@ -78,7 +79,8 @@ impl Speaker {
         self.played = FRAME_SAMPLES;
     }
 
-    fn render(&mut self) {
+    /// Mixes the next frame, which starts playing at `plays`.
+    fn render(&mut self, plays: Instant) {
         while let Ok(delivered) = self.downlink.pop() {
             match delivered {
                 // Every other member the server admits has a voice, so the insert can't fail.
@@ -88,7 +90,7 @@ impl Speaker {
         }
         self.mixer.render(&mut self.frame);
         if let Some(tap) = &mut self.tap {
-            tap.push(&self.frame);
+            tap.push(&self.frame, plays);
         }
         self.played = 0;
         self.speaking.set_voices(self.mixer.speaking());
@@ -112,7 +114,7 @@ mod tests {
         let mut played = [0.0; FRAME_SAMPLES];
         for packet in &packets[..20] {
             downlink.push(Downlink::Frame(member, *packet)).unwrap();
-            speaker.pull(&mut played);
+            speaker.pull(&mut played, Instant::now());
         }
         assert_eq!(speaking.members(you), [member]);
         assert!(played.iter().any(|&sample| sample != 0.0));
@@ -122,7 +124,7 @@ mod tests {
         for packet in &packets[20..] {
             downlink.push(Downlink::Frame(member, *packet)).unwrap();
         }
-        speaker.pull(&mut played);
+        speaker.pull(&mut played, Instant::now());
         assert!(played.iter().all(|&sample| sample == 0.0));
         assert!(speaking.members(you).is_empty());
     }

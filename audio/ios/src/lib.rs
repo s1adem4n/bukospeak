@@ -11,6 +11,7 @@ use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr::{self, NonNull};
+use std::time::{Duration, Instant};
 use std::{process, slice};
 
 use bukospeak_core::proto::audio::SAMPLE_RATE;
@@ -26,8 +27,8 @@ use objc2_audio_toolbox::{
     kAudioUnitSubType_VoiceProcessingIO, kAudioUnitType_Output,
 };
 use objc2_core_audio_types::{
-    AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, kAudio_ParamError, kAudioFormatFlagIsFloat,
-    kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
+    AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags, kAudio_ParamError,
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 
 /// The most frames the unit asks for at once: iOS's slice while the screen is locked.
@@ -38,6 +39,20 @@ const OUTPUT_BUS: u32 = 0;
 const INPUT_BUS: u32 = 1;
 
 const SAMPLE_BYTES: u32 = size_of::<f32>() as u32;
+
+/// How many nanoseconds `numer / denom` host time ticks are.
+#[repr(C)]
+struct Timebase {
+    numer: u32,
+    denom: u32,
+}
+
+// SAFETY: libSystem's host time, as declared in <mach/mach_time.h>; the host time in an
+// `AudioTimeStamp` counts the same ticks. Reading it has no preconditions.
+unsafe extern "C" {
+    safe fn mach_absolute_time() -> u64;
+    fn mach_timebase_info(timebase: *mut Timebase) -> i32;
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -237,7 +252,8 @@ unsafe extern "C-unwind" fn capture(
         // samples in the format set.
         let status = unsafe { AudioUnitRender(input.unit, flags.as_ptr(), timestamp, bus, frames, NonNull::from(&mut list)) };
         if status == 0 {
-            input.microphone.push(samples);
+            // SAFETY: the unit hands a time stamp that is valid during the callback.
+            input.microphone.push(samples, instant(unsafe { timestamp.as_ref() }));
         }
         status
     })
@@ -247,7 +263,7 @@ unsafe extern "C-unwind" fn capture(
 unsafe extern "C-unwind" fn render(
     refcon: NonNull<c_void>,
     _: NonNull<AudioUnitRenderActionFlags>,
-    _: NonNull<AudioTimeStamp>,
+    timestamp: NonNull<AudioTimeStamp>,
     _: u32,
     frames: u32,
     data: *mut AudioBufferList,
@@ -261,10 +277,31 @@ unsafe extern "C-unwind" fn render(
             return kAudio_ParamError;
         };
         let len = frames.min(buffer.mDataByteSize / SAMPLE_BYTES) as usize;
-        // SAFETY: the buffer holds at least `len` samples.
-        speaker.pull(unsafe { slice::from_raw_parts_mut(start.as_ptr(), len) });
+        // SAFETY: the buffer holds at least `len` samples, and the time stamp is valid during
+        // the callback.
+        let (samples, timestamp) = unsafe { (slice::from_raw_parts_mut(start.as_ptr(), len), timestamp.as_ref()) };
+        speaker.pull(samples, instant(timestamp));
         0
     })
+}
+
+/// When a callback's first sample was captured or plays, by its time stamp's host time.
+fn instant(timestamp: &AudioTimeStamp) -> Instant {
+    let now = Instant::now();
+    // The unit tells host times; were one missing, the callback runs close to its samples.
+    if !timestamp.mFlags.contains(AudioTimeStampFlags::HostTimeValid) {
+        return now;
+    }
+    let mut timebase = Timebase { numer: 1, denom: 1 };
+    // SAFETY: it writes the timebase it is handed, which lives through the call. It fails only
+    // for a null pointer, so its status says nothing.
+    unsafe { mach_timebase_info(&mut timebase) };
+    let duration = |ticks: u64| Duration::from_nanos((u128::from(ticks) * u128::from(timebase.numer) / u128::from(timebase.denom)) as u64);
+    let host_now = mach_absolute_time();
+    match timestamp.mHostTime.checked_sub(host_now) {
+        Some(ahead) => now + duration(ahead),
+        None => now - duration(host_now - timestamp.mHostTime),
+    }
 }
 
 /// Runs a callback's body; a panic must not unwind into AudioToolbox, so it aborts.
