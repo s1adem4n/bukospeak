@@ -87,7 +87,10 @@ impl Engine {
 
     /// Joins the channel, after leaving the call before if there is one.
     pub fn join(&self, config: JoinConfig) -> Result<Joined, Error> {
-        self.leave();
+        // Held until the call is in place, so a leave meanwhile, say from the listener's
+        // thread, waits for the join and then ends its call instead of missing it.
+        let mut call = self.call.lock().expect("the call lock is never poisoned");
+        self.end(call.take());
         // libopus creates codecs without fail for the fixed formats asked for.
         let capture = Capture::new().expect("the encoder can be created");
         let mixer = Mixer::new().expect("the decoders can be created");
@@ -101,7 +104,7 @@ impl Engine {
 
         let (stop, stopped) = oneshot::channel();
         let task = self.runtime.spawn(run(session, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
-        *self.call.lock().expect("the call lock is never poisoned") = Some(Call { stop, task });
+        *call = Some(Call { stop, task });
         Ok(Joined {
             you,
             members,
@@ -113,15 +116,20 @@ impl Engine {
 
     /// Leaves the call, if there is one, once the server knows.
     pub fn leave(&self) {
-        let Some(call) = self.call.lock().expect("the call lock is never poisoned").take() else { return };
-        // A call that ended by itself no longer listens.
-        let _ = call.stop.send(());
-        self.runtime.block_on(call.task).expect("the call task doesn't panic");
+        let mut call = self.call.lock().expect("the call lock is never poisoned");
+        self.end(call.take());
     }
 
     /// Whether the microphone's noise is suppressed (the default), or sent as captured.
     pub fn set_noise_suppression(&self, on: bool) {
         self.settings.noise_suppression.store(on, Ordering::Relaxed);
+    }
+
+    fn end(&self, call: Option<Call>) {
+        let Some(call) = call else { return };
+        // A call that ended by itself no longer listens.
+        let _ = call.stop.send(());
+        self.runtime.block_on(call.task).expect("the call task doesn't panic");
     }
 }
 
@@ -225,8 +233,9 @@ impl Deliveries {
 mod tests {
     use std::time::Instant;
 
-    use bukospeak_proto::audio::SAMPLE_RATE;
+    use bukospeak_proto::audio::{Level, SAMPLE_RATE};
     use bukospeak_server::{Identity, Room};
+    use rtrb::Consumer;
 
     use super::*;
     use crate::signal::voice;
@@ -315,5 +324,36 @@ mod tests {
             _ => None,
         });
         assert_eq!(left, talking.you);
+    }
+
+    /// What the speaker takes from the ring now, as `(was a leave, member)`.
+    fn take(ring: &mut Consumer<Downlink>) -> Vec<(bool, MemberId)> {
+        std::iter::from_fn(|| ring.pop().ok())
+            .map(|delivered| match delivered {
+                Downlink::Frame(from, _) => (false, from),
+                Downlink::Left(member) => (true, member),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn leaves_the_full_ring_refuses_wait_and_arrive_in_order_once_it_has_room() {
+        let (ring, mut speaker) = RingBuffer::new(2);
+        let mut deliveries = Deliveries::new(ring);
+        let packet = || Packet::new(0, false, Level::new(20), 0, &[0]).unwrap();
+        let (first, second, third) = (MemberId(1), MemberId(2), MemberId(3));
+
+        deliveries.frame(first, packet());
+        deliveries.frame(second, packet());
+        deliveries.left(first);
+        deliveries.left(second);
+        // A frame the full ring refuses is lost.
+        deliveries.frame(third, packet());
+        assert_eq!(take(&mut speaker), [(false, first), (false, second)]);
+
+        deliveries.retry();
+        assert_eq!(take(&mut speaker), [(true, first), (true, second)]);
+        deliveries.frame(third, packet());
+        assert_eq!(take(&mut speaker), [(false, third)]);
     }
 }

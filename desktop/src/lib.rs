@@ -295,3 +295,40 @@ fn config(direction: Direction, ranges: impl Iterator<Item = SupportedStreamConf
 fn format(config: StreamConfig) -> Format {
     Format { channels: usize::from(config.channels), rate: config.sample_rate }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(format: SampleFormat, channels: u16, rates: (u32, u32), buffer_size: SupportedBufferSize) -> SupportedStreamConfigRange {
+        SupportedStreamConfigRange::new(channels, rates.0, rates.1, buffer_size, format)
+    }
+
+    fn chosen(ranges: &[SupportedStreamConfigRange]) -> Result<StreamConfig, Error> {
+        config(Direction::Input, ranges.iter().copied())
+    }
+
+    #[test]
+    fn a_float_format_is_chosen_at_the_call_rate_else_cd_rate_then_with_fewest_channels() {
+        let any = SupportedBufferSize::Unknown;
+        let stereo_48 = range(SampleFormat::F32, 2, (8_000, 48_000), any);
+        let mono_cd = range(SampleFormat::F32, 1, (44_100, 44_100), any);
+        let mono_96 = range(SampleFormat::F32, 1, (96_000, 96_000), any);
+        let mono_48_i16 = range(SampleFormat::I16, 1, (48_000, 48_000), any);
+
+        let config = chosen(&[mono_cd, mono_48_i16, stereo_48]).unwrap();
+        assert_eq!((config.channels, config.sample_rate), (2, SAMPLE_RATE));
+        let config = chosen(&[mono_96, mono_cd]).unwrap();
+        assert_eq!((config.channels, config.sample_rate), (1, CD_RATE));
+        assert_eq!(chosen(&[mono_96]).unwrap().sample_rate, 96_000);
+        assert!(matches!(chosen(&[mono_48_i16]), Err(Error::NoFormat(Direction::Input))));
+    }
+
+    #[test]
+    fn buffers_are_10_ms_where_the_device_takes_them() {
+        let with = |buffer_size| chosen(&[range(SampleFormat::F32, 1, (48_000, 48_000), buffer_size)]).unwrap().buffer_size;
+        assert_eq!(with(SupportedBufferSize::Range { min: 64, max: 4096 }), BufferSize::Fixed(480));
+        assert_eq!(with(SupportedBufferSize::Range { min: 1024, max: 4096 }), BufferSize::Default);
+        assert_eq!(with(SupportedBufferSize::Unknown), BufferSize::Default);
+    }
+}

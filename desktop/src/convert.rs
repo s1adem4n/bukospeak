@@ -148,9 +148,20 @@ mod tests {
         (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
     }
 
+    /// The frequency of a sine sampled at `rate`, by its zero crossings.
+    fn frequency(samples: &[f32], rate: u32) -> f32 {
+        let crossings = samples.windows(2).filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0)).count();
+        crossings as f32 / 2.0 / (samples.len() as f32 / rate as f32)
+    }
+
+    /// The middle half, past the resamplers' delay.
+    fn settled(samples: &[f32]) -> &[f32] {
+        &samples[samples.len() / 4..samples.len() * 3 / 4]
+    }
+
     /// Through an input device's format into the call, and from there out of an output
-    /// device's, in buffers of odd lengths.
-    fn round_trip(device: Format) -> Vec<f32> {
+    /// device's, in buffers of odd lengths; what the call got, and what the device played.
+    fn round_trip(device: Format) -> (Vec<f32>, Vec<f32>) {
         let mut input = Input::new(device).unwrap();
         let mut output = Output::new(device).unwrap();
         let captured: Vec<f32> = sine(device.rate, 1.0, 440.0).iter().flat_map(|&sample| vec![sample; device.channels]).collect();
@@ -161,18 +172,18 @@ mod tests {
         }
         assert_eq!(call.len(), SAMPLE_RATE as usize, "one second at 48 kHz");
 
-        let mut call = call.into_iter();
+        let mut sent = call.iter();
         let mut played = vec![0.0; captured.len()];
         for buffer in played.chunks_mut(device.channels * 333) {
-            output.pull(buffer, |frame| frame.iter_mut().for_each(|sample| *sample = call.next().unwrap_or(0.0)));
+            output.pull(buffer, |frame| frame.iter_mut().for_each(|sample| *sample = sent.next().copied().unwrap_or(0.0)));
         }
-        played
+        (call, played)
     }
 
     #[test]
     fn a_48_khz_mono_device_passes_samples_unchanged() {
         let device = Format { channels: 1, rate: SAMPLE_RATE };
-        let played = round_trip(device);
+        let (_, played) = round_trip(device);
         assert_eq!(played, sine(SAMPLE_RATE, 1.0, 440.0));
     }
 
@@ -192,16 +203,20 @@ mod tests {
     #[test]
     fn other_rates_are_converted_to_48_khz_and_back() {
         for rate in [44_100, 16_000, 96_000] {
-            let played = round_trip(Format { channels: 2, rate });
-            // Past the resamplers' delay, the sine comes back at its loudness.
-            let settled = &played[played.len() / 4..played.len() * 3 / 4];
-            let rms = rms(settled);
+            let (call, played) = round_trip(Format { channels: 2, rate });
+            let left: Vec<f32> = played.iter().step_by(2).copied().collect();
+            // The sine keeps its pitch in the call and back on the device, and its loudness.
+            for (samples, at) in [(&call, SAMPLE_RATE), (&left, rate)] {
+                let frequency = frequency(settled(samples), at);
+                assert!((438.0..442.0).contains(&frequency), "{rate} Hz: a frequency of {frequency} Hz at {at} Hz");
+            }
+            let rms = rms(settled(&played));
             assert!((0.33..0.38).contains(&rms), "{rate} Hz: rms {rms}");
         }
     }
 
     #[test]
-    fn rates_that_dont_divide_into_10_ms_are_refused() {
+    fn formats_without_10_ms_chunks_or_channels_are_refused() {
         assert!(matches!(Input::new(Format { channels: 1, rate: 22_050 }), Err(Error::Rate(22_050))));
         assert!(matches!(Output::new(Format { channels: 0, rate: SAMPLE_RATE }), Err(Error::NoChannels)));
     }
