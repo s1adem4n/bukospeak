@@ -33,17 +33,24 @@ nonisolated struct Fingerprint: Hashable, Sendable, CustomStringConvertible {
     }
 }
 
-/// What happens in the calls, in order.
-nonisolated enum EngineEvent: Sendable {
-    /// A call was joined: who is in it now. Sent before the call's other events, so they are
-    /// this call's until the next.
-    case entered(you: UInt16, members: [Member])
-    case joined(Member)
-    case left(UInt16)
+/// The channel after a change: who is in it and who speaks, kept by the engine.
+nonisolated struct ChannelUpdate: Sendable {
+    enum State: Sendable {
+        case out
+        case connected
+        /// The connection was lost, and the engine joins again.
+        case reconnecting
+    }
+
+    let state: State
+    /// This member's id, while in the channel.
+    let you: UInt16?
+    /// Everyone in the channel, this member included; kept while joining again.
+    let members: [Member]
     /// Who speaks now, this member among them.
-    case speaking(Set<UInt16>)
-    /// The call ended without a leave: the connection was lost.
-    case disconnected(String)
+    let speaking: Set<UInt16>
+    /// The call ended without a leave: why, after joining again failed too.
+    let lost: String?
 }
 
 /// A call just joined.
@@ -65,40 +72,40 @@ nonisolated struct AudioError: Error {
 /// The Rust engine, through its C interface: joins and leaves the channel and plays the call.
 /// The engine may be called from any thread, so its handle may be shared.
 nonisolated final class Engine: @unchecked Sendable {
-    /// The engine's events, in order.
-    let events: AsyncStream<EngineEvent>
+    /// The channel after each change, in order.
+    let updates: AsyncStream<ChannelUpdate>
 
     private let engine: OpaquePointer
     private let listener: Unmanaged<Listener>
     /// Joins and leaves block while the server answers, so they wait here, one after the other.
     private let queue = DispatchQueue(label: "digital.buko.BukoSpeak.engine")
 
-    /// What the engine's listener holds: where its events go.
+    /// What the engine's listener holds: where its updates go.
     private final class Listener: Sendable {
-        let continuation: AsyncStream<EngineEvent>.Continuation
+        let continuation: AsyncStream<ChannelUpdate>.Continuation
 
-        init(_ continuation: AsyncStream<EngineEvent>.Continuation) {
+        init(_ continuation: AsyncStream<ChannelUpdate>.Continuation) {
             self.continuation = continuation
         }
     }
 
     /// Nil if the engine's threads couldn't start.
     init?() {
-        let (events, continuation) = AsyncStream.makeStream(of: EngineEvent.self)
+        let (updates, continuation) = AsyncStream.makeStream(of: ChannelUpdate.self)
         let listener = Unmanaged.passRetained(Listener(continuation))
         guard
             let engine = bukospeak_engine_new(
                 listener.toOpaque(),
-                { context, event in
+                { context, update in
                     let listener = Unmanaged<Listener>.fromOpaque(context!).takeUnretainedValue()
-                    listener.continuation.yield(EngineEvent(event!.pointee))
+                    listener.continuation.yield(ChannelUpdate(update!.pointee))
                 }
             )
         else {
             listener.release()
             return nil
         }
-        self.events = events
+        self.updates = updates
         self.engine = engine
         self.listener = listener
     }
@@ -210,21 +217,22 @@ nonisolated extension Member {
     }
 }
 
-nonisolated extension EngineEvent {
-    fileprivate init(_ event: BukoSpeakEvent) {
-        self =
-            switch event.kind {
-            case BUKO_SPEAK_EVENT_KIND_ENTERED:
-                .entered(
-                    you: event.you,
-                    members: UnsafeBufferPointer(start: event.members, count: event.members_len).map(Member.init)
-                )
-            case BUKO_SPEAK_EVENT_KIND_JOINED: .joined(Member(event.member))
-            case BUKO_SPEAK_EVENT_KIND_LEFT: .left(event.member.id)
-            case BUKO_SPEAK_EVENT_KIND_SPEAKING:
-                .speaking(Set(UnsafeBufferPointer(start: event.speaking, count: event.speaking_len)))
-            case BUKO_SPEAK_EVENT_KIND_DISCONNECTED: .disconnected(String(event.reason))
-            default: fatalError("the engine sends no other events")
+nonisolated extension ChannelUpdate {
+    fileprivate init(_ update: BukoSpeakUpdate) {
+        let state: State =
+            switch update.state {
+            case BUKO_SPEAK_STATE_OUT: .out
+            case BUKO_SPEAK_STATE_CONNECTED: .connected
+            case BUKO_SPEAK_STATE_RECONNECTING: .reconnecting
+            default: fatalError("the engine has no other states")
             }
+        let lost = String(update.lost)
+        self.init(
+            state: state,
+            you: update.you == 0 ? nil : update.you,
+            members: UnsafeBufferPointer(start: update.members, count: update.members_len).map(Member.init),
+            speaking: Set(UnsafeBufferPointer(start: update.speaking, count: update.speaking_len)),
+            lost: lost.isEmpty ? nil : lost
+        )
     }
 }

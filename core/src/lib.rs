@@ -1,6 +1,7 @@
 //! The client side shared by the apps: the engine, and the session and audio processing it runs.
 
 mod capture;
+mod channel;
 mod conditioner;
 mod engine;
 mod gate;
@@ -25,8 +26,9 @@ mod signal;
 mod simulator;
 
 pub use bukospeak_proto as proto;
+pub use channel::{Announcement, Channel, State};
 pub use conditioner::Conditioning;
-pub use engine::{Engine, Event, Joined, Listener};
+pub use engine::{Engine, Joined, Listener, Lost, Update};
 pub use microphone::Microphone;
 pub use session::{Error, JoinConfig};
 pub use speaker::Speaker;

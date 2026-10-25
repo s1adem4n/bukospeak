@@ -12,7 +12,7 @@ final class Call: NSObject {
         case idle
         case joining
         case connected
-        /// The connection was lost while the call was up, and the call joins again.
+        /// The connection was lost while the call was up, and the engine joins again.
         case reconnecting
         case failed(String)
     }
@@ -45,10 +45,11 @@ final class Call: NSObject {
     @ObservationIgnored private var isInterrupted = false
     /// Whether the call plays on the microphone and speaker.
     @ObservationIgnored private var isPlaying = false
-    /// Whether the engine's events are of the join under way or done: they follow its Entered.
+    /// Whether the engine's updates are of the join under way or done: they follow its first
+    /// one in the channel.
     @ObservationIgnored private var isEntered = false
-    /// Why the engine's call was lost, if that happened before its join came back here.
-    @ObservationIgnored private var lost: String?
+    /// The engine's state of the call, which may join again before its join came back here.
+    @ObservationIgnored private var engineState = ChannelUpdate.State.out
 
     private static let log = Logger(subsystem: "digital.buko.BukoSpeak", category: "call")
 
@@ -57,9 +58,9 @@ final class Call: NSObject {
         self.engine = engine
         super.init()
         controller.callObserver.setDelegate(self, queue: nil)
-        Task { [weak self, events = engine.events] in
-            for await event in events {
-                self?.handle(event)
+        Task { [weak self, updates = engine.updates] in
+            for await update in updates {
+                self?.update(update)
             }
         }
         Task { [weak self] in
@@ -158,7 +159,6 @@ final class Call: NSObject {
     private func joinChannel() async throws(JoinError) {
         let server = settings.server.trimmingCharacters(in: .whitespaces)
         isEntered = false
-        lost = nil
         engine.setNoiseSuppression(settings.noiseSuppression)
         engine.setMuted(isMuted)
         do throws(JoinError) {
@@ -177,57 +177,28 @@ final class Call: NSObject {
         }
     }
 
+    /// Follows the engine's state once the join came back.
     private func connected() {
-        phase = .connected
+        phase = engineState == .reconnecting ? .reconnecting : .connected
         updateAudio()
     }
 
-    private func handle(_ event: EngineEvent) {
+    private func update(_ update: ChannelUpdate) {
         guard id != nil else { return }
-        switch event {
-        case .entered(let you, let members):
+        if update.state != .out {
             isEntered = true
-            self.you = you
-            self.members = members
-            speaking = []
-        // Before Entered, they are of a call that was left.
-        case _ where !isEntered:
-            break
-        case .joined(let member):
-            members.append(member)
-        case .left(let id):
-            members.removeAll { $0.id == id }
-            speaking.remove(id)
-        case .speaking(let now):
-            speaking = now
-        case .disconnected(let reason):
-            isEntered = false
-            if phase == .connected {
-                Task { await reconnect(after: reason) }
-            } else {
-                lost = reason
-            }
         }
-    }
-
-    /// Joins again, once, when the connection was lost while the call was up, as when iOS
-    /// suspended the app through another call; ends the call if that fails too.
-    private func reconnect(after reason: String) async {
-        guard let id else { return }
-        phase = .reconnecting
-        speaking = []
-        updateAudio()
-        do {
-            try await joinChannel()
-            guard self.id == id else { return }
-            if let lost {
-                return fail("The connection was lost again: \(lost)")
-            }
+        // Before the join's first, they are of a call that was left.
+        guard isEntered else { return }
+        engineState = update.state
+        you = update.you
+        members = update.members
+        speaking = update.speaking
+        if let lost = update.lost {
+            return fail("The connection was lost: \(lost)")
+        }
+        if phase != .joining {
             connected()
-        } catch {
-            guard self.id == id else { return }
-            provider.reportCall(with: id, endedAt: nil, reason: .failed)
-            await end(failure: "The connection was lost: \(reason)")
         }
     }
 
@@ -259,13 +230,13 @@ final class Call: NSObject {
 
     /// Leaves the channel and forgets the call, with why if it failed.
     private func end(failure: String?) async {
-        // First, so a join or a reconnect under way sees the call is over.
+        // First, so a join under way sees the call is over.
         id = nil
         // Leaving stops the call's audio.
         await engine.leave()
         isPlaying = false
         isEntered = false
-        lost = nil
+        engineState = .out
         members = []
         speaking = []
         you = nil
@@ -352,9 +323,6 @@ extension Call: @MainActor CXProviderDelegate {
                 action.fulfill()
                 provider.reportOutgoingCall(with: action.callUUID, connectedAt: nil)
                 provider.reportCall(with: action.callUUID, updated: Self.capabilities)
-                if let lost {
-                    await reconnect(after: lost)
-                }
             } catch {
                 action.fail()
                 guard id == action.callUUID else { return }

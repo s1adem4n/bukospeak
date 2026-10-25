@@ -7,22 +7,24 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use bukospeak_ffi::{
-    BukoSpeakEngine, BukoSpeakEvent, BukoSpeakEventKind, BukoSpeakFingerprint, BukoSpeakJoinResult, BukoSpeakJoinStatus, BukoSpeakMember,
-    BukoSpeakStr, bukospeak_engine_free, bukospeak_engine_join, bukospeak_engine_leave, bukospeak_engine_new,
+    BukoSpeakEngine, BukoSpeakFingerprint, BukoSpeakJoinResult, BukoSpeakJoinStatus, BukoSpeakMember, BukoSpeakState, BukoSpeakStr,
+    BukoSpeakUpdate, bukospeak_engine_free, bukospeak_engine_join, bukospeak_engine_leave, bukospeak_engine_new,
 };
 use bukospeak_server::{Identity, Room};
 use tokio::runtime::Runtime;
 
 const ROOM_KEY: &str = "room-key";
 
-/// An event as the test keeps it, past the callback.
+/// An update as the test keeps it, past the callback.
 #[derive(Debug, PartialEq)]
-enum Heard {
-    Entered(u16, Vec<(u16, String)>),
-    Joined(u16, String),
-    Left(u16),
-    Speaking(Vec<u16>),
-    Disconnected(String),
+struct Heard {
+    /// The state's name.
+    state: &'static str,
+    you: u16,
+    members: Vec<(u16, String)>,
+    speaking: Vec<u16>,
+    announcement: String,
+    lost: String,
 }
 
 /// A join's result as the test keeps it.
@@ -43,19 +45,25 @@ fn members(members: *const BukoSpeakMember, len: usize) -> Vec<(u16, String)> {
     unsafe { slice::from_raw_parts(members, len) }.iter().map(|member| (member.id, text(&member.name))).collect()
 }
 
-extern "C" fn heard(context: *mut c_void, event: &BukoSpeakEvent) {
+extern "C" fn heard(context: *mut c_void, update: &BukoSpeakUpdate) {
     // SAFETY: the context is the test's sender, which outlives the engine.
-    let events = unsafe { &*context.cast::<mpsc::Sender<Heard>>() };
-    let heard = match event.kind {
-        BukoSpeakEventKind::Entered => Heard::Entered(event.you, members(event.members, event.members_len)),
-        BukoSpeakEventKind::Joined => Heard::Joined(event.member.id, text(&event.member.name)),
-        BukoSpeakEventKind::Left => Heard::Left(event.member.id),
+    let updates = unsafe { &*context.cast::<mpsc::Sender<Heard>>() };
+    let state = match update.state {
+        BukoSpeakState::Out => "out",
+        BukoSpeakState::Connected => "connected",
+        BukoSpeakState::Reconnecting => "reconnecting",
+    };
+    let heard = Heard {
+        state,
+        you: update.you,
+        members: members(update.members, update.members_len),
         // SAFETY: lent for the callback.
-        BukoSpeakEventKind::Speaking => Heard::Speaking(unsafe { slice::from_raw_parts(event.speaking, event.speaking_len) }.to_vec()),
-        BukoSpeakEventKind::Disconnected => Heard::Disconnected(text(&event.reason)),
+        speaking: unsafe { slice::from_raw_parts(update.speaking, update.speaking_len) }.to_vec(),
+        announcement: text(&update.announcement),
+        lost: text(&update.lost),
     };
     // The test may have stopped listening.
-    let _ = events.send(heard);
+    let _ = updates.send(heard);
 }
 
 extern "C" fn joined(context: *mut c_void, result: &BukoSpeakJoinResult) {
@@ -85,9 +93,9 @@ fn serve() -> Server {
     Server { _runtime: runtime, address, fingerprint: identity.fingerprint().0 }
 }
 
-/// An engine whose events go to the receiver; the sender must outlive it.
-fn engine(events: &mpsc::Sender<Heard>) -> Box<BukoSpeakEngine> {
-    bukospeak_engine_new(ptr::from_ref(events).cast_mut().cast(), heard).unwrap()
+/// An engine whose updates go to the receiver; the sender must outlive it.
+fn engine(updates: &mpsc::Sender<Heard>) -> Box<BukoSpeakEngine> {
+    bukospeak_engine_new(ptr::from_ref(updates).cast_mut().cast(), heard).unwrap()
 }
 
 fn join(engine: &BukoSpeakEngine, server: &str, name: &str, room_key: &str, pin: Option<[u8; 32]>) -> Outcome {
@@ -109,8 +117,8 @@ fn join(engine: &BukoSpeakEngine, server: &str, name: &str, room_key: &str, pin:
     result.expect("the join hands its result over before it returns")
 }
 
-fn next(events: &mpsc::Receiver<Heard>) -> Heard {
-    events.recv_timeout(Duration::from_secs(5)).expect("an event within 5 s")
+fn next(updates: &mpsc::Receiver<Heard>) -> Heard {
+    updates.recv_timeout(Duration::from_secs(5)).expect("an update within 5 s")
 }
 
 #[test]
@@ -124,14 +132,25 @@ fn members_join_see_each_other_and_leave() {
         panic!("the first member didn't join")
     };
     assert_eq!(fingerprint, server.fingerprint, "a first join learns the fingerprint to pin");
-    let Heard::Entered(first_id, _) = next(&first_heard) else { panic!("the first call didn't start with its entry") };
+    let first_id = next(&first_heard).you;
     assert!(matches!(join(&second, &server.address, "second", ROOM_KEY, Some(fingerprint)), Outcome::Joined { .. }));
-    let Heard::Entered(second_id, members) = next(&second_heard) else { panic!("the second call didn't start with its entry") };
-    assert_eq!(members, [(first_id, "first".to_owned()), (second_id, "second".to_owned())]);
-    assert_eq!(next(&first_heard), Heard::Joined(second_id, "second".into()));
+    let entered = next(&second_heard);
+    let second_id = entered.you;
+    let both = vec![(first_id, "first".to_owned()), (second_id, "second".to_owned())];
+    let quiet = |state, you, members, announcement: &str| Heard {
+        state,
+        you,
+        members,
+        speaking: Vec::new(),
+        announcement: announcement.into(),
+        lost: String::new(),
+    };
+    assert_eq!(entered, quiet("connected", second_id, both.clone(), ""));
+    assert_eq!(next(&first_heard), quiet("connected", first_id, both, "second ist beigetreten"));
 
     bukospeak_engine_leave(&second);
-    assert_eq!(next(&first_heard), Heard::Left(second_id));
+    assert_eq!(next(&second_heard), quiet("out", 0, Vec::new(), ""));
+    assert_eq!(next(&first_heard), quiet("connected", first_id, vec![(first_id, "first".to_owned())], "second hat den Kanal verlassen"));
     bukospeak_engine_free(second);
     bukospeak_engine_free(first);
 }

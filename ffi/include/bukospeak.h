@@ -7,16 +7,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef enum BukoSpeakEventKind {
+/**
+ * Whether this member is in the channel.
+ */
+typedef enum BukoSpeakState {
+  BUKO_SPEAK_STATE_OUT,
+  BUKO_SPEAK_STATE_CONNECTED,
   /**
-   * A call started: the events after it are this call's, the ones before an earlier call's.
+   * The connection was lost, and the engine joins again.
    */
-  BUKO_SPEAK_EVENT_KIND_ENTERED,
-  BUKO_SPEAK_EVENT_KIND_JOINED,
-  BUKO_SPEAK_EVENT_KIND_LEFT,
-  BUKO_SPEAK_EVENT_KIND_SPEAKING,
-  BUKO_SPEAK_EVENT_KIND_DISCONNECTED,
-} BukoSpeakEventKind;
+  BUKO_SPEAK_STATE_RECONNECTING,
+} BukoSpeakState;
 
 typedef enum BukoSpeakJoinStatus {
   BUKO_SPEAK_JOIN_STATUS_JOINED,
@@ -47,38 +48,39 @@ typedef struct BukoSpeakMember {
 } BukoSpeakMember;
 
 /**
- * Something that happened in the call; only its kind's fields mean something.
+ * The channel after a change, and what changed.
  */
-typedef struct BukoSpeakEvent {
-  enum BukoSpeakEventKind kind;
+typedef struct BukoSpeakUpdate {
+  enum BukoSpeakState state;
   /**
-   * Entered: this member's id.
+   * This member's id; 0, which the server never hands out, while out of the channel.
    */
   uint16_t you;
   /**
-   * Entered: everyone in the channel, this member included.
+   * Everyone in the channel, this member included, in the order they came; kept while
+   * joining again, empty when out.
    */
   const struct BukoSpeakMember *members;
   size_t members_len;
   /**
-   * Joined: who joined. Left: who left, by id only.
-   */
-  struct BukoSpeakMember member;
-  /**
-   * Speaking: who speaks now, in id order, this member among them.
+   * Who speaks now, in id order, this member among them.
    */
   const uint16_t *speaking;
   size_t speaking_len;
   /**
-   * Disconnected: why the call ended, for the user.
+   * What to tell the user aloud about the change, in German; empty if nothing.
    */
-  struct BukoSpeakStr reason;
-} BukoSpeakEvent;
+  struct BukoSpeakStr announcement;
+  /**
+   * The call ended without a leave: why, for the user; empty otherwise.
+   */
+  struct BukoSpeakStr lost;
+} BukoSpeakUpdate;
 
 /**
- * Hears the engine's events, in order, on a thread of the engine's.
+ * Hears the channel after each change, in order, on a thread of the engine's.
  */
-typedef void (*BukoSpeakListener)(void *context, const struct BukoSpeakEvent *event);
+typedef void (*BukoSpeakListener)(void *context, const struct BukoSpeakUpdate *update);
 
 /**
  * A server's certificate fingerprint, its SHA-256.
@@ -117,13 +119,13 @@ typedef void (*BukoSpeakJoinDone)(void *context, const struct BukoSpeakJoinResul
 typedef void (*BukoSpeakFailed)(void *context, struct BukoSpeakStr message);
 
 /**
- * A new engine, or null if its threads couldn't start. The listener hears its events with
+ * A new engine, or null if its threads couldn't start. The listener hears its updates with
  * `context` until `bukospeak_engine_free` returns, never after.
  */
 struct BukoSpeakEngine *bukospeak_engine_new(void *context, BukoSpeakListener listener);
 
 /**
- * Stops the call's audio, leaves the call, and returns once the listener had its last event;
+ * Stops the call's audio, leaves the call, and returns once the listener had its last update;
  * so not from the listener.
  */
 void bukospeak_engine_free(struct BukoSpeakEngine *engine);
@@ -132,7 +134,7 @@ void bukospeak_engine_free(struct BukoSpeakEngine *engine);
  * Leaves the call before, if there is one, and joins the channel, trusting the server by its
  * fingerprint `pin`, or on first use if it is null. Blocks until the server welcomes this
  * member or turns it away, 5 s at most, and hands `done` the result before it returns. Who is
- * in the call comes as its Entered event.
+ * in the call comes as the next update.
  *
  * # Safety
  *

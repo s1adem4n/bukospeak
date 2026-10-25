@@ -17,6 +17,7 @@ const KEEP_ALIVE: Duration = Duration::from_secs(5);
 /// How long a join may take, from resolving the server to its Welcome.
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Clone)]
 pub struct JoinConfig {
     /// The server as `host:port`.
     pub server: String,
@@ -125,7 +126,7 @@ impl Session {
 
     /// A handle that sends this member's audio, for the thread that encodes it.
     pub fn audio_sender(&self) -> AudioSender {
-        AudioSender { connection: self.connection.clone() }
+        AudioSender { connection: Arc::new(Mutex::new(self.connection.clone())) }
     }
 
     /// The next event; an error means the session is over.
@@ -157,16 +158,22 @@ impl Session {
     }
 }
 
+/// Sends this member's audio over a session's connection; its clones share the connection.
 #[derive(Clone)]
 pub struct AudioSender {
-    connection: Connection,
+    connection: Arc<Mutex<Connection>>,
 }
 
 impl AudioSender {
     /// Sends a frame, its `from` left for the server to stamp. A frame the path can't take now is
     /// dropped, as a late one would be.
     pub fn send(&self, frame: &audio::Frame) -> Result<(), quinn::SendDatagramError> {
-        self.connection.send_datagram(Bytes::from(frame.encode()))
+        self.connection.lock().expect("the connection lock is never poisoned").send_datagram(Bytes::from(frame.encode()))
+    }
+
+    /// Sends over the session's connection from now on, as after joining again.
+    pub fn follow(&self, session: &Session) {
+        *self.connection.lock().expect("the connection lock is never poisoned") = session.connection.clone();
     }
 }
 

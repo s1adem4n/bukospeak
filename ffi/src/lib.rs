@@ -2,7 +2,7 @@
 //! the channel, the same for every app; and per platform the call's audio, on iOS on the voice
 //! processing unit.
 //!
-//! What Rust hands the app (events, a join's result, why something failed) is lent for the
+//! What Rust hands the app (updates, a join's result, why something failed) is lent for the
 //! duration of the callback it comes with. Callbacks come on the engine's threads, or on the
 //! caller's during a call that takes one. No pointer may be null unless its function says so.
 
@@ -10,13 +10,12 @@
 mod ios;
 
 use std::ffi::{CStr, c_char, c_void};
-use std::ptr;
 use std::str::Utf8Error;
 use std::sync::{Arc, Mutex};
 
 use bukospeak_core::proto::Fingerprint;
 use bukospeak_core::proto::control::Member;
-use bukospeak_core::{Conditioning, Engine, Error, Event, JoinConfig, Joined, Listener};
+use bukospeak_core::{Conditioning, Engine, Error, JoinConfig, Joined, Listener, State, Update};
 
 #[cfg(target_os = "ios")]
 use crate::ios::Audio;
@@ -53,52 +52,36 @@ impl BukoSpeakMember {
     }
 }
 
+/// Whether this member is in the channel.
 #[repr(C)]
-pub enum BukoSpeakEventKind {
-    /// A call started: the events after it are this call's, the ones before an earlier call's.
-    Entered,
-    Joined,
-    Left,
-    Speaking,
-    Disconnected,
+pub enum BukoSpeakState {
+    Out,
+    Connected,
+    /// The connection was lost, and the engine joins again.
+    Reconnecting,
 }
 
-/// Something that happened in the call; only its kind's fields mean something.
+/// The channel after a change, and what changed.
 #[repr(C)]
-pub struct BukoSpeakEvent {
-    pub kind: BukoSpeakEventKind,
-    /// Entered: this member's id.
+pub struct BukoSpeakUpdate {
+    pub state: BukoSpeakState,
+    /// This member's id; 0, which the server never hands out, while out of the channel.
     pub you: u16,
-    /// Entered: everyone in the channel, this member included.
+    /// Everyone in the channel, this member included, in the order they came; kept while
+    /// joining again, empty when out.
     pub members: *const BukoSpeakMember,
     pub members_len: usize,
-    /// Joined: who joined. Left: who left, by id only.
-    pub member: BukoSpeakMember,
-    /// Speaking: who speaks now, in id order, this member among them.
+    /// Who speaks now, in id order, this member among them.
     pub speaking: *const u16,
     pub speaking_len: usize,
-    /// Disconnected: why the call ended, for the user.
-    pub reason: BukoSpeakStr,
+    /// What to tell the user aloud about the change, in German; empty if nothing.
+    pub announcement: BukoSpeakStr,
+    /// The call ended without a leave: why, for the user; empty otherwise.
+    pub lost: BukoSpeakStr,
 }
 
-impl BukoSpeakEvent {
-    fn new(kind: BukoSpeakEventKind) -> Self {
-        let nobody = BukoSpeakMember { id: 0, name: BukoSpeakStr::of("") };
-        Self {
-            kind,
-            you: 0,
-            members: ptr::null(),
-            members_len: 0,
-            member: nobody,
-            speaking: ptr::null(),
-            speaking_len: 0,
-            reason: BukoSpeakStr::of(""),
-        }
-    }
-}
-
-/// Hears the engine's events, in order, on a thread of the engine's.
-pub type BukoSpeakListener = extern "C" fn(context: *mut c_void, event: &BukoSpeakEvent);
+/// Hears the channel after each change, in order, on a thread of the engine's.
+pub type BukoSpeakListener = extern "C" fn(context: *mut c_void, update: &BukoSpeakUpdate);
 
 #[repr(C)]
 pub enum BukoSpeakJoinStatus {
@@ -157,46 +140,37 @@ unsafe impl Send for Foreign {}
 unsafe impl Sync for Foreign {}
 
 impl Listener for Foreign {
-    fn event(&self, event: Event) {
-        let tell = |event: &BukoSpeakEvent| (self.listener)(self.context, event);
-        match event {
-            Event::Entered { you, members } => {
-                let members: Vec<BukoSpeakMember> = members.iter().map(BukoSpeakMember::of).collect();
-                tell(&BukoSpeakEvent {
-                    you: you.0,
-                    members: members.as_ptr(),
-                    members_len: members.len(),
-                    ..BukoSpeakEvent::new(BukoSpeakEventKind::Entered)
-                });
-            }
-            Event::Joined(member) => {
-                tell(&BukoSpeakEvent { member: BukoSpeakMember::of(&member), ..BukoSpeakEvent::new(BukoSpeakEventKind::Joined) })
-            }
-            Event::Left(id) => {
-                let mut event = BukoSpeakEvent::new(BukoSpeakEventKind::Left);
-                event.member.id = id.0;
-                tell(&event);
-            }
-            Event::Speaking(members) => {
-                let ids: Vec<u16> = members.iter().map(|id| id.0).collect();
-                tell(&BukoSpeakEvent {
-                    speaking: ids.as_ptr(),
-                    speaking_len: ids.len(),
-                    ..BukoSpeakEvent::new(BukoSpeakEventKind::Speaking)
-                });
-            }
-            Event::Disconnected(error) => {
-                let reason = error.to_string();
-                tell(&BukoSpeakEvent { reason: BukoSpeakStr::of(&reason), ..BukoSpeakEvent::new(BukoSpeakEventKind::Disconnected) });
-            }
-        }
+    fn update(&self, update: Update<'_>) {
+        let Update { channel, announcement, lost } = update;
+        let members: Vec<BukoSpeakMember> = channel.members().iter().map(BukoSpeakMember::of).collect();
+        let speaking: Vec<u16> = channel.speaking().iter().map(|id| id.0).collect();
+        let announcement = announcement.map(|announcement| announcement.to_string()).unwrap_or_default();
+        let lost = lost.map(|lost| lost.to_string()).unwrap_or_default();
+        let state = match channel.state() {
+            State::Out => BukoSpeakState::Out,
+            State::Connected => BukoSpeakState::Connected,
+            State::Reconnecting => BukoSpeakState::Reconnecting,
+        };
+        (self.listener)(
+            self.context,
+            &BukoSpeakUpdate {
+                state,
+                you: channel.you().map_or(0, |you| you.0),
+                members: members.as_ptr(),
+                members_len: members.len(),
+                speaking: speaking.as_ptr(),
+                speaking_len: speaking.len(),
+                announcement: BukoSpeakStr::of(&announcement),
+                lost: BukoSpeakStr::of(&lost),
+            },
+        );
     }
 }
 
 /// iOS's voice processing unit conditions the microphone's signal; elsewhere the engine does.
 const CONDITIONING: Conditioning = if cfg!(target_os = "ios") { Conditioning::Platform } else { Conditioning::Engine };
 
-/// A new engine, or null if its threads couldn't start. The listener hears its events with
+/// A new engine, or null if its threads couldn't start. The listener hears its updates with
 /// `context` until `bukospeak_engine_free` returns, never after.
 #[unsafe(no_mangle)]
 pub extern "C" fn bukospeak_engine_new(context: *mut c_void, listener: BukoSpeakListener) -> Option<Box<BukoSpeakEngine>> {
@@ -209,7 +183,7 @@ pub extern "C" fn bukospeak_engine_new(context: *mut c_void, listener: BukoSpeak
     }))
 }
 
-/// Stops the call's audio, leaves the call, and returns once the listener had its last event;
+/// Stops the call's audio, leaves the call, and returns once the listener had its last update;
 /// so not from the listener.
 #[unsafe(no_mangle)]
 pub extern "C" fn bukospeak_engine_free(engine: Box<BukoSpeakEngine>) {
@@ -219,7 +193,7 @@ pub extern "C" fn bukospeak_engine_free(engine: Box<BukoSpeakEngine>) {
 /// Leaves the call before, if there is one, and joins the channel, trusting the server by its
 /// fingerprint `pin`, or on first use if it is null. Blocks until the server welcomes this
 /// member or turns it away, 5 s at most, and hands `done` the result before it returns. Who is
-/// in the call comes as its Entered event.
+/// in the call comes as the next update.
 ///
 /// # Safety
 ///

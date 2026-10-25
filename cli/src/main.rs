@@ -3,14 +3,13 @@
 
 mod known_servers;
 
-use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::sync::{Arc, mpsc};
 
 use anyhow::Context;
 use bukospeak_audio_desktop::{Audio, DeviceId, Direction};
 use bukospeak_core::proto::MemberId;
-use bukospeak_core::{Conditioning, Engine, Error, Event, JoinConfig, Joined, Listener};
+use bukospeak_core::{Announcement, Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Lost, State, Update};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -49,7 +48,7 @@ enum Command {
 
 /// What the client waits for.
 enum Happening {
-    Event(Event),
+    Update(Channel, Option<Announcement>, Option<Lost>),
     AudioFailed(bukospeak_audio_desktop::Error),
     Stop,
 }
@@ -57,9 +56,9 @@ enum Happening {
 struct Forward(mpsc::Sender<Happening>);
 
 impl Listener for Forward {
-    fn event(&self, event: Event) {
+    fn update(&self, update: Update<'_>) {
         // The client stops listening only on its way out.
-        let _ = self.0.send(Happening::Event(event));
+        let _ = self.0.send(Happening::Update(update.channel.clone(), update.announcement, update.lost));
     }
 }
 
@@ -113,35 +112,33 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, n
     let audio = Audio::start(microphone, speaker, input, output, move |error| _ = failures.send(Happening::AudioFailed(error)))?;
     ctrlc::set_handler(move || _ = happenings.send(Happening::Stop))?;
 
-    let mut names: BTreeMap<MemberId, String> = BTreeMap::new();
+    let mut state = State::Out;
     let mut speaking: Vec<MemberId> = Vec::new();
     loop {
         match received.recv().expect("the client holds a sender until it leaves") {
-            Happening::Event(Event::Entered { you, members }) => {
-                names = members.into_iter().map(|member| (member.id, member.name)).collect();
-                let others: Vec<&str> = names.iter().filter(|&(&id, _)| id != you).map(|(_, name)| name.as_str()).collect();
-                println!("joined; also here: {}", if others.is_empty() { "nobody".into() } else { others.join(", ") });
-            }
-            Happening::Event(Event::Joined(member)) => {
-                println!("{} joined", member.name);
-                names.insert(member.id, member.name);
-            }
-            Happening::Event(Event::Left(id)) => {
-                if let Some(name) = names.remove(&id) {
-                    println!("{name} left");
+            Happening::Update(_, _, Some(lost)) => return Err(lost).context("the call ended"),
+            Happening::Update(channel, announcement, None) => {
+                let name =
+                    |id: &MemberId| channel.members().iter().find(|member| member.id == *id).map_or("someone", |member| &member.name);
+                if state == State::Out
+                    && let Some(you) = channel.you()
+                {
+                    let others: Vec<&str> =
+                        channel.members().iter().filter(|member| member.id != you).map(|member| member.name.as_str()).collect();
+                    println!("joined; also here: {}", if others.is_empty() { "nobody".into() } else { others.join(", ") });
                 }
-            }
-            Happening::Event(Event::Speaking(now)) => {
-                let name = |id: &MemberId| names.get(id).map_or("someone", String::as_str);
-                for id in now.iter().filter(|&id| !speaking.contains(id)) {
+                if let Some(announcement) = announcement {
+                    println!("{announcement}");
+                }
+                for id in channel.speaking().iter().filter(|&id| !speaking.contains(id)) {
                     println!("{} speaks", name(id));
                 }
-                for id in speaking.iter().filter(|&id| !now.contains(id)) {
+                for id in speaking.iter().filter(|&id| !channel.speaking().contains(id)) {
                     println!("{} is quiet", name(id));
                 }
-                speaking = now;
+                state = channel.state();
+                speaking = channel.speaking().to_vec();
             }
-            Happening::Event(Event::Disconnected(error)) => return Err(error).context("the call ended"),
             Happening::AudioFailed(error) => eprintln!("{error}"),
             Happening::Stop => break,
         }

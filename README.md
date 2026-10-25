@@ -9,7 +9,7 @@ latency, Opus at high bitrates, and an iOS app that keeps its microphone through
 |---|---|
 | `proto/` | The protocol: control messages, audio datagrams, certificate fingerprints |
 | `server/` | The server, which relays each member's audio to everyone else |
-| `core/` | The client side the apps share: the engine, joining and pinning the server, noise suppression, gain control, voice activation, Opus, jitter buffers and the mix |
+| `core/` | The client side the apps share: the engine, joining and pinning the server and joining again after a lost connection, the channel as the member sees it and what to announce about it, noise suppression, gain control, voice activation, Opus, jitter buffers and the mix |
 | `audio/desktop/` | Plays a call on the desktop's audio devices, through cpal |
 | `audio/ios/` | Plays a call on the iPhone's microphone and speaker, through VoiceProcessingIO |
 | `ffi/` | The C interface the apps call the engine through, and its header |

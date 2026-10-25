@@ -1,8 +1,10 @@
 //! The engine the apps drive: joins and leaves the channel, runs the network side of a call,
-//! and tells a [`Listener`] what happens.
+//! joins again once when its connection is lost, and tells a [`Listener`] the channel after
+//! each change.
 //!
 //! A join hands the caller the call's two realtime ends, a [`Microphone`] and a [`Speaker`],
-//! for the platform's audio to drive until the call is over; they exist only for a call.
+//! for the platform's audio to drive until the call is over; they exist only for a call, and
+//! last through joining again.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::Ordering;
@@ -10,7 +12,6 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use bukospeak_proto::control::Member;
 use bukospeak_proto::{Fingerprint, MemberId};
 use rtrb::{Producer, RingBuffer};
 use tokio::runtime::Runtime;
@@ -19,11 +20,12 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::capture::Capture;
+use crate::channel::{Announcement, Channel, Event};
 use crate::conditioner::Conditioning;
 use crate::jitter::Packet;
 use crate::microphone::{Microphone, Settings};
 use crate::playout::Mixer;
-use crate::session::{self, Error, JoinConfig, Session};
+use crate::session::{self, AudioSender, Error, JoinConfig, Session};
 use crate::speaker::{Downlink, Speaker};
 use crate::speaking::Speaking;
 use crate::uplink;
@@ -37,29 +39,30 @@ const DOWNLINK_FRAMES: usize = 50 * crate::playout::VOICES;
 /// How often the engine looks who speaks: quick enough for an indicator to feel live.
 const SPEAKING_EVERY: Duration = Duration::from_millis(50);
 
-/// Receives the engine's events, in order, on a thread of their own, so it may call the
-/// engine; but not drop it, since dropping waits for that thread.
+/// Receives the channel after each change, in order, on a thread of its own, so it may call
+/// the engine; but not drop it, since dropping waits for that thread.
 pub trait Listener: Send + Sync {
-    fn event(&self, event: Event);
+    fn update(&self, update: Update<'_>);
 }
 
-#[derive(Debug)]
-pub enum Event {
-    /// A call started, with everyone in the channel, this member included. The events after
-    /// it are this call's, the ones before it an earlier call's.
-    Entered {
-        you: MemberId,
-        members: Vec<Member>,
-    },
-    Joined(Member),
-    Left(MemberId),
-    /// Who speaks now, in id order, this member among them; sent when it changes.
-    Speaking(Vec<MemberId>),
-    /// The call ended without a leave: the connection was lost or the server broke the protocol.
-    Disconnected(Error),
+/// A change in the channel, and the channel after it.
+pub struct Update<'a> {
+    pub channel: &'a Channel,
+    /// What to tell the user aloud about the change, if anything.
+    pub announcement: Option<Announcement>,
+    /// The call ended without a leave: why.
+    pub lost: Option<Lost>,
 }
 
-/// A call just joined; who is in it comes as [`Event::Entered`].
+/// Why a call ended without a leave: its connection was lost, and joining again failed.
+#[derive(Debug, thiserror::Error)]
+#[error("{connection}; joining again failed: {rejoin}")]
+pub struct Lost {
+    pub connection: Error,
+    pub rejoin: Error,
+}
+
+/// A call just joined; who is in it comes as the next [`Update`].
 pub struct Joined {
     /// The server's fingerprint, to pin for the next join.
     pub fingerprint: Fingerprint,
@@ -68,7 +71,7 @@ pub struct Joined {
 }
 
 /// Joins and leaves the channel, one call at a time. Dropping it leaves the call and returns
-/// once the listener has had its last event.
+/// once the listener has had its last update.
 pub struct Engine {
     runtime: Runtime,
     conditioning: Conditioning,
@@ -104,9 +107,17 @@ impl Engine {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("bukospeak-network").enable_all().build()?;
         let (events, inbox) = mpsc::channel();
-        let listening = thread::Builder::new()
-            .name("bukospeak-events".into())
-            .spawn(move || inbox.into_iter().for_each(|event| listener.event(event)))?;
+        let listening = thread::Builder::new().name("bukospeak-events".into()).spawn(move || {
+            let mut channel = Channel::default();
+            for event in inbox {
+                let announcement = channel.apply(&event);
+                let lost = match event {
+                    Event::Lost(lost) => Some(lost),
+                    _ => None,
+                };
+                listener.update(Update { channel: &channel, announcement, lost });
+            }
+        })?;
         Ok(Self { runtime, conditioning, settings: Arc::default(), call: Mutex::default(), events, _listening: Listening(Some(listening)) })
     }
 
@@ -120,18 +131,22 @@ impl Engine {
         let capture = Capture::new(self.conditioning).expect("the encoder can be created");
         let mixer = Mixer::new().expect("the decoders can be created");
 
-        let session = self.runtime.block_on(Session::join(config))?;
+        let session = self.runtime.block_on(Session::join(config.clone()))?;
         let fingerprint = session.fingerprint();
+        // Joining again trusts only the server joined now.
+        let rejoin = JoinConfig { pin: Some(fingerprint), ..config };
         let speaking = Arc::new(Speaking::default());
         let (frames, uplink_frames) = RingBuffer::new(UPLINK_FRAMES);
-        let uplink = uplink::spawn(uplink_frames, session.audio_sender())?;
+        let sender = session.audio_sender();
+        let uplink = uplink::spawn(uplink_frames, sender.clone())?;
         let (downlink, speaker_downlink) = RingBuffer::new(DOWNLINK_FRAMES);
 
         // Sent before the call's own events, so the listener tells the calls apart. A failed
         // send means the engine is gone, and with it the listener.
         let _ = self.events.send(Event::Entered { you: session.you(), members: session.members().to_vec() });
         let (stop, stopped) = oneshot::channel();
-        let task = self.runtime.spawn(run(session, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
+        let link = Link { session, rejoin, sender };
+        let task = self.runtime.spawn(run(link, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
         *call = Some(Call { stop, task });
         Ok(Joined {
             fingerprint,
@@ -170,17 +185,27 @@ impl Drop for Engine {
     }
 }
 
+/// A call's way to the channel: its session, and what joins it again.
+struct Link {
+    session: Session,
+    /// The join, pinned to the server's fingerprint.
+    rejoin: JoinConfig,
+    /// The uplink's, which follows the session joined again.
+    sender: AudioSender,
+}
+
 /// The network side of a call: moves the members' frames to the speaker and tells the
-/// listener who comes, goes and speaks, until it is stopped or the connection is lost.
+/// listener who comes, goes and speaks, until it is stopped, or the connection is lost and
+/// joining again fails.
 async fn run(
-    mut session: Session,
+    mut link: Link,
     mut deliveries: Deliveries,
     speaking: Arc<Speaking>,
     events: mpsc::Sender<Event>,
     mut stop: oneshot::Receiver<()>,
 ) {
-    let you = session.you();
-    let mut members: BTreeSet<MemberId> = session.members().iter().map(|member| member.id).filter(|&id| id != you).collect();
+    let mut you = link.session.you();
+    let mut members = others(&link.session);
     let mut speakers = Vec::new();
     let mut watch = tokio::time::interval(SPEAKING_EVERY);
     watch.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -189,7 +214,7 @@ async fn run(
     let tell = |event| _ = events.send(event);
 
     loop {
-        tokio::select! {
+        let lost = tokio::select! {
             _ = &mut stop => break,
             _ = watch.tick() => {
                 deliveries.retry();
@@ -198,8 +223,9 @@ async fn run(
                     speakers.clone_from(&now);
                     tell(Event::Speaking(now));
                 }
+                continue;
             }
-            event = session.next_event() => match event {
+            event = link.session.next_event() => match event {
                 Ok(session::Event::Audio(frame)) => {
                     // Frames of a member that left, still on the way, would take a voice for good.
                     if members.contains(&frame.from)
@@ -207,24 +233,49 @@ async fn run(
                     {
                         deliveries.frame(frame.from, packet);
                     }
+                    continue;
                 }
                 Ok(session::Event::Joined(member)) => {
                     members.insert(member.id);
                     tell(Event::Joined(member));
+                    continue;
                 }
                 Ok(session::Event::Left(id)) => {
                     members.remove(&id);
                     deliveries.left(id);
                     tell(Event::Left(id));
+                    continue;
                 }
-                Err(error) => {
-                    tell(Event::Disconnected(error));
-                    return;
-                }
+                Err(error) => error,
             },
+        };
+
+        tell(Event::Reconnecting);
+        let rejoined = tokio::select! {
+            _ = &mut stop => return tell(Event::Ended),
+            rejoined = Session::join(link.rejoin.clone()) => rejoined,
+        };
+        match rejoined {
+            Ok(session) => {
+                // The members of the lost session are gone, even if they joined again too.
+                members.iter().for_each(|&id| deliveries.left(id));
+                link.sender.follow(&session);
+                link.session = session;
+                you = link.session.you();
+                members = others(&link.session);
+                speakers.clear();
+                tell(Event::Entered { you, members: link.session.members().to_vec() });
+            }
+            Err(rejoin) => return tell(Event::Lost(Lost { connection: lost, rejoin })),
         }
     }
-    session.leave().await;
+    link.session.leave().await;
+    tell(Event::Ended);
+}
+
+/// Everyone in the session's channel but this member.
+fn others(session: &Session) -> BTreeSet<MemberId> {
+    session.members().iter().map(|member| member.id).filter(|&id| id != session.you()).collect()
 }
 
 /// The network task's end of the ring to the speaker.
@@ -262,40 +313,118 @@ impl Deliveries {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::time::Instant;
 
     use bukospeak_proto::audio::{Level, SAMPLE_RATE};
     use bukospeak_server::{Identity, Room};
     use rtrb::Consumer;
+    use tokio::net::UdpSocket;
 
     use super::*;
+    use crate::channel::State;
     use crate::signal::voice;
 
     const ROOM_KEY: &str = "room-key";
     const FRAME: Duration = Duration::from_millis(10);
 
-    struct Events(mpsc::Sender<Event>);
+    /// An update as the test keeps it.
+    #[derive(Debug)]
+    struct Seen {
+        channel: Channel,
+        announcement: Option<Announcement>,
+        lost: Option<Lost>,
+    }
 
-    impl Listener for Events {
-        fn event(&self, event: Event) {
+    struct Updates(mpsc::Sender<Seen>);
+
+    impl Listener for Updates {
+        fn update(&self, update: Update<'_>) {
+            let Update { channel, announcement, lost } = update;
             // The test may have stopped listening.
-            let _ = self.0.send(event);
+            let _ = self.0.send(Seen { channel: channel.clone(), announcement, lost });
         }
     }
 
-    fn engine() -> (Engine, mpsc::Receiver<Event>) {
-        let (events, received) = mpsc::channel();
-        (Engine::new(Conditioning::Engine, Arc::new(Events(events))).unwrap(), received)
+    fn engine() -> (Engine, mpsc::Receiver<Seen>) {
+        let (updates, received) = mpsc::channel();
+        (Engine::new(Conditioning::Engine, Arc::new(Updates(updates))).unwrap(), received)
     }
 
-    /// Waits for the first event that `wanted` picks.
-    fn wait_for<T>(events: &mpsc::Receiver<Event>, mut wanted: impl FnMut(Event) -> Option<T>) -> T {
-        let deadline = Instant::now() + Duration::from_secs(5);
+    /// Waits for the first update that `wanted` picks.
+    fn wait_for<T>(updates: &mpsc::Receiver<Seen>, mut wanted: impl FnMut(Seen) -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let event = events.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("the event within 5 s");
-            if let Some(found) = wanted(event) {
+            let seen = updates.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("the update within 10 s");
+            if let Some(found) = wanted(seen) {
                 return found;
             }
+        }
+    }
+
+    fn announced(updates: &mpsc::Receiver<Seen>, announcement: Announcement) -> Channel {
+        wait_for(updates, |seen| (seen.announcement.as_ref() == Some(&announcement)).then_some(seen.channel))
+    }
+
+    /// Who is in the channel the engine entered, as `(you, names)`.
+    fn entered(updates: &mpsc::Receiver<Seen>) -> (MemberId, Vec<String>) {
+        wait_for(updates, |seen| {
+            let names = seen.channel.members().iter().map(|member| member.name.clone()).collect();
+            seen.channel.you().map(|you| (you, names))
+        })
+    }
+
+    /// A room on a new endpoint on `address` that presents the identity.
+    fn serve(runtime: &Runtime, identity: &Identity, address: &str) -> quinn::Endpoint {
+        let endpoint = runtime.block_on(async { bukospeak_server::endpoint(identity, address.parse().unwrap()) }).unwrap();
+        runtime.spawn(Room::new(ROOM_KEY.into()).serve(endpoint.clone()));
+        endpoint
+    }
+
+    fn config(server: SocketAddr, identity: &Identity, name: &str) -> JoinConfig {
+        JoinConfig { server: server.to_string(), name: name.into(), room_key: ROOM_KEY.into(), pin: Some(identity.fingerprint()) }
+    }
+
+    /// A UDP relay in front of a server that can turn to another, as a server's address does
+    /// when the server restarts elsewhere.
+    struct Relay {
+        address: SocketAddr,
+        upstream: Arc<Mutex<SocketAddr>>,
+    }
+
+    impl Relay {
+        fn new(runtime: &Runtime, upstream: SocketAddr) -> Self {
+            let bind = || async { Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()) };
+            let (front, back) = runtime.block_on(async { (bind().await, bind().await) });
+            let address = front.local_addr().unwrap();
+            let upstream = Arc::new(Mutex::new(upstream));
+            let client = Arc::new(Mutex::new(None));
+            // Datagrams the relay can't pass on are lost, as on any path.
+            runtime.spawn({
+                let (front, back, upstream, client) = (Arc::clone(&front), Arc::clone(&back), Arc::clone(&upstream), Arc::clone(&client));
+                async move {
+                    let mut datagram = [0; 65536];
+                    while let Ok((length, from)) = front.recv_from(&mut datagram).await {
+                        *client.lock().unwrap() = Some(from);
+                        let to = *upstream.lock().unwrap();
+                        let _ = back.send_to(&datagram[..length], to).await;
+                    }
+                }
+            });
+            runtime.spawn(async move {
+                let mut datagram = [0; 65536];
+                while let Ok((length, _)) = back.recv_from(&mut datagram).await {
+                    let to = *client.lock().unwrap();
+                    if let Some(to) = to {
+                        let _ = front.send_to(&datagram[..length], to).await;
+                    }
+                }
+            });
+            Self { address, upstream }
+        }
+
+        fn turn_to(&self, upstream: SocketAddr) {
+            *self.upstream.lock().unwrap() = upstream;
         }
     }
 
@@ -303,35 +432,18 @@ mod tests {
     fn members_hear_each_other_and_see_who_speaks() {
         let server = Runtime::new().unwrap();
         let identity = Identity::generate().unwrap();
-        let endpoint = server.block_on(async { bukospeak_server::endpoint(&identity, "127.0.0.1:0".parse().unwrap()) }).unwrap();
-        let address = endpoint.local_addr().unwrap().to_string();
-        server.spawn(Room::new(ROOM_KEY.into()).serve(endpoint));
-        let config = |name: &str| JoinConfig {
-            server: address.clone(),
-            name: name.into(),
-            room_key: ROOM_KEY.into(),
-            pin: Some(identity.fingerprint()),
-        };
+        let address = serve(&server, &identity, "127.0.0.1:0").local_addr().unwrap();
 
-        let (first, first_events) = engine();
-        let (second, second_events) = engine();
-        let entered = |events: &mpsc::Receiver<Event>| {
-            wait_for(events, |event| match event {
-                Event::Entered { you, members } => Some((you, members.into_iter().map(|member| member.name).collect::<Vec<_>>())),
-                _ => None,
-            })
-        };
-        let mut talking = first.join(config("first")).unwrap();
-        let (talking_id, _) = entered(&first_events);
-        let mut hearing = second.join(config("second")).unwrap();
-        let (hearing_id, names) = entered(&second_events);
+        let (first, first_updates) = engine();
+        let (second, second_updates) = engine();
+        let mut talking = first.join(config(address, &identity, "first")).unwrap();
+        let (talking_id, _) = entered(&first_updates);
+        let mut hearing = second.join(config(address, &identity, "second")).unwrap();
+        let (hearing_id, names) = entered(&second_updates);
         assert_eq!(names, ["first", "second"]);
-        // The first call's events come after its entry.
-        let joined = wait_for(&first_events, |event| match event {
-            Event::Joined(member) => Some(member.id),
-            _ => None,
-        });
-        assert_eq!(joined, hearing_id);
+        // The first call's updates come after its entry.
+        let channel = announced(&first_updates, Announcement::Joined("second".into()));
+        assert_eq!(channel.members().last().unwrap().id, hearing_id);
 
         // Two seconds of speech and one of silence, captured and played in real time, in
         // buffers that don't line up with frames.
@@ -352,19 +464,92 @@ mod tests {
         let second_of_speech = &heard[SAMPLE_RATE as usize / 2..][..SAMPLE_RATE as usize];
         let rms = (second_of_speech.iter().map(|sample| sample * sample).sum::<f32>() / second_of_speech.len() as f32).sqrt();
         assert!(rms > 0.03, "heard speech at an RMS of {rms}");
-        let speaking = wait_for(&second_events, |event| match event {
-            Event::Speaking(members) if !members.is_empty() => Some(members),
-            _ => None,
-        });
+        let speaking = wait_for(&second_updates, |seen| (!seen.channel.speaking().is_empty()).then(|| seen.channel.speaking().to_vec()));
         assert_eq!(speaking, [talking_id]);
-        wait_for(&second_events, |event| matches!(event, Event::Speaking(members) if members.is_empty()).then_some(()));
+        wait_for(&second_updates, |seen| seen.channel.speaking().is_empty().then_some(()));
 
         first.leave();
-        let left = wait_for(&second_events, |event| match event {
-            Event::Left(id) => Some(id),
-            _ => None,
+        let channel = announced(&second_updates, Announcement::Left("first".into()));
+        assert!(channel.members().iter().all(|member| member.id != talking_id));
+        let ended = wait_for(&first_updates, |seen| (seen.channel.state() == State::Out).then_some(seen.lost));
+        assert!(ended.is_none());
+    }
+
+    #[test]
+    fn a_lost_connection_joins_again_and_keeps_the_microphone() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let old = serve(&server, &identity, "127.0.0.1:0");
+        let new = serve(&server, &identity, "127.0.0.1:0");
+        let relay = Relay::new(&server, old.local_addr().unwrap());
+
+        let (engine, updates) = engine();
+        let mut joined = engine.join(config(relay.address, &identity, "first")).unwrap();
+        entered(&updates);
+        relay.turn_to(new.local_addr().unwrap());
+        old.close(0u32.into(), b"restarting");
+
+        let reconnecting = announced(&updates, Announcement::Lost);
+        assert_eq!(reconnecting.state(), State::Reconnecting);
+        let back = announced(&updates, Announcement::Reconnected);
+        assert_eq!(back.state(), State::Connected);
+        let you = back.you().unwrap();
+
+        // The microphone of the first join sends over the second.
+        let mut listener = server.block_on(Session::join(config(new.local_addr().unwrap(), &identity, "listener"))).unwrap();
+        joined.microphone.push(&voice(SAMPLE_RATE as usize, 0.3));
+        let from = server.block_on(async {
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), listener.next_event()).await.expect("audio within 5 s").unwrap() {
+                    session::Event::Audio(frame) => break frame.from,
+                    _ => continue,
+                }
+            }
         });
-        assert_eq!(left, talking_id);
+        assert_eq!(from, you);
+    }
+
+    #[test]
+    fn a_lost_connection_that_cant_join_again_ends_the_call() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let old = serve(&server, &identity, "127.0.0.1:0");
+        let relay = Relay::new(&server, old.local_addr().unwrap());
+        // A socket nobody answers on.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        let (engine, updates) = engine();
+        let _joined = engine.join(config(relay.address, &identity, "first")).unwrap();
+        entered(&updates);
+        relay.turn_to(silent.local_addr().unwrap());
+        old.close(0u32.into(), b"gone");
+
+        announced(&updates, Announcement::Lost);
+        let (channel, lost) = wait_for(&updates, |seen| seen.lost.map(|lost| (seen.channel, lost)));
+        assert_eq!(channel.state(), State::Out);
+        assert!(matches!(lost.rejoin, Error::TimedOut), "{lost}");
+    }
+
+    #[test]
+    fn a_leave_ends_joining_again() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let old = serve(&server, &identity, "127.0.0.1:0");
+        let relay = Relay::new(&server, old.local_addr().unwrap());
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        let (engine, updates) = engine();
+        let _joined = engine.join(config(relay.address, &identity, "first")).unwrap();
+        entered(&updates);
+        relay.turn_to(silent.local_addr().unwrap());
+        old.close(0u32.into(), b"gone");
+        announced(&updates, Announcement::Lost);
+
+        let leaving = Instant::now();
+        engine.leave();
+        assert!(leaving.elapsed() < Duration::from_secs(1), "the leave took {:?}", leaving.elapsed());
+        let ended = wait_for(&updates, |seen| (seen.channel.state() == State::Out).then_some(seen.lost));
+        assert!(ended.is_none());
     }
 
     /// What the speaker takes from the ring now, as `(was a leave, member)`.
@@ -400,9 +585,9 @@ mod tests {
 
     #[test]
     fn dropping_waits_for_the_listener() {
-        let (engine, events) = engine();
+        let (engine, updates) = engine();
         drop(engine);
         // The listener, holding the only sender, is gone with its thread.
-        assert_eq!(events.try_recv().unwrap_err(), mpsc::TryRecvError::Disconnected);
+        assert_eq!(updates.try_recv().unwrap_err(), mpsc::TryRecvError::Disconnected);
     }
 }
