@@ -85,7 +85,7 @@ impl RenderOnce for Row {
         };
         div()
             .h(theme::ROW)
-            .px_2()
+            .px(theme::ROW_INSET)
             .flex()
             .items_center()
             .gap_2p5()

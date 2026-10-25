@@ -31,7 +31,7 @@ impl Main {
             present.map(|member| Row::new(member.id.0, member.name.clone(), false, member.muted, member.reconnecting)).collect()
         };
         let list = if rows.is_empty() { self.render_empty(cx) } else { self.render_list(rows) };
-        let message = self.render_message(cx).map(|message| div().px_4().pb_2().child(message));
+        let message = self.render_message(cx).map(|message| div().px(theme::GUTTER).pb_2().child(message));
         v_flex().flex_1().min_h_0().child(list).children(message).child(self.render_bar(cx))
     }
 
@@ -41,7 +41,8 @@ impl Main {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p_2()
+            .px(theme::GUTTER - theme::ROW_INSET)
+            .py_1()
             .flex()
             .flex_col()
             .gap_0p5()
@@ -103,10 +104,10 @@ impl Main {
         };
         h_flex()
             .flex_none()
-            .m_2()
-            .mt_0()
+            .mx(theme::GUTTER - theme::ROW_INSET)
+            .mb(theme::GUTTER - theme::ROW_INSET)
             .p_1p5()
-            .pl_3()
+            .pl(theme::ROW_INSET + px(4.))
             .gap_1()
             .rounded(theme.radius_lg)
             .bg(surface)

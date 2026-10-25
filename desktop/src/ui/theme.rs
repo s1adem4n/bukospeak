@@ -60,8 +60,19 @@ pub const TEXT: Pixels = px(13.);
 pub const TEXT_LG: Pixels = px(15.);
 pub const TEXT_XL: Pixels = px(20.);
 
-/// The window's own title bar, drawn with the content.
+/// The space between the window's edge and its content, which every screen lines up on.
+pub const GUTTER: Pixels = px(12.);
+/// How far a control's edge lies outside its icon: pulled out by it, a control's icon lines up
+/// on the gutter.
+pub const CONTROL_INSET: Pixels = px(8.);
+/// Between a field and the button below it, and between fields of one group.
+pub const BEFORE_ACTION: Pixels = px(16.);
+pub const BETWEEN_FIELDS: Pixels = px(8.);
+
+/// The window's own title bar, drawn with the content; it keeps the gutter on the left itself.
 pub const TITLE_BAR: Pixels = px(40.);
+/// How far a row's content lies inside its edge.
+pub const ROW_INSET: Pixels = px(8.);
 /// A member in the list.
 pub const ROW: Pixels = px(36.);
 pub const ROW_AVATAR: Pixels = px(24.);

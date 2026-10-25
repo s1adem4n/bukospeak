@@ -25,7 +25,7 @@ impl Main {
                 .child(headline("Willkommen bei BukoSpeak"))
                 .child(subline("Wie sollen dich die anderen nennen?", muted))
                 .child(
-                    v_flex().w_full().mt_6().gap_3().child(field(&form.name)).child(
+                    v_flex().w_full().mt_6().gap(theme::BEFORE_ACTION).child(field(&form.name)).child(
                         primary("next", "Weiter")
                             .w_full()
                             .disabled(name.is_empty())
@@ -41,8 +41,8 @@ impl Main {
                     .child(headline(format!("Hallo, {name}")))
                     .child(subline("Wo trefft ihr euch?", muted))
                     .child(
-                        v_flex().w_full().mt_6().gap_2().child(field(&form.server)).child(field(&form.room_key)).child(
-                            div().mt_1().child(
+                        v_flex().w_full().mt_6().gap(theme::BETWEEN_FIELDS).child(field(&form.server)).child(field(&form.room_key)).child(
+                            div().mt(theme::BEFORE_ACTION - theme::BETWEEN_FIELDS).child(
                                 primary("finish", "Beitreten")
                                     .w_full()
                                     .disabled(!complete)

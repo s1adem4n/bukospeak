@@ -4,10 +4,13 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    App, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div, px,
+    App, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels, StatefulInteractiveElement, Styled, div, px,
 };
 
 use crate::ui::{Form, Main, edit_menu, theme};
+
+/// How far a row's label lies inside the card, and the group's title with it.
+const ROW_PAD: Pixels = px(12.);
 
 impl Main {
     pub(super) fn render_settings(&self, form: &Form, cx: &mut Context<Self>) -> impl IntoElement {
@@ -16,7 +19,7 @@ impl Main {
                 .w_full()
                 .max_w(theme::SETTINGS)
                 .mx_auto()
-                .px_4()
+                .px(theme::GUTTER)
                 .pt_2()
                 .pb_6()
                 .gap_6()
@@ -31,12 +34,12 @@ fn group<const N: usize>(title: &'static str, rows: [(&'static str, &Entity<Inpu
     let theme = cx.theme();
     v_flex()
         .gap_2()
-        .child(div().px_1().text_size(theme::TEXT_SM).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(title))
+        .child(div().px(ROW_PAD).text_size(theme::TEXT_SM).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(title))
         .child(v_flex().rounded(theme.radius_lg).border_1().border_color(theme.border).bg(theme.muted).children(
             rows.into_iter().enumerate().map(|(index, (label, input))| {
                 h_flex()
                     .h(px(44.))
-                    .pl_3()
+                    .pl(ROW_PAD)
                     .pr_1()
                     .gap_3()
                     .when(index > 0, |row| row.border_t_1().border_color(theme.border))

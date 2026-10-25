@@ -388,15 +388,23 @@ impl Main {
     fn render_title_bar(&self, cx: &mut Context<Self>) -> TitleBar {
         let theme = cx.theme();
         let title = match &self.screen {
-            Screen::Channel => Some(div().pl_1().font_weight(FontWeight::SEMIBOLD).child("BukoSpeak").into_any_element()),
+            Screen::Channel => Some(div().font_weight(FontWeight::SEMIBOLD).child("BukoSpeak").into_any_element()),
+            // The way back and the title in one: the arrow lines up on the gutter.
             Screen::Settings(_) => Some(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        control("back", Glyph::Back, "Zurück", Tone::Plain, cx)
-                            .on_click(cx.listener(|main, _, window, cx| main.close_settings(window, cx))),
+                Button::new("back")
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .foreground(theme.foreground)
+                            .hover(theme.secondary_hover)
+                            .active(theme.secondary_active),
                     )
+                    .h(theme::CONTROL)
+                    .ml(-theme::CONTROL_INSET)
+                    .px(theme::CONTROL_INSET)
+                    .rounded(ButtonRounded::Size(theme.radius))
+                    .icon(Icon::from(Glyph::Back))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Einstellungen"))
+                    .on_click(cx.listener(|main, _, window, cx| main.close_settings(window, cx)))
                     .into_any_element(),
             ),
             Screen::Welcome(..) => None,
@@ -405,11 +413,15 @@ impl Main {
             control("settings", Glyph::Settings, "Einstellungen", Tone::Plain, cx)
                 .on_click(cx.listener(|main, _, window, cx| main.open_settings(window, cx)))
         });
-        TitleBar::new()
-            .h(theme::TITLE_BAR)
-            .bg(theme.background)
-            .border_0()
-            .child(h_flex().w_full().h_full().pr_1p5().justify_between().child(div().children(title)).children(settings))
+        TitleBar::new().h(theme::TITLE_BAR).bg(theme.background).border_0().child(
+            h_flex()
+                .w_full()
+                .h_full()
+                .pr(theme::GUTTER - theme::CONTROL_INSET)
+                .justify_between()
+                .child(div().children(title))
+                .children(settings),
+        )
     }
 
     /// One short line of what went wrong beside the call: its notice, else the settings'
