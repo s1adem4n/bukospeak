@@ -228,6 +228,7 @@ impl JitterBuffer {
         self.jitter.target()
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "the apps show it once they have a diagnostics view"))]
     pub fn stats(&self) -> Stats {
         self.stats
     }

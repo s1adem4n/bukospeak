@@ -12,10 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 bukospeak-core.workspace = true
+bukospeak-desktop.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+ctrlc.workspace = true
 dirs.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing-subscriber.workspace = true
 
 [lints]

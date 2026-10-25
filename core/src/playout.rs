@@ -29,6 +29,7 @@ struct Voice {
 }
 
 /// How a member's voice fares, for diagnostics.
+#[cfg_attr(not(test), expect(dead_code, reason = "the apps show it once they have a diagnostics view"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoiceStats {
     pub jitter: jitter::Stats,
@@ -108,6 +109,7 @@ impl Mixer {
         self.voices.iter().filter(|voice| voice.buffer.is_playing()).filter_map(|voice| voice.member)
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "the apps show it once they have a diagnostics view"))]
     pub fn stats(&self, member: MemberId) -> Option<VoiceStats> {
         let voice = self.voices.iter().find(|voice| voice.member == Some(member))?;
         Some(VoiceStats { jitter: voice.buffer.stats(), target: voice.buffer.target(), undecodable: voice.undecodable })

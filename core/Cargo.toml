@@ -12,9 +12,13 @@ nnnoiseless.workspace = true
 opus.workspace = true
 bytes.workspace = true
 quinn.workspace = true
+rtrb.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+bukospeak-server.workspace = true
 
 [lints]
 workspace = true

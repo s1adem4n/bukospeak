@@ -12,6 +12,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
       - uses: Swatinem/rust-cache@v2
+      # cpal's ALSA backend links against libasound.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: mise run check
 
   server-image:

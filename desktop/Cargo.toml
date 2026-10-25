@@ -1,0 +1,16 @@
+[package]
+name = "bukospeak-desktop"
+description = "Plays a bukospeak call on a desktop's audio devices"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+bukospeak-core.workspace = true
+cpal.workspace = true
+rubato.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

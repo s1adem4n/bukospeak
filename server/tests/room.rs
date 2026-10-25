@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use bukospeak_core::proto::control::Rejection;
 use bukospeak_core::proto::{Fingerprint, MemberId, audio};
-use bukospeak_core::{Error, Event, JoinConfig, Session};
+use bukospeak_core::session::{Event, Session};
+use bukospeak_core::{Error, JoinConfig};
 use bukospeak_server::{Identity, Room, endpoint};
 use tokio::time::timeout;
 

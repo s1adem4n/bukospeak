@@ -27,16 +27,21 @@ A datagram is a 7-byte header and the Opus packet:
 ## Threads
 
 ```
-capture callback (realtime)  FIFO → 10 ms frames → [HPF, AEC] → RNNoise → [AGC] → gate → Opus → ring → wakes the uplink
-uplink thread (high priority) drains the ring into QUIC datagrams
-network task (tokio)          datagrams → a ring per sender
-render callback (realtime)   jitter buffer → Opus decoder → mix → soft limiter → FIFO → device
-control thread                speaking state (atomics written by the render callback) → events
+capture callback (realtime)  10 ms frames → [HPF, AEC] → RNNoise → [AGC] → gate → Opus → ring → wakes the uplink
+uplink thread                 drains the ring into QUIC datagrams
+network task (tokio)          datagrams of current members, and their leaves → one ring to the render callback
+render callback (realtime)   jitter buffers → Opus decoders → mix → soft limiter → device
+                              the network task also polls who speaks (atomics the callbacks write) → events
 ```
 
 Realtime callbacks never allocate, lock or wait; they talk to other threads only through
-single-producer single-consumer rings and atomics. Decoders are preallocated slots. The output
-device's clock drives playout: the render callback pulls what it needs, there is no timer.
+single-producer single-consumer rings and atomics, and wake the uplink with `Thread::unpark`.
+Decoders are preallocated slots. The output device's clock drives playout: the render callback
+pulls what it needs, there is no timer. The network task drops frames of members it doesn't know
+as present, so a frame still on the way after its sender left doesn't take a voice for good.
+
+RNNoise allocates its FFT state once per thread, on the first frame it processes there; that
+first callback after a stream starts is the one exception.
 
 DSP runs in the capture callback: it has the highest priority, holds up under load, and keeps
 the AEC reference aligned with the capture frame.
@@ -57,20 +62,30 @@ and sends 50 ms of pre-roll when it opens.
 
 ## Engine and platforms
 
-The `Engine` in the core owns the runtime and all threads. The apps control it through a
-synchronous UniFFI API (join, leave, devices, settings) and get events through a callback
-interface. Audio never crosses UniFFI.
+The `Engine` in the core owns the runtime and the network side. The apps control it through a
+synchronous UniFFI API (join, leave, settings) and get events through a callback interface, on
+a thread of their own. Audio never crosses UniFFI.
 
-Each platform delivers and fetches PCM through one interface:
+A join hands back the call's two realtime ends, a `Microphone` the capture callback pushes
+48 kHz mono into and a `Speaker` the render callback pulls it from, in buffers of any length.
+They, the audio and the uplink thread exist only for a call.
 
-- Desktop (Linux, Windows): a `cpal` adapter that rebuilds its streams when a device disappears
-  or the default device changes.
+- Desktop (Linux, Windows): the `desktop` crate plays them on `cpal` streams, which a thread of
+  its own builds anew when a stream reports its device lost or itself invalid (a stream the
+  backend rerouted itself plays on). A stream lends its end to the callback, which hands it back
+  when the stream drops. Devices without 48 kHz are mixed to mono and resampled with rubato's
+  `Fft` in 10 ms chunks; the drift between clocks is the jitter buffers' to absorb. Device
+  choice is part of the desktop crate's API.
 - iOS: Swift sets up the audio session, CallKit and the VoiceProcessingIO unit, and registers
   Rust `extern "C"` functions from the `ffi` crate as its input and render callbacks. Swift
   disposes the unit before it frees the engine. VoiceProcessingIO does AEC and AGC there.
 
-The audio engine stops, restarts and rebuilds independently of the network session
-(interruptions, route changes, device loss) and flushes the jitter buffers when it resumes.
+The audio stops, restarts and rebuilds independently of the network session (interruptions,
+route changes, device loss); the speaker flushes its jitter buffers when it resumes.
+
+Noise suppression can be turned off, for a microphone whose noise the system or the device
+suppresses already: RNNoise then still tells the gate what is speech, and the frame goes out as
+captured.
 
 `unsafe` is allowed only in the `ffi` crate.
 
@@ -80,7 +95,7 @@ The audio engine stops, restarts and rebuilds independently of the network sessi
    (virtual clocks, drift, jitter, loss traces)
 2. Playout: decoding, mixing, limiter, speaking state
 3. Gate and capture: RNNoise, Opus, the hybrid-mode test
-4. Engine: threads, uplink, network task, synchronous API, `cpal`, devices in the CLI
+4. Engine: threads, uplink, network task, synchronous API; the `desktop` crate (`cpal`), devices in the CLI
 5. Desktop AGC and high-pass with `sonora`
 6. Desktop AEC: `cpal` with `sonora`, or native WASAPI (communications mode, loopback reference)
 7. iOS app (`ffi`, VoiceProcessingIO, CallKit), Windows app (WinUI 3)
