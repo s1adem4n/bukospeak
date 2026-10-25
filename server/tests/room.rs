@@ -41,7 +41,7 @@ async fn members_hear_each_other_and_see_who_comes_and_goes() {
     let Event::Joined(joined) = next(&mut first).await else { panic!("the first member isn't told the second joined") };
     assert_eq!((joined.id, joined.name.as_str()), (second.you(), "second"));
 
-    let frame = audio::Frame { from: MemberId(0), seq: 7, flags: audio::FLAG_LAST, opus: vec![1, 2, 3] };
+    let frame = audio::Frame { from: MemberId(0), index: 7, last: true, level: audio::Level::new(30), opus: vec![1, 2, 3] };
     first.audio_sender().send(&frame).unwrap();
     assert_eq!(next(&mut second).await, Event::Audio(audio::Frame { from: first.you(), ..frame }));
 

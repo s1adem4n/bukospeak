@@ -81,7 +81,7 @@ async fn join(server: String, name: String, room_key: String) -> anyhow::Result<
             }
             Event::Audio(frame) => {
                 let name = names.get(&frame.from).map_or("someone", String::as_str);
-                if frame.is_last() {
+                if frame.last {
                     speaking.remove(&frame.from);
                     println!("{name} is quiet");
                 } else if speaking.insert(frame.from) {
