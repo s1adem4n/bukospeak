@@ -6,7 +6,7 @@ use std::fmt;
 use bukospeak_proto::MemberId;
 use bukospeak_proto::control::Member;
 
-use crate::session::Error;
+use crate::session::{self, Error};
 
 /// What happens in the calls, in order; the events between an [`Entered`](Event::Entered) and
 /// the next [`Ended`](Event::Ended) or [`Lost`](Event::Lost) are one call's.
@@ -18,6 +18,8 @@ pub(crate) enum Event {
         members: Vec<Member>,
     },
     Joined(Member),
+    /// A member muted or unmuted, or is reconnecting or back.
+    Changed(Member),
     Left(MemberId),
     /// Who speaks now, in id order, this member among them; sent when it changes.
     Speaking(Vec<MemberId>),
@@ -27,6 +29,8 @@ pub(crate) enum Event {
     Ended,
     /// The call ended without a leave.
     Lost(Lost),
+    /// Who is in the channel, watched from outside it; empty when the watch stopped or broke.
+    Present(Vec<Member>),
 }
 
 /// Why a call ended without a leave: its connection was lost, and joining again failed.
@@ -54,6 +58,7 @@ pub struct Channel {
     you: Option<MemberId>,
     members: Vec<Member>,
     speaking: Vec<MemberId>,
+    present: Vec<Member>,
 }
 
 impl Channel {
@@ -77,17 +82,26 @@ impl Channel {
         &self.speaking
     }
 
+    /// Who is in the channel while the engine watches it from outside, in the order they came.
+    pub fn present(&self) -> &[Member] {
+        &self.present
+    }
+
     /// Follows the event, and tells what to say aloud about it, if anything.
     pub(crate) fn apply(&mut self, event: &Event) -> Option<Announcement> {
         match event {
             Event::Entered { you, members } => {
                 let rejoined = self.state == State::Reconnecting;
-                *self = Self { state: State::Connected, you: Some(*you), members: members.clone(), speaking: Vec::new() };
+                *self = Self { state: State::Connected, you: Some(*you), members: members.clone(), ..Self::default() };
                 rejoined.then_some(Announcement::Reconnected)
             }
             Event::Joined(member) => {
                 self.members.push(member.clone());
                 Some(Announcement::Joined(member.name.clone()))
+            }
+            Event::Changed(member) => {
+                session::replace(&mut self.members, member.clone());
+                None
             }
             Event::Left(id) => {
                 let at = self.members.iter().position(|member| member.id == *id)?;
@@ -105,6 +119,10 @@ impl Channel {
             }
             Event::Ended | Event::Lost(_) => {
                 *self = Self::default();
+                None
+            }
+            Event::Present(members) => {
+                self.present.clone_from(members);
                 None
             }
         }
@@ -140,7 +158,7 @@ mod tests {
     use super::*;
 
     fn member(id: u16, name: &str) -> Member {
-        Member { id: MemberId(id), name: name.into() }
+        Member { id: MemberId(id), name: name.into(), muted: false, reconnecting: false }
     }
 
     fn entered(you: u16, members: &[Member]) -> Event {
@@ -176,6 +194,15 @@ mod tests {
         assert_eq!(channel.speaking(), [MemberId(1)]);
 
         assert_eq!(channel.apply(&Event::Left(MemberId(7))), None);
+    }
+
+    #[test]
+    fn a_change_shows_on_the_member_quietly() {
+        let mut channel = Channel::default();
+        channel.apply(&entered(1, &[member(1, "first"), member(2, "second")]));
+        let muted = Member { muted: true, ..member(2, "second") };
+        assert_eq!(channel.apply(&Event::Changed(muted.clone())), None);
+        assert_eq!(channel.members(), [member(1, "first"), muted]);
     }
 
     #[test]

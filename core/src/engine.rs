@@ -1,6 +1,6 @@
 //! The engine the apps drive: joins and leaves the channel, runs the network side of a call,
-//! joins again once when its connection is lost, and tells a [`Listener`] the channel after
-//! each change.
+//! joins again once when its connection is lost, watches who is in the channel while out of it,
+//! and tells a [`Listener`] the channel after each change.
 //!
 //! A join hands the caller the call's two realtime ends, a [`Microphone`] and a [`Speaker`],
 //! for the platform's audio to drive until the call is over; they exist only for a call, and
@@ -15,7 +15,7 @@ use std::time::Duration;
 use bukospeak_proto::{Fingerprint, MemberId};
 use rtrb::{Producer, RingBuffer};
 use tokio::runtime::Runtime;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -26,7 +26,7 @@ use crate::echo;
 use crate::jitter::Packet;
 use crate::microphone::{Microphone, Settings};
 use crate::playout::Mixer;
-use crate::session::{self, AudioSender, Error, JoinConfig, Session};
+use crate::session::{self, AudioSender, Entry, Error, JoinConfig, Session, Watch};
 use crate::speaker::{Downlink, Speaker};
 use crate::speaking::Speaking;
 use crate::uplink;
@@ -39,6 +39,9 @@ const DOWNLINK_FRAMES: usize = 50 * crate::playout::VOICES;
 
 /// How often the engine looks who speaks: quick enough for an indicator to feel live.
 const SPEAKING_EVERY: Duration = Duration::from_millis(50);
+
+/// How long a watch that failed or broke waits before it starts again.
+const WATCH_AGAIN_AFTER: Duration = Duration::from_secs(5);
 
 /// Receives the channel after each change, in order, on a thread of its own, so it may call
 /// the engine; but not drop it, since dropping waits for that thread.
@@ -70,7 +73,11 @@ pub struct Engine {
     runtime: Runtime,
     conditioning: Conditioning,
     settings: Arc<Settings>,
-    call: Mutex<Option<Call>>,
+    /// Whether this member is muted, for the call to tell the server; the microphone goes by
+    /// the settings.
+    muted: watch::Sender<bool>,
+    call: Mutex<Option<Running>>,
+    watch: Mutex<Option<Running>>,
     // Fields drop in order: the last sender of events goes before the listener's thread, which
     // ends with it, is waited for.
     events: mpsc::Sender<Event>,
@@ -88,7 +95,8 @@ impl Drop for Listening {
     }
 }
 
-struct Call {
+/// A call or a watch, on the runtime until it is stopped.
+struct Running {
     stop: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -112,15 +120,25 @@ impl Engine {
                 listener.update(Update { channel: channel.clone(), announcement, lost });
             }
         })?;
-        Ok(Self { runtime, conditioning, settings: Arc::default(), call: Mutex::default(), events, _listening: Listening(Some(listening)) })
+        Ok(Self {
+            runtime,
+            conditioning,
+            settings: Arc::default(),
+            muted: watch::Sender::new(false),
+            call: Mutex::default(),
+            watch: Mutex::default(),
+            events,
+            _listening: Listening(Some(listening)),
+        })
     }
 
-    /// Joins the channel, after leaving the call before if there is one.
+    /// Joins the channel, after leaving the call before if there is one, and stops watching it.
     pub fn join(&self, config: JoinConfig) -> Result<Joined, Error> {
         // Held until the call is in place, so a leave meanwhile, say from the listener's
         // thread, waits for the join and then ends its call instead of missing it.
         let mut call = self.call.lock().expect("the call lock is never poisoned");
         self.end(call.take());
+        self.unwatch();
         // libopus creates codecs without fail for the fixed formats asked for.
         let capture = Capture::new(self.conditioning).expect("the encoder can be created");
         let mixer = Mixer::new().expect("the decoders can be created");
@@ -132,7 +150,9 @@ impl Engine {
             Conditioning::Platform => (None, None),
         };
 
-        let session = self.runtime.block_on(Session::join(config.clone()))?;
+        let mut muted = self.muted.subscribe();
+        let entry = Entry { muted: *muted.borrow_and_update(), resume: None };
+        let session = self.runtime.block_on(Session::enter(config.clone(), entry))?;
         let fingerprint = session.fingerprint();
         // Joining again trusts only the server joined now.
         let rejoin = JoinConfig { pin: Some(fingerprint), ..config };
@@ -146,9 +166,9 @@ impl Engine {
         // send means the engine is gone, and with it the listener.
         let _ = self.events.send(Event::Entered { you: session.you(), members: session.members().to_vec() });
         let (stop, stopped) = oneshot::channel();
-        let link = Link { session, rejoin, sender };
+        let link = Link { session, rejoin, sender, muted };
         let task = self.runtime.spawn(run(link, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
-        *call = Some(Call { stop, task });
+        *call = Some(Running { stop, task });
         Ok(Joined {
             fingerprint,
             microphone: Microphone::new(capture, played, frames, uplink, Arc::clone(&self.settings), Arc::clone(&speaking)),
@@ -160,6 +180,23 @@ impl Engine {
     pub fn leave(&self) {
         let mut call = self.call.lock().expect("the call lock is never poisoned");
         self.end(call.take());
+    }
+
+    /// Watches who is in the channel without joining it, until [`unwatch`](Self::unwatch) or a
+    /// join; the listener sees them as the channel's [`present`](Channel::present). The server
+    /// is trusted by `pin` only, from a join before.
+    pub fn watch(&self, server: String, room_key: String, pin: Fingerprint) {
+        let mut watch = self.watch.lock().expect("the watch lock is never poisoned");
+        self.end(watch.take());
+        let (stop, stopped) = oneshot::channel();
+        let task = self.runtime.spawn(watch_present(server, room_key, pin, self.events.clone(), stopped));
+        *watch = Some(Running { stop, task });
+    }
+
+    /// Stops watching who is in the channel, if the engine does.
+    pub fn unwatch(&self) {
+        let mut watch = self.watch.lock().expect("the watch lock is never poisoned");
+        self.end(watch.take());
     }
 
     /// Whether the microphone's noise is suppressed (the default), or sent as captured.
@@ -177,18 +214,20 @@ impl Engine {
     /// Whether the microphone sends silence, so a talkspurt ends as in a pause.
     pub fn set_muted(&self, muted: bool) {
         self.settings.muted.store(muted, Ordering::Relaxed);
+        self.muted.send_replace(muted);
     }
 
-    fn end(&self, call: Option<Call>) {
-        let Some(call) = call else { return };
-        // A call that ended by itself no longer listens.
-        let _ = call.stop.send(());
-        self.runtime.block_on(call.task).expect("the call task doesn't panic");
+    fn end(&self, running: Option<Running>) {
+        let Some(running) = running else { return };
+        // A call that ended by itself, or a watch, may no longer listen.
+        let _ = running.stop.send(());
+        self.runtime.block_on(running.task).expect("a call or watch task doesn't panic");
     }
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.unwatch();
         self.leave();
     }
 }
@@ -200,6 +239,8 @@ struct Link {
     rejoin: JoinConfig,
     /// The uplink's, which follows the session joined again.
     sender: AudioSender,
+    /// Whether this member is muted, to tell the server.
+    muted: watch::Receiver<bool>,
 }
 
 /// The network side of a call: moves the members' frames to the speaker and tells the
@@ -224,6 +265,13 @@ async fn run(
     loop {
         let lost = tokio::select! {
             _ = &mut stop => break,
+            Ok(()) = link.muted.changed() => {
+                let muted = *link.muted.borrow_and_update();
+                match link.session.set_muted(muted).await {
+                    Ok(()) => continue,
+                    Err(error) => error,
+                }
+            }
             _ = watch.tick() => {
                 deliveries.retry();
                 let mut now = speaking.members(you);
@@ -250,6 +298,10 @@ async fn run(
                     tell(Event::Joined(member));
                     continue;
                 }
+                Ok(session::Event::Changed(member)) => {
+                    tell(Event::Changed(member));
+                    continue;
+                }
                 Ok(session::Event::Left(id)) => {
                     members.remove(&id);
                     deliveries.left(id);
@@ -263,11 +315,16 @@ async fn run(
         tell(Event::Reconnecting);
         let rejoined = tokio::select! {
             _ = &mut stop => return tell(Event::Ended),
-            rejoined = Session::join(link.rejoin.clone()) => rejoined,
+            // In its own place, if the server still holds it: the others see it come back, not
+            // leave and join.
+            rejoined = Session::enter(
+                link.rejoin.clone(),
+                Entry { muted: *link.muted.borrow_and_update(), resume: Some(link.session.resume()) },
+            ) => rejoined,
         };
         match rejoined {
             Ok(session) => {
-                // The members of the lost session are gone, even if they joined again too.
+                // The voices of the lost session broke off; ones that go on start anew.
                 members.iter().for_each(|&id| deliveries.left(id));
                 link.sender.follow(&session);
                 link.session = session;
@@ -281,6 +338,34 @@ async fn run(
     }
     link.session.leave().await;
     tell(Event::Ended);
+}
+
+/// Tells the listener who is in the channel, watched from outside, until it is stopped; a watch
+/// that fails or breaks shows nobody and starts again after a while.
+async fn watch_present(server: String, room_key: String, pin: Fingerprint, events: mpsc::Sender<Event>, mut stop: oneshot::Receiver<()>) {
+    // A failed send means the engine is gone, and with it the listener; the watch ends soon.
+    let tell = |event| _ = events.send(event);
+    let watched = async || {
+        // Who is in the channel is a glance before joining: a watch that fails shows nobody,
+        // and why matters only once a join fails too.
+        let Ok(mut watch) = Watch::start(&server, room_key.clone(), pin).await else { return };
+        tell(Event::Present(watch.members().to_vec()));
+        while watch.changed().await.is_ok() {
+            tell(Event::Present(watch.members().to_vec()));
+        }
+    };
+    loop {
+        tokio::select! {
+            _ = &mut stop => break,
+            () = watched() => {}
+        }
+        tell(Event::Present(Vec::new()));
+        tokio::select! {
+            _ = &mut stop => return,
+            () = tokio::time::sleep(WATCH_AGAIN_AFTER) => {}
+        }
+    }
+    tell(Event::Present(Vec::new()));
 }
 
 /// Everyone in the session's channel but this member.
@@ -542,6 +627,58 @@ mod tests {
         assert!(leaving.elapsed() < Duration::from_secs(1), "the leave took {:?}", leaving.elapsed());
         let ended = wait_for(&updates, |update| (update.channel.state() == State::Out).then_some(update.lost));
         assert!(ended.is_none());
+    }
+
+    #[test]
+    fn the_others_see_who_is_muted() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let address = serve(&server, &identity).local_addr().unwrap();
+        let muted = |updates: &mpsc::Receiver<Update>, wanted: bool| {
+            wait_for(updates, |update| {
+                let first = update.channel.members().iter().find(|member| member.name == "first")?;
+                (first.muted == wanted).then_some(())
+            });
+        };
+
+        let (first, _first_updates) = engine();
+        first.set_muted(true);
+        let _talking = first.join(config(address, &identity, "first")).unwrap();
+        let (second, updates) = engine();
+        let _hearing = second.join(config(address, &identity, "second")).unwrap();
+        muted(&updates, true);
+        first.set_muted(false);
+        muted(&updates, false);
+    }
+
+    #[test]
+    fn watching_shows_who_is_in_the_channel_until_a_join() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let address = serve(&server, &identity).local_addr().unwrap();
+        let present = |updates: &mpsc::Receiver<Update>, names: &[&str]| {
+            wait_for(updates, |update| {
+                let present: Vec<&str> = update.channel.present().iter().map(|member| member.name.as_str()).collect();
+                (present == names).then_some(())
+            });
+        };
+
+        let (first, _first_updates) = engine();
+        let _talking = first.join(config(address, &identity, "first")).unwrap();
+        let (watching, updates) = engine();
+        watching.watch(address.to_string(), ROOM_KEY.into(), identity.fingerprint());
+        present(&updates, &["first"]);
+        let (second, _second_updates) = engine();
+        let _hearing = second.join(config(address, &identity, "second")).unwrap();
+        present(&updates, &["first", "second"]);
+        first.leave();
+        present(&updates, &["second"]);
+
+        // Joining stops the watch: the call shows who is in it.
+        let _joined = watching.join(config(address, &identity, "third")).unwrap();
+        present(&updates, &[]);
+        let (_, names) = entered(&updates);
+        assert_eq!(names, ["second", "third"]);
     }
 
     /// What the speaker takes from the ring now, as `(was a leave, member)`.

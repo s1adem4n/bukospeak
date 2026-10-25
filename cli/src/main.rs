@@ -51,7 +51,7 @@ enum Command {
 
 /// What the client waits for.
 enum Happening {
-    Update(Update),
+    Update(Box<Update>),
     AudioFailed(bukospeak_audio_desktop::Error),
     Stop,
 }
@@ -61,7 +61,7 @@ struct Forward(mpsc::Sender<Happening>);
 impl Listener for Forward {
     fn update(&self, update: Update) {
         // The client stops listening only on its way out.
-        let _ = self.0.send(Happening::Update(update));
+        let _ = self.0.send(Happening::Update(Box::new(update)));
     }
 }
 
@@ -127,8 +127,11 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, p
     let mut shown = Channel::default();
     loop {
         match received.recv().expect("the client holds a sender until it leaves") {
-            Happening::Update(Update { lost: Some(lost), .. }) => return Err(lost).context("the call ended"),
-            Happening::Update(Update { channel, announcement, lost: None }) => {
+            Happening::Update(update) => {
+                let Update { channel, announcement, lost } = *update;
+                if let Some(lost) = lost {
+                    return Err(lost).context("the call ended");
+                }
                 if shown.you().is_none()
                     && let Some(you) = channel.you()
                 {

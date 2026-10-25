@@ -5,6 +5,9 @@ import Foundation
 nonisolated struct Member: Identifiable, Hashable, Sendable {
     let id: UInt16
     let name: String
+    let muted: Bool
+    /// The member's connection was lost, and the server holds its place for it to come back.
+    let reconnecting: Bool
 }
 
 /// A server's certificate fingerprint, its SHA-256, pinned on the first join.
@@ -51,6 +54,8 @@ nonisolated struct ChannelUpdate: Sendable {
     let speaking: Set<UInt16>
     /// The call ended without a leave: why, after joining again failed too.
     let lost: String?
+    /// Who is in the channel while the engine watches it from outside.
+    let present: [Member]
 }
 
 /// A call just joined.
@@ -135,6 +140,17 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
+    /// Watches who is in the channel without joining it, until `unwatch` or a join; the updates
+    /// tell them as present. Only a server pinned by a join before is watched.
+    func watch(server: String, roomKey: String, pin: Fingerprint) {
+        var pin = pin.ffi
+        bukospeak_engine_watch(engine, server, roomKey, &pin)
+    }
+
+    func unwatch() {
+        bukospeak_engine_unwatch(engine)
+    }
+
     /// Whether the microphone sends silence, in this call and the ones after.
     func setMuted(_ muted: Bool) {
         bukospeak_engine_set_muted(engine, muted)
@@ -213,7 +229,12 @@ nonisolated extension String {
 
 nonisolated extension Member {
     fileprivate init(_ member: BukoSpeakMember) {
-        self.init(id: member.id, name: String(member.name))
+        self.init(
+            id: member.id,
+            name: String(member.name),
+            muted: member.muted,
+            reconnecting: member.reconnecting
+        )
     }
 }
 
@@ -232,7 +253,8 @@ nonisolated extension ChannelUpdate {
             you: update.you == 0 ? nil : update.you,
             members: UnsafeBufferPointer(start: update.members, count: update.members_len).map(Member.init),
             speaking: Set(UnsafeBufferPointer(start: update.speaking, count: update.speaking_len)),
-            lost: lost.isEmpty ? nil : lost
+            lost: lost.isEmpty ? nil : lost,
+            present: UnsafeBufferPointer(start: update.present, count: update.present_len).map(Member.init)
         )
     }
 }

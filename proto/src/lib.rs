@@ -10,7 +10,7 @@ mod fingerprint;
 pub use fingerprint::{Fingerprint, ParseFingerprintError};
 
 /// The version a client states in its Hello; the server turns away any other.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The ALPN protocol of the QUIC connection.
 pub const ALPN: &[u8] = b"bukospeak/1";

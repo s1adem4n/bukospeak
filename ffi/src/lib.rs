@@ -44,11 +44,14 @@ pub struct BukoSpeakFingerprint {
 pub struct BukoSpeakMember {
     pub id: u16,
     pub name: BukoSpeakStr,
+    pub muted: bool,
+    /// The member's connection was lost, and the server holds its place for it to come back.
+    pub reconnecting: bool,
 }
 
 impl BukoSpeakMember {
     fn of(member: &Member) -> Self {
-        Self { id: member.id.0, name: BukoSpeakStr::of(&member.name) }
+        Self { id: member.id.0, name: BukoSpeakStr::of(&member.name), muted: member.muted, reconnecting: member.reconnecting }
     }
 }
 
@@ -78,6 +81,9 @@ pub struct BukoSpeakUpdate {
     pub announcement: BukoSpeakStr,
     /// The call ended without a leave: why, for the user; empty otherwise.
     pub lost: BukoSpeakStr,
+    /// Who is in the channel while the engine watches it from outside, in the order they came.
+    pub present: *const BukoSpeakMember,
+    pub present_len: usize,
 }
 
 /// Hears the channel after each change, in order, on a thread of the engine's.
@@ -144,6 +150,7 @@ impl Listener for Foreign {
         let Update { channel, announcement, lost } = update;
         let members: Vec<BukoSpeakMember> = channel.members().iter().map(BukoSpeakMember::of).collect();
         let speaking: Vec<u16> = channel.speaking().iter().map(|id| id.0).collect();
+        let present: Vec<BukoSpeakMember> = channel.present().iter().map(BukoSpeakMember::of).collect();
         let announcement = announcement.map(|announcement| announcement.to_string()).unwrap_or_default();
         let lost = lost.map(|lost| lost.to_string()).unwrap_or_default();
         let state = match channel.state() {
@@ -162,6 +169,8 @@ impl Listener for Foreign {
                 speaking_len: speaking.len(),
                 announcement: BukoSpeakStr::of(&announcement),
                 lost: BukoSpeakStr::of(&lost),
+                present: present.as_ptr(),
+                present_len: present.len(),
             },
         );
     }
@@ -241,6 +250,34 @@ pub unsafe extern "C" fn bukospeak_engine_join(
 #[unsafe(no_mangle)]
 pub extern "C" fn bukospeak_engine_leave(engine: &BukoSpeakEngine) {
     engine.leave();
+}
+
+/// Watches who is in the channel without joining it, until `bukospeak_engine_unwatch` or a join;
+/// the updates tell them as present. The server is trusted by `pin` only, from a join before.
+/// Returns at once; a watch that fails shows nobody and starts again after a while.
+///
+/// # Safety
+///
+/// `server` and `room_key` aren't null and are NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bukospeak_engine_watch(
+    engine: &BukoSpeakEngine,
+    server: *const c_char,
+    room_key: *const c_char,
+    pin: &BukoSpeakFingerprint,
+) {
+    // SAFETY: the caller vouches for the strings.
+    let (Ok(server), Ok(room_key)) = (unsafe { text(server) }, unsafe { text(room_key) }) else {
+        // An app's own settings are UTF-8; text that isn't can't name a server to watch.
+        return;
+    };
+    engine.engine.watch(server, room_key, Fingerprint(pin.bytes));
+}
+
+/// Stops watching who is in the channel, if the engine does.
+#[unsafe(no_mangle)]
+pub extern "C" fn bukospeak_engine_unwatch(engine: &BukoSpeakEngine) {
+    engine.engine.unwatch();
 }
 
 /// Whether the microphone sends silence, so a talkspurt ends as in a pause; it holds across

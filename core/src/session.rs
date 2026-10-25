@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ServerMessage};
+use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ResumeToken, ServerMessage};
 use bukospeak_proto::{ALPN, Fingerprint, IDLE_TIMEOUT, MemberId, PROTOCOL_VERSION, SERVER_NAME, audio};
 use bytes::Bytes;
 use quinn::crypto::rustls::QuicClientConfig;
@@ -25,6 +25,14 @@ pub struct JoinConfig {
     pub room_key: String,
     /// The fingerprint pinned on an earlier join, or None to trust the server on first use.
     pub pin: Option<Fingerprint>,
+}
+
+/// How this member enters beyond its config: muted or not, and the session lost before whose
+/// place it takes, if the server still holds it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Entry {
+    pub muted: bool,
+    pub resume: Option<ResumeToken>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +61,8 @@ pub enum Error {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Joined(Member),
+    /// A member muted or unmuted, or is reconnecting or back; this member too.
+    Changed(Member),
     Left(MemberId),
     Audio(audio::Frame),
 }
@@ -62,52 +72,41 @@ pub struct Session {
     endpoint: Endpoint,
     connection: Connection,
     // Kept open: finishing it tells the server the member left.
-    _send: SendStream,
+    send: SendStream,
     control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
     you: MemberId,
     members: Vec<Member>,
+    resume: ResumeToken,
     fingerprint: Fingerprint,
 }
 
 impl Session {
-    /// Joins the channel, or fails if the server doesn't welcome this member within
+    /// Joins the channel unmuted, or fails if the server doesn't welcome this member within
     /// [`JOIN_TIMEOUT`].
     pub async fn join(config: JoinConfig) -> Result<Self, Error> {
-        tokio::time::timeout(JOIN_TIMEOUT, Self::join_unbounded(config)).await.unwrap_or(Err(Error::TimedOut))
+        Self::enter(config, Entry::default()).await
     }
 
-    async fn join_unbounded(config: JoinConfig) -> Result<Self, Error> {
-        let server = tokio::net::lookup_host(&config.server).await?.next().ok_or_else(|| Error::Resolve(config.server.clone()))?;
-        let endpoint = Endpoint::client(unspecified_like(server))?;
+    /// Joins the channel as `entry` says, or fails if the server doesn't welcome this member
+    /// within [`JOIN_TIMEOUT`].
+    pub async fn enter(config: JoinConfig, entry: Entry) -> Result<Self, Error> {
+        tokio::time::timeout(JOIN_TIMEOUT, Self::enter_unbounded(config, entry)).await.unwrap_or(Err(Error::TimedOut))
+    }
 
-        let (client, presented) = client_config(config.pin);
-
-        let connection = endpoint.connect_with(client, server, SERVER_NAME)?.await.map_err(|error| {
-            let presented = *presented.lock().expect("the fingerprint lock is never poisoned");
-            match (config.pin, presented) {
-                (Some(pinned), Some(presented)) if pinned != presented => Error::FingerprintChanged { pinned, presented },
-                _ => error.into(),
-            }
-        })?;
-        let fingerprint =
-            presented.lock().expect("the fingerprint lock is never poisoned").expect("a connected server presented a certificate");
-
-        let (mut send, mut recv) = connection.open_bi().await?;
-        let hello = ClientMessage::Hello { version: PROTOCOL_VERSION, name: config.name, room_key: config.room_key };
-        control::write(&mut send, &hello).await?;
-        let (you, members) = match control::read(&mut recv).await? {
-            Some(ServerMessage::Welcome { you, members }) => (you, members),
-            Some(ServerMessage::Rejected { reason }) => {
-                connection.close(0u32.into(), b"rejected");
-                return Err(reason.into());
-            }
-            Some(_) => return Err(Error::Protocol("the first message isn't a Welcome")),
-            None => return Err(Error::Protocol("the control stream ended before a Welcome")),
+    async fn enter_unbounded(config: JoinConfig, entry: Entry) -> Result<Self, Error> {
+        let hello = ClientMessage::Hello {
+            version: PROTOCOL_VERSION,
+            name: config.name,
+            room_key: config.room_key,
+            muted: entry.muted,
+            resume: entry.resume,
         };
-
-        let (forward, control) = mpsc::unbounded_channel();
-        tokio::spawn(read_control(recv, forward));
-        Ok(Self { endpoint, connection, _send: send, control, you, members, fingerprint })
+        let (opened, answer) = Opened::with(&config.server, config.pin, &hello).await?;
+        let ServerMessage::Welcome { you, members, resume } = answer else {
+            return Err(Error::Protocol("the first message isn't a Welcome"));
+        };
+        let Opened { endpoint, connection, send, control, fingerprint } = opened;
+        Ok(Self { endpoint, connection, send, control, you, members, resume, fingerprint })
     }
 
     pub fn you(&self) -> MemberId {
@@ -117,6 +116,11 @@ impl Session {
     /// Everyone in the channel at the join, this member included; [`Event`]s tell what changes.
     pub fn members(&self) -> &[Member] {
         &self.members
+    }
+
+    /// What takes this session's place once its connection is lost.
+    pub fn resume(&self) -> ResumeToken {
+        self.resume
     }
 
     /// The server's fingerprint, to pin for the next join.
@@ -129,15 +133,21 @@ impl Session {
         AudioSender { connection: Arc::new(Mutex::new(self.connection.clone())) }
     }
 
+    /// Mutes or unmutes this member for the others to see; the microphone's silence is its own.
+    pub async fn set_muted(&mut self, muted: bool) -> Result<(), Error> {
+        Ok(control::write(&mut self.send, &ClientMessage::Mute { muted }).await?)
+    }
+
     /// The next event; an error means the session is over.
     pub async fn next_event(&mut self) -> Result<Event, Error> {
         loop {
             tokio::select! {
                 message = self.control.recv() => match message {
                     Some(Ok(ServerMessage::Joined { member })) => return Ok(Event::Joined(member)),
+                    Some(Ok(ServerMessage::Changed { member })) => return Ok(Event::Changed(member)),
                     Some(Ok(ServerMessage::Left { id })) => return Ok(Event::Left(id)),
-                    Some(Ok(ServerMessage::Welcome { .. } | ServerMessage::Rejected { .. })) => {
-                        return Err(Error::Protocol("a second Welcome or a Rejected after the join"));
+                    Some(Ok(ServerMessage::Welcome { .. } | ServerMessage::Present { .. } | ServerMessage::Rejected { .. })) => {
+                        return Err(Error::Protocol("a Welcome, Present or Rejected after the join"));
                     }
                     Some(Err(error)) => return Err(error.into()),
                     None => return Err(self.connection.closed().await.into()),
@@ -155,6 +165,96 @@ impl Session {
     pub async fn leave(self) {
         self.connection.close(0u32.into(), b"left");
         self.endpoint.wait_idle().await;
+    }
+}
+
+/// Who is in the channel, watched without joining it, from the start until it is dropped or the
+/// connection is lost.
+pub struct Watch {
+    // Kept for the connection: dropping both closes it, which ends the watch at the server.
+    _endpoint: Endpoint,
+    _connection: Connection,
+    _send: SendStream,
+    control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
+    members: Vec<Member>,
+}
+
+impl Watch {
+    /// Starts watching the server pinned, or fails if it doesn't answer within [`JOIN_TIMEOUT`].
+    pub async fn start(server: &str, room_key: String, pin: Fingerprint) -> Result<Self, Error> {
+        let watch = ClientMessage::Watch { version: PROTOCOL_VERSION, room_key };
+        let (opened, answer) =
+            tokio::time::timeout(JOIN_TIMEOUT, Opened::with(server, Some(pin), &watch)).await.unwrap_or(Err(Error::TimedOut))?;
+        let ServerMessage::Present { members } = answer else {
+            return Err(Error::Protocol("the first message isn't a Present"));
+        };
+        let Opened { endpoint, connection, send, control, .. } = opened;
+        Ok(Self { _endpoint: endpoint, _connection: connection, _send: send, control, members })
+    }
+
+    /// Everyone in the channel, in the order they came.
+    pub fn members(&self) -> &[Member] {
+        &self.members
+    }
+
+    /// Waits until someone joins, changes or leaves, for [`members`](Self::members) to tell who
+    /// is there then; an error means the watch is over.
+    pub async fn changed(&mut self) -> Result<(), Error> {
+        match self.control.recv().await {
+            Some(Ok(ServerMessage::Joined { member })) => self.members.push(member),
+            Some(Ok(ServerMessage::Changed { member })) => replace(&mut self.members, member),
+            Some(Ok(ServerMessage::Left { id })) => self.members.retain(|member| member.id != id),
+            Some(Ok(_)) => return Err(Error::Protocol("a Welcome, Present or Rejected after the watch began")),
+            Some(Err(error)) => return Err(error.into()),
+            None => return Err(Error::Protocol("the server ended the watch")),
+        }
+        Ok(())
+    }
+}
+
+/// A connection to the server, trusted by its pin, whose first message the server answered.
+struct Opened {
+    endpoint: Endpoint,
+    connection: Connection,
+    send: SendStream,
+    /// The server's messages after its answer.
+    control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
+    fingerprint: Fingerprint,
+}
+
+impl Opened {
+    /// Connects to the server, trusting it by `pin`, or on first use if it is None, and sends
+    /// `first`; the server's answer comes along, unless it is a Rejected.
+    async fn with(server: &str, pin: Option<Fingerprint>, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
+        let address = tokio::net::lookup_host(server).await?.next().ok_or_else(|| Error::Resolve(server.to_owned()))?;
+        let endpoint = Endpoint::client(unspecified_like(address))?;
+
+        let (client, presented) = client_config(pin);
+
+        let connection = endpoint.connect_with(client, address, SERVER_NAME)?.await.map_err(|error| {
+            let presented = *presented.lock().expect("the fingerprint lock is never poisoned");
+            match (pin, presented) {
+                (Some(pinned), Some(presented)) if pinned != presented => Error::FingerprintChanged { pinned, presented },
+                _ => error.into(),
+            }
+        })?;
+        let fingerprint =
+            presented.lock().expect("the fingerprint lock is never poisoned").expect("a connected server presented a certificate");
+
+        let (mut send, mut recv) = connection.open_bi().await?;
+        control::write(&mut send, first).await?;
+        let answer = match control::read(&mut recv).await? {
+            Some(ServerMessage::Rejected { reason }) => {
+                connection.close(0u32.into(), b"rejected");
+                return Err(reason.into());
+            }
+            Some(answer) => answer,
+            None => return Err(Error::Protocol("the control stream ended before an answer")),
+        };
+
+        let (forward, control) = mpsc::unbounded_channel();
+        tokio::spawn(read_control(recv, forward));
+        Ok((Self { endpoint, connection, send, control, fingerprint }, answer))
     }
 }
 
@@ -208,6 +308,13 @@ async fn read_control(mut recv: RecvStream, forward: mpsc::UnboundedSender<Resul
         if forward.send(message).is_err() || failed {
             return;
         }
+    }
+}
+
+/// Puts the member in the place of the one with its id, if there is one.
+pub(crate) fn replace(members: &mut [Member], member: Member) {
+    if let Some(old) = members.iter_mut().find(|old| old.id == member.id) {
+        *old = member;
     }
 }
 

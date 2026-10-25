@@ -45,6 +45,11 @@ typedef struct BukoSpeakStr {
 typedef struct BukoSpeakMember {
   uint16_t id;
   struct BukoSpeakStr name;
+  bool muted;
+  /**
+   * The member's connection was lost, and the server holds its place for it to come back.
+   */
+  bool reconnecting;
 } BukoSpeakMember;
 
 /**
@@ -75,6 +80,11 @@ typedef struct BukoSpeakUpdate {
    * The call ended without a leave: why, for the user; empty otherwise.
    */
   struct BukoSpeakStr lost;
+  /**
+   * Who is in the channel while the engine watches it from outside, in the order they came.
+   */
+  const struct BukoSpeakMember *present;
+  size_t present_len;
 } BukoSpeakUpdate;
 
 /**
@@ -152,6 +162,25 @@ void bukospeak_engine_join(const struct BukoSpeakEngine *engine,
  * Stops the call's audio and leaves the call, once the server knows; without one, nothing.
  */
 void bukospeak_engine_leave(const struct BukoSpeakEngine *engine);
+
+/**
+ * Watches who is in the channel without joining it, until `bukospeak_engine_unwatch` or a join;
+ * the updates tell them as present. The server is trusted by `pin` only, from a join before.
+ * Returns at once; a watch that fails shows nobody and starts again after a while.
+ *
+ * # Safety
+ *
+ * `server` and `room_key` aren't null and are NUL-terminated.
+ */
+void bukospeak_engine_watch(const struct BukoSpeakEngine *engine,
+                            const char *server,
+                            const char *room_key,
+                            const struct BukoSpeakFingerprint *pin);
+
+/**
+ * Stops watching who is in the channel, if the engine does.
+ */
+void bukospeak_engine_unwatch(const struct BukoSpeakEngine *engine);
 
 /**
  * Whether the microphone sends silence, so a talkspurt ends as in a pause; it holds across
