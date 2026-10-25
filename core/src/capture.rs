@@ -3,7 +3,8 @@
 //! The capture callback owns it and hands it one 10 ms frame at a time. It suppresses noise
 //! with RNNoise, lets the gate decide, and encodes every frame, sent or not, so the encoder
 //! stays warm and the frame index counts the sender's whole timeline. Nothing here allocates
-//! after construction.
+//! after construction but the first frame on each thread, where RNNoise's FFT sets up its plans
+//! and scratch buffers in thread-locals.
 
 use bukospeak_proto::audio::{FRAME_SAMPLES, Level, MAX_OPUS_LEN, SAMPLE_RATE};
 use nnnoiseless::DenoiseState;
@@ -75,7 +76,12 @@ impl Capture {
     /// Takes a captured frame and hands `send` what the gate lets through: nothing, the frame,
     /// or, when speech starts, the pre-roll and then the frame.
     pub fn process(&mut self, input: &[f32; FRAME_SAMPLES], mut send: impl FnMut(&Encoded)) -> Result<(), opus::Error> {
-        self.scaled.iter_mut().zip(input).for_each(|(scaled, sample)| *scaled = sample * PCM_SCALE);
+        // A NaN, infinite or huge sample from a faulty driver would turn RNNoise's state to NaN for
+        // good, and NaN in its spectrum is undefined behavior in its FFT: clip to full scale, as an
+        // integer device would, and take NaN for silence.
+        self.scaled.iter_mut().zip(input).for_each(|(scaled, sample)| {
+            *scaled = if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) * PCM_SCALE };
+        });
         let voice_probability = self.denoiser.process_frame(&mut self.denoised, &self.scaled);
         self.denoised.iter_mut().for_each(|sample| *sample /= PCM_SCALE);
 
@@ -148,6 +154,15 @@ mod tests {
     fn noise_and_silence_send_nothing() {
         let signal: Vec<f32> = [vec![0.0; SECOND], noise(3 * SECOND, 0.05), vec![0.0; SECOND]].concat();
         assert!(capture(&signal).is_empty());
+    }
+
+    #[test]
+    fn speech_after_broken_samples_is_still_sent() {
+        let mut signal = voice(2 * SECOND, 0.3);
+        for (sample, broken) in signal.iter_mut().zip([f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e30]) {
+            *sample = broken;
+        }
+        assert!(capture(&signal).len() >= 150);
     }
 
     #[test]
