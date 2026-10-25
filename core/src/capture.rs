@@ -130,6 +130,12 @@ impl Capture {
         Ok(())
     }
 
+    /// Counts frames the input didn't capture, while the platform's audio stopped, so the index
+    /// stays the sender's clock: listeners measure delay against it.
+    pub fn skip(&mut self, frames: u32) {
+        self.next_index = self.next_index.wrapping_add(frames);
+    }
+
     /// The next frame's index. It counts a frame the encoder fails on too, so the timeline
     /// stays true.
     fn take_index(&mut self) -> u32 {

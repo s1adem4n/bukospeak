@@ -95,7 +95,7 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, n
     let (happenings, received) = mpsc::channel();
     let engine = Engine::new(Arc::new(Forward(happenings.clone())))?;
     engine.set_noise_suppression(noise_suppression);
-    let Joined { you, members, fingerprint, microphone, speaker } = match engine.join(JoinConfig { pin, ..config }) {
+    let Joined { fingerprint, microphone, speaker } = match engine.join(JoinConfig { pin, ..config }) {
         Err(Error::FingerprintChanged { pinned, presented }) => anyhow::bail!(
             "{server}'s certificate changed from {pinned} to {presented}: if the server was set up anew, remove its line from {}",
             known.path().display()
@@ -112,13 +112,15 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, n
     let audio = Audio::start(microphone, speaker, input, output, move |error| _ = failures.send(Happening::AudioFailed(error)))?;
     ctrlc::set_handler(move || _ = happenings.send(Happening::Stop))?;
 
-    let mut names: BTreeMap<MemberId, String> = members.into_iter().map(|member| (member.id, member.name)).collect();
-    let others: Vec<&str> = names.iter().filter(|&(&id, _)| id != you).map(|(_, name)| name.as_str()).collect();
-    println!("joined; also here: {}", if others.is_empty() { "nobody".into() } else { others.join(", ") });
-
+    let mut names: BTreeMap<MemberId, String> = BTreeMap::new();
     let mut speaking: Vec<MemberId> = Vec::new();
     loop {
         match received.recv().expect("the client holds a sender until it leaves") {
+            Happening::Event(Event::Entered { you, members }) => {
+                names = members.into_iter().map(|member| (member.id, member.name)).collect();
+                let others: Vec<&str> = names.iter().filter(|&(&id, _)| id != you).map(|(_, name)| name.as_str()).collect();
+                println!("joined; also here: {}", if others.is_empty() { "nobody".into() } else { others.join(", ") });
+            }
             Happening::Event(Event::Joined(member)) => {
                 println!("{} joined", member.name);
                 names.insert(member.id, member.name);

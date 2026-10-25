@@ -55,6 +55,8 @@ impl BukoSpeakMember {
 
 #[repr(C)]
 pub enum BukoSpeakEventKind {
+    /// A call started: the events after it are this call's, the ones before an earlier call's.
+    Entered,
     Joined,
     Left,
     Speaking,
@@ -65,6 +67,11 @@ pub enum BukoSpeakEventKind {
 #[repr(C)]
 pub struct BukoSpeakEvent {
     pub kind: BukoSpeakEventKind,
+    /// Entered: this member's id.
+    pub you: u16,
+    /// Entered: everyone in the channel, this member included.
+    pub members: *const BukoSpeakMember,
+    pub members_len: usize,
     /// Joined: who joined. Left: who left, by id only.
     pub member: BukoSpeakMember,
     /// Speaking: who speaks now, in id order, this member among them.
@@ -77,7 +84,16 @@ pub struct BukoSpeakEvent {
 impl BukoSpeakEvent {
     fn new(kind: BukoSpeakEventKind) -> Self {
         let nobody = BukoSpeakMember { id: 0, name: BukoSpeakStr::of("") };
-        Self { kind, member: nobody, speaking: ptr::null(), speaking_len: 0, reason: BukoSpeakStr::of("") }
+        Self {
+            kind,
+            you: 0,
+            members: ptr::null(),
+            members_len: 0,
+            member: nobody,
+            speaking: ptr::null(),
+            speaking_len: 0,
+            reason: BukoSpeakStr::of(""),
+        }
     }
 }
 
@@ -97,11 +113,6 @@ pub enum BukoSpeakJoinStatus {
 #[repr(C)]
 pub struct BukoSpeakJoinResult {
     pub status: BukoSpeakJoinStatus,
-    /// Joined: this member's id.
-    pub you: u16,
-    /// Joined: everyone in the channel, this member included.
-    pub members: *const BukoSpeakMember,
-    pub members_len: usize,
     /// Joined: the server's, to pin for the next join. FingerprintChanged: the one presented.
     pub fingerprint: BukoSpeakFingerprint,
     /// FingerprintChanged: the one pinned.
@@ -113,15 +124,7 @@ pub struct BukoSpeakJoinResult {
 impl BukoSpeakJoinResult {
     fn new(status: BukoSpeakJoinStatus, message: &str) -> Self {
         let unknown = BukoSpeakFingerprint { bytes: [0; 32] };
-        Self {
-            status,
-            you: 0,
-            members: ptr::null(),
-            members_len: 0,
-            fingerprint: unknown,
-            pinned: unknown,
-            message: BukoSpeakStr::of(message),
-        }
+        Self { status, fingerprint: unknown, pinned: unknown, message: BukoSpeakStr::of(message) }
     }
 }
 
@@ -157,6 +160,15 @@ impl Listener for Foreign {
     fn event(&self, event: Event) {
         let tell = |event: &BukoSpeakEvent| (self.listener)(self.context, event);
         match event {
+            Event::Entered { you, members } => {
+                let members: Vec<BukoSpeakMember> = members.iter().map(BukoSpeakMember::of).collect();
+                tell(&BukoSpeakEvent {
+                    you: you.0,
+                    members: members.as_ptr(),
+                    members_len: members.len(),
+                    ..BukoSpeakEvent::new(BukoSpeakEventKind::Entered)
+                });
+            }
             Event::Joined(member) => {
                 tell(&BukoSpeakEvent { member: BukoSpeakMember::of(&member), ..BukoSpeakEvent::new(BukoSpeakEventKind::Joined) })
             }
@@ -203,8 +215,8 @@ pub extern "C" fn bukospeak_engine_free(engine: Box<BukoSpeakEngine>) {
 
 /// Leaves the call before, if there is one, and joins the channel, trusting the server by its
 /// fingerprint `pin`, or on first use if it is null. Blocks until the server welcomes this
-/// member or turns it away, 5 s at most, and hands `done` the result before it returns. A call
-/// starts unmuted.
+/// member or turns it away, 5 s at most, and hands `done` the result before it returns. Who is
+/// in the call comes as its Entered event.
 ///
 /// # Safety
 ///
@@ -226,19 +238,13 @@ pub unsafe extern "C" fn bukospeak_engine_join(
     };
     let pin = pin.map(|pin| Fingerprint(pin.bytes));
     match engine.join(JoinConfig { server, name, room_key, pin }) {
-        Ok((you, members, fingerprint)) => {
-            let members: Vec<BukoSpeakMember> = members.iter().map(BukoSpeakMember::of).collect();
-            done(
-                context,
-                &BukoSpeakJoinResult {
-                    you: you.0,
-                    members: members.as_ptr(),
-                    members_len: members.len(),
-                    fingerprint: BukoSpeakFingerprint { bytes: fingerprint.0 },
-                    ..BukoSpeakJoinResult::new(BukoSpeakJoinStatus::Joined, "")
-                },
-            );
-        }
+        Ok(fingerprint) => done(
+            context,
+            &BukoSpeakJoinResult {
+                fingerprint: BukoSpeakFingerprint { bytes: fingerprint.0 },
+                ..BukoSpeakJoinResult::new(BukoSpeakJoinStatus::Joined, "")
+            },
+        ),
         Err(error @ Error::FingerprintChanged { pinned, presented }) => {
             let message = error.to_string();
             done(
@@ -260,7 +266,8 @@ pub extern "C" fn bukospeak_engine_leave(engine: &BukoSpeakEngine) {
     engine.leave();
 }
 
-/// Whether the microphone sends silence, so a talkspurt ends as in a pause.
+/// Whether the microphone sends silence, so a talkspurt ends as in a pause; it holds across
+/// calls until set again.
 #[unsafe(no_mangle)]
 pub extern "C" fn bukospeak_engine_set_muted(engine: &BukoSpeakEngine, muted: bool) {
     engine.engine.set_muted(muted);
@@ -277,7 +284,9 @@ pub extern "C" fn bukospeak_engine_set_noise_suppression(engine: &BukoSpeakEngin
 #[cfg(target_os = "ios")]
 #[unsafe(no_mangle)]
 pub extern "C" fn bukospeak_engine_start_audio(engine: &BukoSpeakEngine, context: *mut c_void, failed: BukoSpeakFailed) -> bool {
-    match engine.audio.lock().expect("the audio lock is never poisoned").start() {
+    // Started apart, so `failed` runs without the lock and may call the engine.
+    let started = engine.audio.lock().expect("the audio lock is never poisoned").start();
+    match started {
         Ok(()) => true,
         Err(error) => {
             failed(context, BukoSpeakStr::of(&error.to_string()));
@@ -295,10 +304,10 @@ pub extern "C" fn bukospeak_engine_stop_audio(engine: &BukoSpeakEngine) {
 }
 
 impl BukoSpeakEngine {
-    fn join(&self, config: JoinConfig) -> Result<(bukospeak_core::proto::MemberId, Vec<Member>, Fingerprint), Error> {
+    fn join(&self, config: JoinConfig) -> Result<Fingerprint, Error> {
         let _calls = self.calls.lock().expect("the calls lock is never poisoned");
         self.stop_call_audio();
-        let Joined { you, members, fingerprint, microphone, speaker } = self.engine.join(config)?;
+        let Joined { fingerprint, microphone, speaker } = self.engine.join(config)?;
         #[cfg(target_os = "ios")]
         {
             *self.audio.lock().expect("the audio lock is never poisoned") = Audio::Idle(microphone, speaker);
@@ -306,7 +315,7 @@ impl BukoSpeakEngine {
         // Only iOS plays a call through this interface so far; elsewhere it goes without audio.
         #[cfg(not(target_os = "ios"))]
         drop((microphone, speaker));
-        Ok((you, members, fingerprint))
+        Ok(fingerprint)
     }
 
     fn leave(&self) {

@@ -26,8 +26,8 @@ use objc2_audio_toolbox::{
     kAudioUnitSubType_VoiceProcessingIO, kAudioUnitType_Output,
 };
 use objc2_core_audio_types::{
-    AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
-    kAudioFormatLinearPCM,
+    AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, kAudio_ParamError, kAudioFormatFlagIsFloat,
+    kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 
 /// The most frames the unit asks for at once: iOS's slice while the screen is locked.
@@ -181,15 +181,23 @@ impl VoiceUnit {
     /// Called once: the halves are freed, and `self` must not be used or dropped after.
     unsafe fn release(&mut self) -> (Microphone, Speaker) {
         if !self.unit.is_null() {
-            // SAFETY: the unit was created and isn't used after. A unit that fails to stop or
-            // go away leaves nothing to do but go on.
-            unsafe {
-                AudioOutputUnitStop(self.unit);
-                AudioUnitUninitialize(self.unit);
-                AudioComponentInstanceDispose(self.unit);
+            // SAFETY: the unit was created and isn't used after. Stopping and uninitializing
+            // are steps toward disposing, which alone decides whether the unit is gone; their
+            // failure leaves it to dispose.
+            let disposed = unsafe {
+                let _ = AudioOutputUnitStop(self.unit);
+                let _ = AudioUnitUninitialize(self.unit);
+                AudioComponentInstanceDispose(self.unit)
+            };
+            // A unit that is still there may still call back into the halves, so freeing them
+            // would leave it to use freed memory.
+            if disposed != 0 {
+                eprintln!("the voice unit couldn't be disposed: {disposed}");
+                process::abort();
             }
         }
-        // SAFETY: both came from `Box::leak` in `start`, and the unit that used them is gone.
+        // SAFETY: both came from `Box::leak` in `start`, and the unit that used them was
+        // disposed above, so it calls neither callback again.
         let (input, speaker) = unsafe { (Box::from_raw(self.input.as_ptr()), Box::from_raw(self.speaker.as_ptr())) };
         let (mut microphone, mut speaker) = (input.microphone, *speaker);
         microphone.stopped();
@@ -246,13 +254,15 @@ unsafe extern "C-unwind" fn render(
 ) -> i32 {
     abort_on_panic(|| {
         // SAFETY: the refcon is the unit's speaker, which outlives it, and only this callback
-        // uses it while the unit runs. The unit hands one buffer of `frames` samples in the
-        // mono float format set.
-        let (speaker, samples) = unsafe {
-            let buffer = &mut (*data).mBuffers[0];
-            (refcon.cast::<Speaker>().as_mut(), slice::from_raw_parts_mut(buffer.mData.cast::<f32>(), frames as usize))
+        // uses it while the unit runs. The unit hands one buffer in the mono float format set,
+        // of `mDataByteSize` bytes.
+        let (speaker, buffer) = unsafe { (refcon.cast::<Speaker>().as_mut(), &mut (*data).mBuffers[0]) };
+        let Some(start) = NonNull::new(buffer.mData.cast::<f32>()) else {
+            return kAudio_ParamError;
         };
-        speaker.pull(samples);
+        let len = frames.min(buffer.mDataByteSize / SAMPLE_BYTES) as usize;
+        // SAFETY: the buffer holds at least `len` samples.
+        speaker.pull(unsafe { slice::from_raw_parts_mut(start.as_ptr(), len) });
         0
     })
 }

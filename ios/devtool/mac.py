@@ -55,8 +55,10 @@ def stream(target: Target, script: str) -> subprocess.Popen:
 
 
 def upload(target: Target) -> None:
-    """Copies the repository to the Mac, keeping its Rust and Xcode build folders."""
-    excludes = [".git", "/target", "ios/build", "ios/build-ota", "xcuserdata", ".DS_Store", "__pycache__", ".venv", ".ruff_cache"]
+    """Copies the repository to the Mac, keeping its Rust and Xcode build folders.
+
+    What git ignores stays here: it holds the server's key and other secrets, besides builds.
+    """
     subprocess.run(
         [
             "rsync",
@@ -64,7 +66,8 @@ def upload(target: Target) -> None:
             "--delete",
             "-e",
             shlex.join(_SSH),
-            *(f"--exclude={name}" for name in excludes),
+            "--filter=:- .gitignore",
+            "--exclude=.git",
             f"{REPO}/",
             f"{target.host}:{target.dir}/",
         ],

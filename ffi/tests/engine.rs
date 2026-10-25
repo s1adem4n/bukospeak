@@ -7,8 +7,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use bukospeak_ffi::{
-    BukoSpeakEngine, BukoSpeakEvent, BukoSpeakEventKind, BukoSpeakFingerprint, BukoSpeakJoinResult, BukoSpeakJoinStatus, BukoSpeakStr,
-    bukospeak_engine_free, bukospeak_engine_join, bukospeak_engine_leave, bukospeak_engine_new,
+    BukoSpeakEngine, BukoSpeakEvent, BukoSpeakEventKind, BukoSpeakFingerprint, BukoSpeakJoinResult, BukoSpeakJoinStatus, BukoSpeakMember,
+    BukoSpeakStr, bukospeak_engine_free, bukospeak_engine_join, bukospeak_engine_leave, bukospeak_engine_new,
 };
 use bukospeak_server::{Identity, Room};
 use tokio::runtime::Runtime;
@@ -18,6 +18,7 @@ const ROOM_KEY: &str = "room-key";
 /// An event as the test keeps it, past the callback.
 #[derive(Debug, PartialEq)]
 enum Heard {
+    Entered(u16, Vec<(u16, String)>),
     Joined(u16, String),
     Left(u16),
     Speaking(Vec<u16>),
@@ -27,7 +28,7 @@ enum Heard {
 /// A join's result as the test keeps it.
 #[derive(Debug, PartialEq)]
 enum Outcome {
-    Joined { you: u16, members: Vec<(u16, String)>, fingerprint: [u8; 32] },
+    Joined { fingerprint: [u8; 32] },
     FingerprintChanged { pinned: [u8; 32], presented: [u8; 32], message: String },
     Failed(String),
 }
@@ -37,10 +38,16 @@ fn text(text: &BukoSpeakStr) -> String {
     String::from_utf8(unsafe { slice::from_raw_parts(text.ptr, text.len) }.to_vec()).unwrap()
 }
 
+fn members(members: *const BukoSpeakMember, len: usize) -> Vec<(u16, String)> {
+    // SAFETY: Rust lends the members for the callback this runs in.
+    unsafe { slice::from_raw_parts(members, len) }.iter().map(|member| (member.id, text(&member.name))).collect()
+}
+
 extern "C" fn heard(context: *mut c_void, event: &BukoSpeakEvent) {
     // SAFETY: the context is the test's sender, which outlives the engine.
     let events = unsafe { &*context.cast::<mpsc::Sender<Heard>>() };
     let heard = match event.kind {
+        BukoSpeakEventKind::Entered => Heard::Entered(event.you, members(event.members, event.members_len)),
         BukoSpeakEventKind::Joined => Heard::Joined(event.member.id, text(&event.member.name)),
         BukoSpeakEventKind::Left => Heard::Left(event.member.id),
         // SAFETY: lent for the callback.
@@ -55,15 +62,7 @@ extern "C" fn joined(context: *mut c_void, result: &BukoSpeakJoinResult) {
     // SAFETY: the context is the test's slot for the result, which outlives the join.
     let slot = unsafe { &mut *context.cast::<Option<Outcome>>() };
     *slot = Some(match result.status {
-        BukoSpeakJoinStatus::Joined => {
-            // SAFETY: lent for the callback.
-            let members = unsafe { slice::from_raw_parts(result.members, result.members_len) };
-            Outcome::Joined {
-                you: result.you,
-                members: members.iter().map(|member| (member.id, text(&member.name))).collect(),
-                fingerprint: result.fingerprint.bytes,
-            }
-        }
+        BukoSpeakJoinStatus::Joined => Outcome::Joined { fingerprint: result.fingerprint.bytes },
         BukoSpeakJoinStatus::FingerprintChanged => {
             Outcome::FingerprintChanged { pinned: result.pinned.bytes, presented: result.fingerprint.bytes, message: text(&result.message) }
         }
@@ -118,16 +117,16 @@ fn next(events: &mpsc::Receiver<Heard>) -> Heard {
 fn members_join_see_each_other_and_leave() {
     let server = serve();
     let (first_events, first_heard) = mpsc::channel();
-    let (second_events, _second_heard) = mpsc::channel();
+    let (second_events, second_heard) = mpsc::channel();
     let (first, second) = (engine(&first_events), engine(&second_events));
 
-    let Outcome::Joined { you: first_id, fingerprint, .. } = join(&first, &server.address, "first", ROOM_KEY, None) else {
+    let Outcome::Joined { fingerprint } = join(&first, &server.address, "first", ROOM_KEY, None) else {
         panic!("the first member didn't join")
     };
     assert_eq!(fingerprint, server.fingerprint, "a first join learns the fingerprint to pin");
-    let Outcome::Joined { you: second_id, members, .. } = join(&second, &server.address, "second", ROOM_KEY, Some(fingerprint)) else {
-        panic!("the second member didn't join")
-    };
+    let Heard::Entered(first_id, _) = next(&first_heard) else { panic!("the first call didn't start with its entry") };
+    assert!(matches!(join(&second, &server.address, "second", ROOM_KEY, Some(fingerprint)), Outcome::Joined { .. }));
+    let Heard::Entered(second_id, members) = next(&second_heard) else { panic!("the second call didn't start with its entry") };
     assert_eq!(members, [(first_id, "first".to_owned()), (second_id, "second".to_owned())]);
     assert_eq!(next(&first_heard), Heard::Joined(second_id, "second".into()));
 

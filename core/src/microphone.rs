@@ -3,8 +3,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::Thread;
+use std::time::Instant;
 
-use bukospeak_proto::audio::FRAME_SAMPLES;
+use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES};
 use rtrb::Producer;
 
 use crate::capture::{Capture, Encoded};
@@ -28,6 +29,8 @@ pub struct Microphone {
     capture: Capture,
     frame: [f32; FRAME_SAMPLES],
     filled: usize,
+    /// When the platform's audio last stopped calling [`push`](Self::push), until it resumes.
+    stopped_at: Option<Instant>,
     settings: Arc<Settings>,
     speaking: Arc<Speaking>,
     // Fields drop in order: the ring is abandoned before the uplink is woken a last time, so it
@@ -52,10 +55,14 @@ impl Microphone {
         settings: Arc<Settings>,
         speaking: Arc<Speaking>,
     ) -> Self {
-        Self { capture, frame: [0.0; FRAME_SAMPLES], filled: 0, settings, speaking, frames, uplink: Uplink(uplink) }
+        Self { capture, frame: [0.0; FRAME_SAMPLES], filled: 0, stopped_at: None, settings, speaking, frames, uplink: Uplink(uplink) }
     }
 
     pub fn push(&mut self, mut samples: &[f32]) {
+        if let Some(stopped_at) = self.stopped_at.take() {
+            // Truncated, the count wraps as the index does after 497 days anyway.
+            self.capture.skip((stopped_at.elapsed().as_micros() / FRAME_DURATION.as_micros()) as u32);
+        }
         while !samples.is_empty() {
             let take = (FRAME_SAMPLES - self.filled).min(samples.len());
             let (now, rest) = samples.split_at(take);
@@ -71,8 +78,10 @@ impl Microphone {
 
     /// Ends what the capture left unfinished, for when the platform's audio stops calling
     /// [`push`](Self::push): a talkspurt gets its last frame, and this member shows as quiet.
+    /// Once it resumes, the frames meanwhile count as not captured.
     pub fn stopped(&mut self) {
         self.filled = 0;
+        self.stopped_at = Some(Instant::now());
         let mut sent = false;
         // As in a frame pushed, libopus fails only on arguments the fixed frame size rules out.
         let _ = self.capture.end(|frame| {
@@ -182,5 +191,18 @@ mod tests {
         assert_eq!(after.len(), 30);
         assert!(after[10..].iter().all(|frame| frame.level == Level::SILENT));
         assert!(after.last().unwrap().last);
+    }
+
+    #[test]
+    fn resuming_counts_the_time_stopped_into_the_index() {
+        let (mut microphone, mut sent, _) = microphone(Arc::default());
+        microphone.push(&voice(SAMPLE_RATE as usize, 0.3));
+        microphone.stopped();
+        let ended = std::iter::from_fn(|| sent.pop().ok()).last().unwrap().index;
+        thread::sleep(std::time::Duration::from_millis(500));
+        microphone.push(&voice(SAMPLE_RATE as usize, 0.3));
+        let resumed = sent.pop().unwrap().index;
+        // 50 frames went by, then the input settles anew before the gate opens with its pre-roll.
+        assert!(resumed >= ended + 50, "resumed at frame {resumed} after {ended}");
     }
 }

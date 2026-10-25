@@ -33,8 +33,11 @@ nonisolated struct Fingerprint: Hashable, Sendable, CustomStringConvertible {
     }
 }
 
-/// What happens in the call after the join.
+/// What happens in the calls, in order.
 nonisolated enum EngineEvent: Sendable {
+    /// A call was joined: who is in it now. Sent before the call's other events, so they are
+    /// this call's until the next.
+    case entered(you: UInt16, members: [Member])
     case joined(Member)
     case left(UInt16)
     /// Who speaks now, this member among them.
@@ -45,9 +48,6 @@ nonisolated enum EngineEvent: Sendable {
 
 /// A call just joined.
 nonisolated struct Joined: Sendable {
-    let you: UInt16
-    /// Everyone in the channel, this member included.
-    let members: [Member]
     /// The server's, to pin for the next join.
     let fingerprint: Fingerprint
 }
@@ -128,6 +128,7 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
+    /// Whether the microphone sends silence, in this call and the ones after.
     func setMuted(_ muted: Bool) {
         bukospeak_engine_set_muted(engine, muted)
     }
@@ -169,13 +170,7 @@ nonisolated final class Engine: @unchecked Sendable {
                 switch joined.status {
                 case BUKO_SPEAK_JOIN_STATUS_JOINED:
                     .success(
-                        Joined(
-                            you: joined.you,
-                            members: UnsafeBufferPointer(start: joined.members, count: joined.members_len).map(
-                                Member.init
-                            ),
-                            fingerprint: Fingerprint(joined.fingerprint)
-                        )
+                        Joined(fingerprint: Fingerprint(joined.fingerprint))
                     )
                 case BUKO_SPEAK_JOIN_STATUS_FINGERPRINT_CHANGED:
                     .failure(
@@ -219,6 +214,11 @@ nonisolated extension EngineEvent {
     fileprivate init(_ event: BukoSpeakEvent) {
         self =
             switch event.kind {
+            case BUKO_SPEAK_EVENT_KIND_ENTERED:
+                .entered(
+                    you: event.you,
+                    members: UnsafeBufferPointer(start: event.members, count: event.members_len).map(Member.init)
+                )
             case BUKO_SPEAK_EVENT_KIND_JOINED: .joined(Member(event.member))
             case BUKO_SPEAK_EVENT_KIND_LEFT: .left(event.member.id)
             case BUKO_SPEAK_EVENT_KIND_SPEAKING:

@@ -45,6 +45,10 @@ final class Call: NSObject {
     @ObservationIgnored private var isInterrupted = false
     /// Whether the call plays on the microphone and speaker.
     @ObservationIgnored private var isPlaying = false
+    /// Whether the engine's events are of the join under way or done: they follow its Entered.
+    @ObservationIgnored private var isEntered = false
+    /// Why the engine's call was lost, if that happened before its join came back here.
+    @ObservationIgnored private var lost: String?
 
     private static let log = Logger(subsystem: "digital.buko.BukoSpeak", category: "call")
 
@@ -87,7 +91,8 @@ final class Call: NSObject {
         self.id = id
         let start = CXStartCallAction(call: id, handle: CXHandle(type: .generic, value: "BukoSpeak"))
         // Configured again before every call: iOS can otherwise hold on to a stale audio session
-        // for the provider and never activate the new call's.
+        // for the provider and never activate the new call's
+        // (https://developer.apple.com/forums/thread/837211).
         provider.configuration = Self.configuration
         do {
             try await controller.request(CXTransaction(action: start))
@@ -150,9 +155,12 @@ final class Call: NSObject {
     }
 
     /// Joins the channel with the settings, pinning the server on the first join.
-    private func joinChannel() async throws(JoinError) -> Joined {
+    private func joinChannel() async throws(JoinError) {
         let server = settings.server.trimmingCharacters(in: .whitespaces)
+        isEntered = false
+        lost = nil
         engine.setNoiseSuppression(settings.noiseSuppression)
+        engine.setMuted(isMuted)
         do throws(JoinError) {
             let joined = try await engine.join(
                 server: server,
@@ -161,7 +169,6 @@ final class Call: NSObject {
                 pin: settings.pin(for: server)
             )
             settings.pin(joined.fingerprint, for: server)
-            return joined
         } catch {
             if case .fingerprintChanged = error {
                 changedServer = server
@@ -170,17 +177,22 @@ final class Call: NSObject {
         }
     }
 
-    private func connected(_ joined: Joined) {
-        you = joined.you
-        members = joined.members
-        speaking = []
+    private func connected() {
         phase = .connected
         updateAudio()
     }
 
     private func handle(_ event: EngineEvent) {
-        guard phase == .connected else { return }
+        guard id != nil else { return }
         switch event {
+        case .entered(let you, let members):
+            isEntered = true
+            self.you = you
+            self.members = members
+            speaking = []
+        // Before Entered, they are of a call that was left.
+        case _ where !isEntered:
+            break
         case .joined(let member):
             members.append(member)
         case .left(let id):
@@ -189,7 +201,12 @@ final class Call: NSObject {
         case .speaking(let now):
             speaking = now
         case .disconnected(let reason):
-            Task { await reconnect(after: reason) }
+            isEntered = false
+            if phase == .connected {
+                Task { await reconnect(after: reason) }
+            } else {
+                lost = reason
+            }
         }
     }
 
@@ -201,11 +218,12 @@ final class Call: NSObject {
         speaking = []
         updateAudio()
         do {
-            let joined = try await joinChannel()
+            try await joinChannel()
             guard self.id == id else { return }
-            // A join starts unmuted.
-            engine.setMuted(isMuted)
-            connected(joined)
+            if let lost {
+                return fail("The connection was lost again: \(lost)")
+            }
+            connected()
         } catch {
             guard self.id == id else { return }
             provider.reportCall(with: id, endedAt: nil, reason: .failed)
@@ -213,10 +231,10 @@ final class Call: NSObject {
         }
     }
 
-    /// Plays the call on the microphone and speaker exactly while it is connected and its
-    /// audio session active: CallKit may activate the session before the join is done.
+    /// Plays the call on the microphone and speaker exactly while it is connected, not held and
+    /// its audio session active: CallKit may activate the session before the join is done.
     private func updateAudio() {
-        let plays = phase == .connected && isSessionActive && !isInterrupted
+        let plays = phase == .connected && !isHeld && isSessionActive && !isInterrupted
         guard plays != isPlaying else { return }
         if plays {
             do throws(AudioError) {
@@ -246,10 +264,13 @@ final class Call: NSObject {
         // Leaving stops the call's audio.
         await engine.leave()
         isPlaying = false
+        isEntered = false
+        lost = nil
         members = []
         speaking = []
         you = nil
         isMuted = false
+        engine.setMuted(false)
         isHeld = false
         phase = failure.map(Phase.failed) ?? .idle
     }
@@ -266,7 +287,11 @@ final class Call: NSObject {
             isInterrupted = true
             updateAudio()
         case .ended:
-            reactivateSession()
+            let raw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            // Otherwise the session waits for CallKit to activate it.
+            if AVAudioSession.InterruptionOptions(rawValue: raw).contains(.shouldResume) {
+                reactivateSession()
+            }
         @unknown default:
             break
         }
@@ -290,12 +315,12 @@ final class Call: NSObject {
     }
 
     /// Activates the audio session again after it was taken away, the one case CallKit leaves
-    /// to the app.
+    /// to the app; if that fails, the call waits for CallKit to activate it.
     private func reactivateSession() {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
-            return fail("The call's audio didn't come back: \(error.localizedDescription)")
+            return Self.log.error("the audio session didn't activate again: \(error)")
         }
         isInterrupted = false
         updateAudio()
@@ -321,12 +346,15 @@ extension Call: @MainActor CXProviderDelegate {
         provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: nil)
         Task {
             do throws(JoinError) {
-                let joined = try await joinChannel()
+                try await joinChannel()
                 guard id == action.callUUID else { return action.fail() }
-                connected(joined)
+                connected()
                 action.fulfill()
                 provider.reportOutgoingCall(with: action.callUUID, connectedAt: nil)
                 provider.reportCall(with: action.callUUID, updated: Self.capabilities)
+                if let lost {
+                    await reconnect(after: lost)
+                }
             } catch {
                 action.fail()
                 guard id == action.callUUID else { return }
@@ -343,8 +371,8 @@ extension Call: @MainActor CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
-        // The audio follows the session, which CallKit deactivates and activates.
         isHeld = action.isOnHold
+        updateAudio()
         action.fulfill()
     }
 

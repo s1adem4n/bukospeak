@@ -44,6 +44,12 @@ pub trait Listener: Send + Sync {
 
 #[derive(Debug)]
 pub enum Event {
+    /// A call started, with everyone in the channel, this member included. The events after
+    /// it are this call's, the ones before it an earlier call's.
+    Entered {
+        you: MemberId,
+        members: Vec<Member>,
+    },
     Joined(Member),
     Left(MemberId),
     /// Who speaks now, in id order, this member among them; sent when it changes.
@@ -52,11 +58,8 @@ pub enum Event {
     Disconnected(Error),
 }
 
-/// A call just joined.
+/// A call just joined; who is in it comes as [`Event::Entered`].
 pub struct Joined {
-    pub you: MemberId,
-    /// Everyone in the channel, this member included; [`Event`]s tell what changes.
-    pub members: Vec<Member>,
     /// The server's fingerprint, to pin for the next join.
     pub fingerprint: Fingerprint,
     pub microphone: Microphone,
@@ -104,7 +107,7 @@ impl Engine {
         Ok(Self { runtime, settings: Arc::default(), call: Mutex::default(), events, _listening: Listening(Some(listening)) })
     }
 
-    /// Joins the channel, after leaving the call before if there is one. A call starts unmuted.
+    /// Joins the channel, after leaving the call before if there is one.
     pub fn join(&self, config: JoinConfig) -> Result<Joined, Error> {
         // Held until the call is in place, so a leave meanwhile, say from the listener's
         // thread, waits for the join and then ends its call instead of missing it.
@@ -115,19 +118,19 @@ impl Engine {
         let mixer = Mixer::new().expect("the decoders can be created");
 
         let session = self.runtime.block_on(Session::join(config))?;
-        self.settings.muted.store(false, Ordering::Relaxed);
-        let (you, members, fingerprint) = (session.you(), session.members().to_vec(), session.fingerprint());
+        let fingerprint = session.fingerprint();
         let speaking = Arc::new(Speaking::default());
         let (frames, uplink_frames) = RingBuffer::new(UPLINK_FRAMES);
         let uplink = uplink::spawn(uplink_frames, session.audio_sender())?;
         let (downlink, speaker_downlink) = RingBuffer::new(DOWNLINK_FRAMES);
 
+        // Sent before the call's own events, so the listener tells the calls apart. A failed
+        // send means the engine is gone, and with it the listener.
+        let _ = self.events.send(Event::Entered { you: session.you(), members: session.members().to_vec() });
         let (stop, stopped) = oneshot::channel();
         let task = self.runtime.spawn(run(session, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
         *call = Some(Call { stop, task });
         Ok(Joined {
-            you,
-            members,
             fingerprint,
             microphone: Microphone::new(capture, frames, uplink, Arc::clone(&self.settings), Arc::clone(&speaking)),
             speaker: Speaker::new(mixer, speaker_downlink, speaking),
@@ -309,13 +312,23 @@ mod tests {
 
         let (first, first_events) = engine();
         let (second, second_events) = engine();
+        let entered = |events: &mpsc::Receiver<Event>| {
+            wait_for(events, |event| match event {
+                Event::Entered { you, members } => Some((you, members.into_iter().map(|member| member.name).collect::<Vec<_>>())),
+                _ => None,
+            })
+        };
         let mut talking = first.join(config("first")).unwrap();
+        let (talking_id, _) = entered(&first_events);
         let mut hearing = second.join(config("second")).unwrap();
+        let (hearing_id, names) = entered(&second_events);
+        assert_eq!(names, ["first", "second"]);
+        // The first call's events come after its entry.
         let joined = wait_for(&first_events, |event| match event {
             Event::Joined(member) => Some(member.id),
             _ => None,
         });
-        assert_eq!(joined, hearing.you);
+        assert_eq!(joined, hearing_id);
 
         // Two seconds of speech and one of silence, captured and played in real time, in
         // buffers that don't line up with frames.
@@ -340,7 +353,7 @@ mod tests {
             Event::Speaking(members) if !members.is_empty() => Some(members),
             _ => None,
         });
-        assert_eq!(speaking, [talking.you]);
+        assert_eq!(speaking, [talking_id]);
         wait_for(&second_events, |event| matches!(event, Event::Speaking(members) if members.is_empty()).then_some(()));
 
         first.leave();
@@ -348,7 +361,7 @@ mod tests {
             Event::Left(id) => Some(id),
             _ => None,
         });
-        assert_eq!(left, talking.you);
+        assert_eq!(left, talking_id);
     }
 
     /// What the speaker takes from the ring now, as `(was a leave, member)`.

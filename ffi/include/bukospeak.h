@@ -8,6 +8,10 @@
 #include <stdint.h>
 
 typedef enum BukoSpeakEventKind {
+  /**
+   * A call started: the events after it are this call's, the ones before an earlier call's.
+   */
+  BUKO_SPEAK_EVENT_KIND_ENTERED,
   BUKO_SPEAK_EVENT_KIND_JOINED,
   BUKO_SPEAK_EVENT_KIND_LEFT,
   BUKO_SPEAK_EVENT_KIND_SPEAKING,
@@ -48,6 +52,15 @@ typedef struct BukoSpeakMember {
 typedef struct BukoSpeakEvent {
   enum BukoSpeakEventKind kind;
   /**
+   * Entered: this member's id.
+   */
+  uint16_t you;
+  /**
+   * Entered: everyone in the channel, this member included.
+   */
+  const struct BukoSpeakMember *members;
+  size_t members_len;
+  /**
    * Joined: who joined. Left: who left, by id only.
    */
   struct BukoSpeakMember member;
@@ -79,15 +92,6 @@ typedef struct BukoSpeakFingerprint {
  */
 typedef struct BukoSpeakJoinResult {
   enum BukoSpeakJoinStatus status;
-  /**
-   * Joined: this member's id.
-   */
-  uint16_t you;
-  /**
-   * Joined: everyone in the channel, this member included.
-   */
-  const struct BukoSpeakMember *members;
-  size_t members_len;
   /**
    * Joined: the server's, to pin for the next join. FingerprintChanged: the one presented.
    */
@@ -127,8 +131,8 @@ void bukospeak_engine_free(struct BukoSpeakEngine *engine);
 /**
  * Leaves the call before, if there is one, and joins the channel, trusting the server by its
  * fingerprint `pin`, or on first use if it is null. Blocks until the server welcomes this
- * member or turns it away, 5 s at most, and hands `done` the result before it returns. A call
- * starts unmuted.
+ * member or turns it away, 5 s at most, and hands `done` the result before it returns. Who is
+ * in the call comes as its Entered event.
  *
  * # Safety
  *
@@ -148,7 +152,8 @@ void bukospeak_engine_join(const struct BukoSpeakEngine *engine,
 void bukospeak_engine_leave(const struct BukoSpeakEngine *engine);
 
 /**
- * Whether the microphone sends silence, so a talkspurt ends as in a pause.
+ * Whether the microphone sends silence, so a talkspurt ends as in a pause; it holds across
+ * calls until set again.
  */
 void bukospeak_engine_set_muted(const struct BukoSpeakEngine *engine, bool muted);
 
