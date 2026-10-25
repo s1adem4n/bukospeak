@@ -1,6 +1,6 @@
 [package]
 name = "bukospeak-ffi"
-description = "The C interface the BukoSpeak apps call the engine through"
+description = "The C interface the BukoSpeak iOS app calls the engine through"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

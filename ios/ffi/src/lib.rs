@@ -1,6 +1,8 @@
-//! The C interface the apps call the engine through: one engine per app, joining and leaving
-//! the channel, the same for every app; and per platform the call's audio, on iOS on the voice
-//! processing unit.
+//! The C interface the iOS app calls the engine through: one engine per app, joining and leaving
+//! the channel, and the call's audio on the voice processing unit.
+//!
+//! Off iOS the crate builds without the audio, so its tests run the interface against a real
+//! server on the host.
 //!
 //! What Rust hands the app (updates, a join's result, why something failed) is lent for the
 //! duration of the callback it comes with. Callbacks come on the engine's threads, or on the
@@ -332,7 +334,7 @@ impl BukoSpeakEngine {
         {
             *self.audio.lock().expect("the audio lock is never poisoned") = Audio::Idle(microphone, speaker);
         }
-        // Only iOS plays a call through this interface so far; elsewhere it goes without audio.
+        // Off iOS the call goes without audio: there it runs only in the tests.
         #[cfg(not(target_os = "ios"))]
         drop((microphone, speaker));
         Ok(fingerprint)

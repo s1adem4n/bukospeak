@@ -15,14 +15,14 @@ See `README.md` for what the parts are. Run `mise run check` before calling a ch
 - Tests exercise real behavior where they can; timing logic runs on the deterministic
   simulator in `core/src/simulator.rs`, not on wall clocks.
 - No real people's names in code, tests or docs; use placeholders such as `first` or `member`.
-- `unsafe` only in `ffi` and `audio/ios`, which bind native interfaces; each block says why it
+- `unsafe` only in `ios/ffi` and `audio/ios`, which bind native interfaces; each block says why it
   is sound (`// SAFETY:`).
-- After changing the `ffi` crate's interface, `mise run header` rewrites its C header.
+- After changing the `ios/ffi` crate's interface, `mise run header` rewrites its C header.
 
 ## iOS
 
 `ios/dev build` builds the app on the Mac mini (`ios/dev help` lists the commands); a first build
 there, or one after `Cargo.lock` changed, takes many minutes, so run it in the background. Only
-`ios/dev build` lints and compiles `audio/ios` and the iOS parts of `ffi`, whose dependencies
+`ios/dev build` lints and compiles `audio/ios` and the iOS parts of `ios/ffi`, whose dependencies
 need the iOS SDK. There is no simulator workflow: the app is tried on the iPhone, installed
 with `ios/dev ota`.
