@@ -157,6 +157,16 @@ mod tests {
     }
 
     #[test]
+    fn speech_right_after_it_closed_opens_it_anew() {
+        let mut gate = settled();
+        gate.decide(SPEECH, level(20));
+        for _ in 0..HOLD {
+            gate.decide(NOISE, level(70));
+        }
+        assert_eq!(gate.decide(SPEECH, level(20)), Decision::Opens);
+    }
+
+    #[test]
     fn a_long_monologue_keeps_it_open() {
         let mut gate = settled();
         assert_eq!(gate.decide(SPEECH, level(20)), Decision::Opens);
