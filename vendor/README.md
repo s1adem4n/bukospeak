@@ -17,7 +17,8 @@ none, and keep upstream's tests passing:
 - `sonora-aec3/src/subtractor_output.rs`: `SubtractorOutput` derives `Debug`, for
   `CaptureScratch`'s.
 - `sonora-aec3/src/frame_blocker.rs`: `insert_sub_frame_and_extract_block` takes bands of
-  channels as anything that lends slices, so callers pass their buffers as they are.
+  channels as anything that lends slices, so callers pass their buffers as they are; and each
+  channel's buffer has its capacity from the start, which `vec!`'s clones had not.
 - `sonora/src/echo_canceller3.rs`: render and capture pass their sub-frame buffers to the frame
   blockers directly, instead of collecting views of them per sub-frame.
 - `sonora/src/audio_buffer.rs`: `copy_to_buffer` resamples into the destination channel,

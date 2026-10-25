@@ -25,7 +25,10 @@ impl FrameBlocker {
         Self {
             num_bands,
             num_channels,
-            buffer: vec![vec![Vec::with_capacity(BLOCK_SIZE); num_channels]; num_bands],
+            // Each made on its own: `vec!` clones, and a clone has no spare capacity.
+            buffer: (0..num_bands)
+                .map(|_| (0..num_channels).map(|_| Vec::with_capacity(BLOCK_SIZE)).collect())
+                .collect(),
         }
     }
 
