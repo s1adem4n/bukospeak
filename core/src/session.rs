@@ -24,8 +24,8 @@ pub struct JoinConfig {
     pub pin: Option<Fingerprint>,
 }
 
-/// How this member enters beyond its config: muted or not, and the session lost before whose
-/// place it takes, if the server still holds it.
+/// How a join enters the channel beyond its config: muted or not, and in the place of a lost
+/// session, if the server still holds it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Entry {
     pub muted: bool,
@@ -78,19 +78,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// Joins the channel unmuted, or fails if the server doesn't welcome this member within
-    /// [`JOIN_TIMEOUT`].
-    pub async fn join(config: JoinConfig) -> Result<Self, Error> {
-        Self::enter(config, Entry::default()).await
-    }
-
     /// Joins the channel as `entry` says, or fails if the server doesn't welcome this member
     /// within [`JOIN_TIMEOUT`].
-    pub async fn enter(config: JoinConfig, entry: Entry) -> Result<Self, Error> {
-        tokio::time::timeout(JOIN_TIMEOUT, Self::enter_unbounded(config, entry)).await.unwrap_or(Err(Error::TimedOut))
-    }
-
-    async fn enter_unbounded(config: JoinConfig, entry: Entry) -> Result<Self, Error> {
+    pub async fn join(config: JoinConfig, entry: Entry) -> Result<Self, Error> {
         let hello = ClientMessage::Hello {
             version: PROTOCOL_VERSION,
             name: config.name,
@@ -186,8 +176,7 @@ impl Watch {
     /// Starts watching the server pinned, or fails if it doesn't answer within [`JOIN_TIMEOUT`].
     pub async fn start(server: &str, room_key: String, pin: Fingerprint) -> Result<Self, Error> {
         let watch = ClientMessage::Watch { version: PROTOCOL_VERSION, room_key };
-        let (opened, answer) =
-            tokio::time::timeout(JOIN_TIMEOUT, Opened::with(server, Some(pin), &watch)).await.unwrap_or(Err(Error::TimedOut))?;
+        let (opened, answer) = Opened::with(server, Some(pin), &watch).await?;
         let ServerMessage::Present { members } = answer else {
             return Err(Error::Protocol("the first message isn't a Present"));
         };
@@ -227,8 +216,13 @@ struct Opened {
 
 impl Opened {
     /// Connects to the server, trusting it by `pin`, or on first use if it is None, and sends
-    /// `first`; the server's answer comes along, unless it is a Rejected.
+    /// `first`; the server's answer comes along, unless it is a Rejected or doesn't come within
+    /// [`JOIN_TIMEOUT`].
     async fn with(server: &str, pin: Option<Fingerprint>, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
+        tokio::time::timeout(JOIN_TIMEOUT, Self::unbounded(server, pin, first)).await.unwrap_or(Err(Error::TimedOut))
+    }
+
+    async fn unbounded(server: &str, pin: Option<Fingerprint>, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
         let address = tokio::net::lookup_host(server).await?.next().ok_or_else(|| Error::Resolve(server.to_owned()))?;
         let endpoint = Endpoint::client(unspecified_like(address))?;
 

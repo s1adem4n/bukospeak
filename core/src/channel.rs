@@ -12,8 +12,10 @@ use crate::session::{self, Error};
 /// the next [`Ended`](Event::Ended) or [`Lost`](Event::Lost) are one call's.
 #[derive(Debug)]
 pub(crate) enum Event {
-    /// A call started, or joined again, with everyone in the channel, this member included.
+    /// The `call`th join of the engine started, or joined again, with everyone in the channel,
+    /// this member included.
     Entered {
+        call: u64,
         you: MemberId,
         members: Vec<Member>,
     },
@@ -50,13 +52,14 @@ pub enum State {
     #[default]
     Out,
     Connected,
-    /// The connection was lost, and the engine joins again.
+    /// Nothing comes from the server, or the connection was lost and the engine joins again.
     Reconnecting,
 }
 
 /// The channel as this member sees it.
 #[derive(Clone, Debug, Default)]
 pub struct Channel {
+    call: u64,
     state: State,
     you: Option<MemberId>,
     members: Vec<Member>,
@@ -65,6 +68,12 @@ pub struct Channel {
 }
 
 impl Channel {
+    /// Which of the engine's joins the call is, counting from 1; 0 before the first. It stays
+    /// once the call is over, so that its last updates tell it too.
+    pub fn call(&self) -> u64 {
+        self.call
+    }
+
     pub fn state(&self) -> State {
         self.state
     }
@@ -93,9 +102,9 @@ impl Channel {
     /// Follows the event, and tells what to say aloud about it, if anything.
     pub(crate) fn apply(&mut self, event: &Event) -> Option<Announcement> {
         match event {
-            Event::Entered { you, members } => {
+            Event::Entered { call, you, members } => {
                 let rejoined = self.state == State::Reconnecting;
-                *self = Self { state: State::Connected, you: Some(*you), members: members.clone(), ..Self::default() };
+                *self = Self { call: *call, state: State::Connected, you: Some(*you), members: members.clone(), ..Self::default() };
                 rejoined.then_some(Announcement::Reconnected)
             }
             Event::Joined(member) => {
@@ -125,7 +134,7 @@ impl Channel {
                 Some(Announcement::Reconnected)
             }
             Event::Ended | Event::Lost(_) => {
-                *self = Self::default();
+                *self = Self { call: self.call, ..Self::default() };
                 None
             }
             Event::Present(members) => {
@@ -143,9 +152,9 @@ pub enum Announcement {
     Joined(String),
     /// Someone else left, by name.
     Left(String),
-    /// The connection was lost, and the engine joins again.
+    /// Nothing comes from the server, or the connection was lost and the engine joins again.
     Reconnecting,
-    /// The engine joined again after the connection was lost.
+    /// The server is heard again, or the engine joined again after the connection was lost.
     Reconnected,
 }
 
@@ -169,7 +178,7 @@ mod tests {
     }
 
     fn entered(you: u16, members: &[Member]) -> Event {
-        Event::Entered { you: MemberId(you), members: members.to_vec() }
+        Event::Entered { call: 1, you: MemberId(you), members: members.to_vec() }
     }
 
     fn names(channel: &Channel) -> Vec<&str> {
@@ -245,12 +254,14 @@ mod tests {
     }
 
     #[test]
-    fn a_call_that_ends_leaves_the_channel_empty() {
+    fn a_call_that_ends_leaves_the_channel_empty_but_tells_which_call_it_was() {
         let lost = || Lost { connection: Error::TimedOut, rejoin: Error::TimedOut };
         for end in [Event::Ended, Event::Lost(lost())] {
             let mut channel = Channel::default();
+            assert_eq!(channel.call(), 0);
             channel.apply(&entered(1, &[member(1, "first"), member(2, "second")]));
             assert_eq!(channel.apply(&end), None);
+            assert_eq!(channel.call(), 1);
             assert_eq!(channel.state(), State::Out);
             assert_eq!(channel.you(), None);
             assert_eq!(names(&channel), [] as [&str; 0]);

@@ -41,10 +41,12 @@ nonisolated struct ChannelUpdate: Sendable {
     enum State: Sendable {
         case out
         case connected
-        /// The connection was lost, and the engine joins again.
+        /// Nothing comes from the server, or the connection was lost and the engine joins again.
         case reconnecting
     }
 
+    /// Which of the engine's joins the call is, counting from 1; it stays once the call is over.
+    let call: UInt64
     let state: State
     /// This member's id, while in the channel.
     let you: UInt16?
@@ -130,13 +132,11 @@ nonisolated final class Engine: @unchecked Sendable {
         return try result.get()
     }
 
-    /// Stops the call's audio and leaves the call, once the server knows.
-    func leave() async {
+    /// Stops the call's audio and leaves the call, once the server knows. Returns the call the
+    /// engine joined last: updates of it or of one before that are still on their way are stale.
+    func leave() async -> UInt64 {
         await withCheckedContinuation { continuation in
-            queue.async {
-                bukospeak_engine_leave(self.engine)
-                continuation.resume()
-            }
+            queue.async { continuation.resume(returning: bukospeak_engine_leave(self.engine)) }
         }
     }
 
@@ -151,7 +151,8 @@ nonisolated final class Engine: @unchecked Sendable {
         bukospeak_engine_unwatch(engine)
     }
 
-    /// Whether the microphone sends silence, in this call and the ones after.
+    /// Whether this member is muted: the microphone sends silence and the others see it muted,
+    /// in this call and the ones after.
     func setMuted(_ muted: Bool) {
         bukospeak_engine_set_muted(engine, muted)
     }
@@ -249,6 +250,7 @@ nonisolated extension ChannelUpdate {
             }
         let lost = String(update.lost)
         self.init(
+            call: update.call,
             state: state,
             you: update.you == 0 ? nil : update.you,
             members: UnsafeBufferPointer(start: update.members, count: update.members_len).map(Member.init),

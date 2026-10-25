@@ -36,8 +36,9 @@ const UPLINK_FRAMES: usize = 100;
 /// Frames and leaves the speaker may fall behind the network: 0.5 s of every voice.
 const DOWNLINK_FRAMES: usize = 50 * crate::playout::VOICES;
 
-/// How often the engine looks who speaks: quick enough for an indicator to feel live.
-const SPEAKING_EVERY: Duration = Duration::from_millis(50);
+/// How often the engine looks who speaks and whether the server went silent: quick enough for
+/// an indicator to feel live.
+const LOOK_EVERY: Duration = Duration::from_millis(50);
 
 /// How long a watch that failed or broke waits before it starts again.
 const WATCH_AGAIN_AFTER: Duration = Duration::from_secs(5);
@@ -75,7 +76,7 @@ pub struct Engine {
     /// Whether this member is muted, for the call to tell the server; the microphone goes by
     /// the settings.
     muted: watch::Sender<bool>,
-    call: Mutex<Option<Running>>,
+    calls: Mutex<Calls>,
     watch: Mutex<Option<Running>>,
     // Fields drop in order: the last sender of events goes before the listener's thread, which
     // ends with it, is waited for.
@@ -92,6 +93,13 @@ impl Drop for Listening {
             thread.join().expect("the listener doesn't panic");
         }
     }
+}
+
+/// The engine's calls: how many it joined, and the one running, if any.
+#[derive(Default)]
+struct Calls {
+    joined: u64,
+    running: Option<Running>,
 }
 
 /// A call or a watch, on the runtime until it is stopped.
@@ -124,7 +132,7 @@ impl Engine {
             conditioning,
             settings: Arc::default(),
             muted: watch::Sender::new(false),
-            call: Mutex::default(),
+            calls: Mutex::default(),
             watch: Mutex::default(),
             events,
             _listening: Listening(Some(listening)),
@@ -135,8 +143,8 @@ impl Engine {
     pub fn join(&self, config: JoinConfig) -> Result<Joined, Error> {
         // Held until the call is in place, so a leave meanwhile, say from the listener's
         // thread, waits for the join and then ends its call instead of missing it.
-        let mut call = self.call.lock().expect("the call lock is never poisoned");
-        self.end(call.take());
+        let mut calls = self.calls.lock().expect("the calls lock is never poisoned");
+        self.end(calls.running.take());
         self.unwatch();
         // libopus creates codecs without fail for the fixed formats asked for.
         let (capture, tap) = Capture::new(self.conditioning).expect("the encoder can be created");
@@ -144,7 +152,8 @@ impl Engine {
 
         let mut muted = self.muted.subscribe();
         let entry = Entry { muted: *muted.borrow_and_update(), resume: None };
-        let session = self.runtime.block_on(Session::enter(config.clone(), entry))?;
+        let session = self.runtime.block_on(Session::join(config.clone(), entry))?;
+        calls.joined += 1;
         let fingerprint = session.fingerprint();
         // Joining again trusts only the server joined now.
         let rejoin = JoinConfig { pin: Some(fingerprint), ..config };
@@ -156,11 +165,11 @@ impl Engine {
 
         // Sent before the call's own events, so they apply to the channel it enters. A failed
         // send means the engine is gone, and with it the listener.
-        let _ = self.events.send(Event::Entered { you: session.you(), members: session.members().to_vec() });
+        let _ = self.events.send(Event::Entered { call: calls.joined, you: session.you(), members: session.members().to_vec() });
         let (stop, stopped) = oneshot::channel();
-        let link = Link { session, rejoin, sender, muted };
+        let link = Link { call: calls.joined, session, rejoin, sender, muted };
         let task = self.runtime.spawn(run(link, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
-        *call = Some(Running { stop, task });
+        calls.running = Some(Running { stop, task });
         Ok(Joined {
             fingerprint,
             microphone: Microphone::new(capture, frames, uplink, Arc::clone(&self.settings), Arc::clone(&speaking)),
@@ -168,10 +177,13 @@ impl Engine {
         })
     }
 
-    /// Leaves the call, if there is one, once the server knows.
-    pub fn leave(&self) {
-        let mut call = self.call.lock().expect("the call lock is never poisoned");
-        self.end(call.take());
+    /// Leaves the call, if there is one, once the server knows. Returns the
+    /// [`call`](Channel::call) the engine joined last: updates of it or of a call before that are
+    /// still on their way to the listener are of a call over now.
+    pub fn leave(&self) -> u64 {
+        let mut calls = self.calls.lock().expect("the calls lock is never poisoned");
+        self.end(calls.running.take());
+        calls.joined
     }
 
     /// Watches who is in the channel without joining it, until [`unwatch`](Self::unwatch) or a
@@ -203,7 +215,8 @@ impl Engine {
         self.settings.echo_cancellation.store(on, Ordering::Relaxed);
     }
 
-    /// Whether the microphone sends silence, so a talkspurt ends as in a pause.
+    /// Whether this member is muted: the microphone sends silence, so a talkspurt ends as in a
+    /// pause, and the others see it muted. It holds across calls until set again.
     pub fn set_muted(&self, muted: bool) {
         self.settings.muted.store(muted, Ordering::Relaxed);
         self.muted.send_replace(muted);
@@ -226,6 +239,8 @@ impl Drop for Engine {
 
 /// A call's way to the channel: its session, and what joins it again.
 struct Link {
+    /// Which of the engine's joins the call is.
+    call: u64,
     session: Session,
     /// The join, pinned to the server's fingerprint.
     rejoin: JoinConfig,
@@ -248,8 +263,8 @@ async fn run(
     let mut you = link.session.you();
     let mut members = others(&link.session);
     let mut speakers = Vec::new();
-    let mut watch = tokio::time::interval(SPEAKING_EVERY);
-    watch.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut look = tokio::time::interval(LOOK_EVERY);
+    look.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let start = Instant::now();
     // When something last came from the server, by the count of what came then.
     let (mut received, mut heard) = (link.session.received(), Instant::now());
@@ -267,7 +282,7 @@ async fn run(
                     Err(error) => error,
                 }
             }
-            _ = watch.tick() => {
+            _ = look.tick() => {
                 deliveries.retry();
                 let count = link.session.received();
                 if count != received {
@@ -322,7 +337,7 @@ async fn run(
             _ = &mut stop => return tell(Event::Ended),
             // In its own place, if the server still holds it: the others see it come back, not
             // leave and join.
-            rejoined = Session::enter(
+            rejoined = Session::join(
                 link.rejoin.clone(),
                 Entry { muted: *link.muted.borrow_and_update(), resume: Some(link.session.resume()) },
             ) => rejoined,
@@ -337,7 +352,7 @@ async fn run(
                 members = others(&link.session);
                 speakers.clear();
                 (received, heard, silent) = (link.session.received(), Instant::now(), false);
-                tell(Event::Entered { you, members: link.session.members().to_vec() });
+                tell(Event::Entered { call: link.call, you, members: link.session.members().to_vec() });
             }
             Err(rejoin) => return tell(Event::Lost(Lost { connection: lost, rejoin })),
         }
@@ -600,6 +615,25 @@ mod tests {
     }
 
     #[test]
+    fn updates_tell_which_call_they_are_of() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let address = serve(&server, &identity).local_addr().unwrap();
+        let (engine, updates) = engine();
+        let calls = |updates: &mpsc::Receiver<Update>, state: State| {
+            wait_for(updates, |update| (update.channel.state() == state).then_some(update.channel.call()))
+        };
+
+        let _first = engine.join(config(address, &identity, "first")).unwrap();
+        assert_eq!(calls(&updates, State::Connected), 1);
+        assert_eq!(engine.leave(), 1);
+        // The call's last update, after the leave.
+        assert_eq!(calls(&updates, State::Out), 1);
+        let _second = engine.join(config(address, &identity, "first")).unwrap();
+        assert_eq!(calls(&updates, State::Connected), 2);
+    }
+
+    #[test]
     fn a_lost_connection_joins_again_and_keeps_the_microphone() {
         let server = Runtime::new().unwrap();
         let identity = Identity::generate().unwrap();
@@ -611,7 +645,7 @@ mod tests {
         let you = back.you().unwrap();
 
         // The microphone of the first join sends over the second.
-        let mut listener = server.block_on(Session::join(config(new, &identity, "listener"))).unwrap();
+        let mut listener = server.block_on(Session::join(config(new, &identity, "listener"), Entry::default())).unwrap();
         joined.microphone.push(&voice(SAMPLE_RATE as usize, 0.3), Instant::now());
         let from = server.block_on(async {
             loop {

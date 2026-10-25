@@ -60,13 +60,16 @@ impl BukoSpeakMember {
 pub enum BukoSpeakState {
     Out,
     Connected,
-    /// The connection was lost, and the engine joins again.
+    /// Nothing comes from the server, or the connection was lost and the engine joins again.
     Reconnecting,
 }
 
 /// The channel after a change, and what changed.
 #[repr(C)]
 pub struct BukoSpeakUpdate {
+    /// Which of the engine's joins the call is, counting from 1; 0 before the first. It stays
+    /// once the call is over, so that its last updates tell it too.
+    pub call: u64,
     pub state: BukoSpeakState,
     /// This member's id; 0, which the server never hands out, while out of the channel.
     pub you: u16,
@@ -161,6 +164,7 @@ impl Listener for Foreign {
         (self.listener)(
             self.context,
             &BukoSpeakUpdate {
+                call: channel.call(),
                 state,
                 you: channel.you().map_or(0, |you| you.0),
                 members: members.as_ptr(),
@@ -247,9 +251,11 @@ pub unsafe extern "C" fn bukospeak_engine_join(
 }
 
 /// Stops the call's audio and leaves the call, once the server knows; without one, nothing.
+/// Returns the `call` the engine joined last: updates of it or of a call before that are still
+/// on their way to the listener are of a call over now.
 #[unsafe(no_mangle)]
-pub extern "C" fn bukospeak_engine_leave(engine: &BukoSpeakEngine) {
-    engine.leave();
+pub extern "C" fn bukospeak_engine_leave(engine: &BukoSpeakEngine) -> u64 {
+    engine.leave()
 }
 
 /// Watches who is in the channel without joining it, until `bukospeak_engine_unwatch` or a join;
@@ -280,8 +286,8 @@ pub extern "C" fn bukospeak_engine_unwatch(engine: &BukoSpeakEngine) {
     engine.engine.unwatch();
 }
 
-/// Whether the microphone sends silence, so a talkspurt ends as in a pause; it holds across
-/// calls until set again.
+/// Whether this member is muted: the microphone sends silence, so a talkspurt ends as in a
+/// pause, and the others see it muted. It holds across calls until set again.
 #[unsafe(no_mangle)]
 pub extern "C" fn bukospeak_engine_set_muted(engine: &BukoSpeakEngine, muted: bool) {
     engine.engine.set_muted(muted);
@@ -332,10 +338,10 @@ impl BukoSpeakEngine {
         Ok(fingerprint)
     }
 
-    fn leave(&self) {
+    fn leave(&self) -> u64 {
         let _calls = self.calls.lock().expect("the calls lock is never poisoned");
         self.stop_call_audio();
-        self.engine.leave();
+        self.engine.leave()
     }
 
     /// Drops the call's halves, the devices stopped first, so nothing plays into a call that

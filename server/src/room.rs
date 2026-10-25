@@ -56,12 +56,6 @@ impl Peer {
     }
 }
 
-/// What a Hello asks for beyond a name.
-struct Hello {
-    muted: bool,
-    resume: Option<ResumeToken>,
-}
-
 impl Room {
     pub fn new(room_key: String) -> Arc<Self> {
         Arc::new(Self { room_key, members: Mutex::default() })
@@ -98,7 +92,7 @@ impl Room {
                 let joined = self
                     .check(version, &room_key)
                     .and_then(|()| check_name(name))
-                    .and_then(|()| self.join(name, Hello { muted, resume }, &connection, control));
+                    .and_then(|()| self.join(name, muted, resume, &connection, control));
                 let id = match joined {
                     Ok(id) => id,
                     Err(reason) => return reject(send, &connection, reason).await,
@@ -110,7 +104,9 @@ impl Room {
                     () = self.listen(id, &connection, recv) => {}
                     () = self.notice_silence(id, &connection) => {}
                 }
-                if is_lost(&connection) && self.reconnecting(id, &connection) {
+                // Shown reconnecting while its place is held, unless another connection took it.
+                if is_lost(&connection) && self.change(id, &connection, |peer| peer.reconnecting = true) {
+                    tracing::info!(id = id.0, "reconnecting");
                     tokio::time::sleep(RESUME_GRACE).await;
                 }
                 self.leave(id, &connection);
@@ -147,45 +143,36 @@ impl Room {
     fn join(
         &self,
         name: &str,
-        hello: Hello,
+        muted: bool,
+        resume: Option<ResumeToken>,
         connection: &Connection,
         control: mpsc::UnboundedSender<ServerMessage>,
     ) -> Result<MemberId, Rejection> {
         let mut members = self.members.lock().expect("the members lock is never poisoned");
-        let resumed = hello.resume.and_then(|token| members.peers.iter().find(|(_, peer)| peer.resume == token).map(|(&id, _)| id));
-        let id = match resumed {
-            Some(id) => {
-                let peer = members.peers.get_mut(&id).expect("the resumed member is in the channel");
-                peer.reconnecting = false;
-                peer.muted = hello.muted;
-                let member = peer.member(id);
-                // Told before the member is on the new connection, whose Welcome comes first.
-                members.tell(&ServerMessage::Changed { member });
-                let peer = members.peers.get_mut(&id).expect("the resumed member is in the channel");
-                peer.connection.close(0u32.into(), b"resumed");
-                peer.connection = connection.clone();
-                peer.control = control.clone();
-                id
+        let resumed = resume.and_then(|token| members.peers.iter().find(|(_, peer)| peer.resume == token).map(|(&id, _)| id));
+        let (id, peer, back) = match resumed.and_then(|id| members.peers.remove_entry(&id)) {
+            Some((id, old)) => {
+                old.connection.close(0u32.into(), b"resumed");
+                (id, Peer { muted, reconnecting: false, connection: connection.clone(), control: control.clone(), ..old }, true)
             }
+            None if members.peers.len() >= MAX_MEMBERS => return Err(Rejection::Full),
             None => {
-                if members.peers.len() >= MAX_MEMBERS {
-                    return Err(Rejection::Full);
-                }
-                let id = members.next_id();
                 let peer = Peer {
                     name: name.to_owned(),
-                    muted: hello.muted,
+                    muted,
                     reconnecting: false,
                     resume: ResumeToken(random()),
                     connection: connection.clone(),
                     control: control.clone(),
                 };
-                members.tell(&ServerMessage::Joined { member: peer.member(id) });
-                members.peers.insert(id, peer);
-                id
+                (members.next_id(), peer, false)
             }
         };
-        let resume = members.peers[&id].resume;
+        let member = peer.member(id);
+        // Told while the member is out of the map: it hears of itself only in its Welcome.
+        members.tell(&if back { ServerMessage::Changed { member } } else { ServerMessage::Joined { member } });
+        let resume = peer.resume;
+        members.peers.insert(id, peer);
         // The channel is fresh and its receiver alive, so the Welcome is queued first.
         let _ = control.send(ServerMessage::Welcome { you: id, members: members.everyone(), resume });
         Ok(id)
@@ -224,16 +211,6 @@ impl Room {
             let silent = heard.elapsed() >= SILENT_AFTER;
             self.change(id, connection, |peer| peer.reconnecting = silent);
         }
-    }
-
-    /// Shows the member as reconnecting while its place is held, if it is still on the lost
-    /// `connection`; whether it is.
-    fn reconnecting(&self, id: MemberId, connection: &Connection) -> bool {
-        let changed = self.change(id, connection, |peer| peer.reconnecting = true);
-        if changed {
-            tracing::info!(id = id.0, "reconnecting");
-        }
-        changed
     }
 
     /// Changes the member and tells everyone if that changed it, if it is still on `connection`;

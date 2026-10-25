@@ -14,7 +14,7 @@ typedef enum BukoSpeakState {
   BUKO_SPEAK_STATE_OUT,
   BUKO_SPEAK_STATE_CONNECTED,
   /**
-   * The connection was lost, and the engine joins again.
+   * Nothing comes from the server, or the connection was lost and the engine joins again.
    */
   BUKO_SPEAK_STATE_RECONNECTING,
 } BukoSpeakState;
@@ -56,6 +56,11 @@ typedef struct BukoSpeakMember {
  * The channel after a change, and what changed.
  */
 typedef struct BukoSpeakUpdate {
+  /**
+   * Which of the engine's joins the call is, counting from 1; 0 before the first. It stays
+   * once the call is over, so that its last updates tell it too.
+   */
+  uint64_t call;
   enum BukoSpeakState state;
   /**
    * This member's id; 0, which the server never hands out, while out of the channel.
@@ -160,8 +165,10 @@ void bukospeak_engine_join(const struct BukoSpeakEngine *engine,
 
 /**
  * Stops the call's audio and leaves the call, once the server knows; without one, nothing.
+ * Returns the `call` the engine joined last: updates of it or of a call before that are still
+ * on their way to the listener are of a call over now.
  */
-void bukospeak_engine_leave(const struct BukoSpeakEngine *engine);
+uint64_t bukospeak_engine_leave(const struct BukoSpeakEngine *engine);
 
 /**
  * Watches who is in the channel without joining it, until `bukospeak_engine_unwatch` or a join;
@@ -183,8 +190,8 @@ void bukospeak_engine_watch(const struct BukoSpeakEngine *engine,
 void bukospeak_engine_unwatch(const struct BukoSpeakEngine *engine);
 
 /**
- * Whether the microphone sends silence, so a talkspurt ends as in a pause; it holds across
- * calls until set again.
+ * Whether this member is muted: the microphone sends silence, so a talkspurt ends as in a
+ * pause, and the others see it muted. It holds across calls until set again.
  */
 void bukospeak_engine_set_muted(const struct BukoSpeakEngine *engine, bool muted);
 

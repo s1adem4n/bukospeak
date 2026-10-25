@@ -12,7 +12,7 @@ final class Call: NSObject {
         case idle
         case joining
         case connected
-        /// The connection was lost while the call was up, and the engine joins again.
+        /// Nothing comes from the server, or the connection was lost and the engine joins again.
         case reconnecting
         case failed(String)
     }
@@ -47,9 +47,9 @@ final class Call: NSObject {
     @ObservationIgnored private var isInterrupted = false
     /// Whether the call plays on the microphone and speaker.
     @ObservationIgnored private var isPlaying = false
-    /// Whether the engine's updates are of the join under way or done: they follow its first
-    /// one in the channel.
-    @ObservationIgnored private var isEntered = false
+    /// The engine's call left last: updates of it or of one before, still on their way, are
+    /// stale.
+    @ObservationIgnored private var leftCall: UInt64 = 0
     /// The engine's state of the call, which may join again before its join came back here.
     @ObservationIgnored private var engineState = ChannelUpdate.State.out
     /// The leave of the call before, which a join waits for.
@@ -183,7 +183,6 @@ final class Call: NSObject {
     /// Joins the channel with the settings, pinning the server on the first join.
     private func joinChannel() async throws(JoinError) {
         let server = settings.server.trimmingCharacters(in: .whitespaces)
-        isEntered = false
         engine.setNoiseSuppression(settings.noiseSuppression)
         engine.setMuted(isMuted)
         do throws(JoinError) {
@@ -211,12 +210,8 @@ final class Call: NSObject {
     private func update(_ update: ChannelUpdate) {
         // Watched out of a call, so before the guard for one.
         if present != update.present { present = update.present }
-        guard id != nil else { return }
-        if update.state != .out {
-            isEntered = true
-        }
-        // Before the join's first, they are of a call that was left.
-        guard isEntered else { return }
+        // Out of a call, or of one left whose last updates still arrive.
+        guard id != nil, update.call > leftCall else { return }
         let changed = update.state != engineState
         engineState = update.state
         // Set only when changed: each set redraws the screen, and a redraw during a tap loses it.
@@ -271,7 +266,6 @@ final class Call: NSObject {
         // The leave stops the audio off the main thread: disposing the voice unit takes long
         // enough to freeze the screen.
         isPlaying = false
-        isEntered = false
         engineState = .out
         members = []
         speaking = []
@@ -280,7 +274,10 @@ final class Call: NSObject {
         engine.setMuted(false)
         isHeld = false
         phase = failure.map(Phase.failed) ?? .idle
-        leaving = Task { [engine] in await engine.leave() }
+        leaving = Task { [weak self, engine] in
+            let left = await engine.leave()
+            self?.leftCall = left
+        }
     }
 
     private func interrupted(_ notification: Notification) {

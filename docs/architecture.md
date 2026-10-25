@@ -5,7 +5,14 @@
 One QUIC connection per member, TLS 1.3 with the server's self-signed certificate pinned by its
 fingerprint on the first join. Control messages (JSON) travel on the connection's first stream,
 audio as datagrams. The server relays each member's datagrams to everyone else and never decodes
-them.
+them. A client that only looks who is in the channel, as the app's start screen does, sends a
+Watch instead of a Hello and hears who joins, changes and leaves.
+
+Clients send a keep-alive every second. Either side shows a connection that nothing came over
+for 3 s as reconnecting, the server the member and the client its call, long before it times
+out after 15 s. A member whose connection was lost joins again with the resume token of its
+Welcome and takes its own place, which the server holds for 20 s: the others see it reconnect,
+not leave and join.
 
 ## Audio format
 
@@ -83,7 +90,7 @@ the uplink thread exist only for a call.
   choice is part of the desktop crate's API.
 - iOS: the `audio/ios` crate plays them on the VoiceProcessingIO unit, which does AEC and AGC,
   at 48 kHz mono float, converting to the route itself. Its input and render callbacks are Rust
-  functions; a unit plays while the call is connected, not held and its audio session active,
+  functions; a unit plays while the call is up, reconnecting too, not held and its audio session active,
   which CallKit may activate before the join is done. Swift owns only the audio session, CallKit and the UI. A held call that the
   system doesn't resume when the other call ends is asked to resume; a connection lost while the
   call is up, as when iOS suspends the app during another call, is joined again once.
