@@ -1,0 +1,14 @@
+[tools]
+rust = { version = "1.98.1", components = "clippy,rustfmt" }
+
+[tasks.check]
+description = "Formatting, lints and tests, as CI runs them"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo test --workspace --locked",
+]
+
+[tasks.image]
+description = "Build the server's container image"
+run = "podman build -f server/Containerfile -t bukospeak-server ."

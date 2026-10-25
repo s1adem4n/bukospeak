@@ -1,0 +1,23 @@
+[package]
+name = "bukospeak-cli"
+description = "A terminal client for trying the bukospeak server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bukospeak"
+path = "src/main.rs"
+
+[dependencies]
+bukospeak-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "bukospeak-core"
+description = "The client side the bukospeak apps share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bukospeak-proto.workspace = true
+bytes.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
+
+[lints]
+workspace = true

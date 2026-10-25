@@ -1,0 +1,21 @@
+[package]
+name = "bukospeak-proto"
+description = "What the bukospeak server and its clients say to each other"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }
+
+[lints]
+workspace = true
