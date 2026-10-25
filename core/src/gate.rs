@@ -25,7 +25,9 @@ const HOLD: u32 = 30;
 pub const SETTLE: u32 = 20;
 
 /// The floor is the quietest frame without speech in this many stretches of
-/// [`FLOOR_STRETCH`] frames: 1.5 s, long enough to span the pauses between words.
+/// [`FLOOR_STRETCH`] frames: 1.5 s, long enough to span the pauses between words. A stretch
+/// without one keeps what it had, so sound that is all likely speech, like game music, doesn't
+/// make the gate forget the room.
 const FLOOR_STRETCHES: usize = 15;
 const FLOOR_STRETCH: u32 = 10;
 
@@ -49,13 +51,15 @@ pub struct Gate {
     settling: u32,
     /// The quietest frame without speech in each recent stretch, in dBov.
     quietest: [Option<f32>; FLOOR_STRETCHES],
+    /// Whether the current stretch had a frame without speech yet.
+    heard: bool,
     /// Frames the floor followed, which tells the stretch.
     frames: u32,
 }
 
 impl Default for Gate {
     fn default() -> Self {
-        Self { open_for: None, settling: SETTLE, quietest: [None; FLOOR_STRETCHES], frames: 0 }
+        Self { open_for: None, settling: SETTLE, quietest: [None; FLOOR_STRETCHES], heard: false, frames: 0 }
     }
 }
 
@@ -94,10 +98,12 @@ impl Gate {
     fn track_floor(&mut self, dbov: f32, likely_speech: bool) {
         let stretch = (self.frames / FLOOR_STRETCH) as usize % FLOOR_STRETCHES;
         if self.frames.is_multiple_of(FLOOR_STRETCH) {
-            self.quietest[stretch] = None;
+            self.heard = false;
         }
         if !likely_speech {
-            self.quietest[stretch] = Some(self.quietest[stretch].map_or(dbov, |quietest| quietest.min(dbov)));
+            let quietest = self.quietest[stretch].filter(|_| self.heard).map_or(dbov, |quietest| quietest.min(dbov));
+            self.quietest[stretch] = Some(quietest);
+            self.heard = true;
         }
         // Wrapping after 497 days starts a stretch early, which the floor doesn't mind.
         self.frames = self.frames.wrapping_add(1);
@@ -189,6 +195,18 @@ mod tests {
         let mut gate = settled();
         assert_eq!(gate.decide(NOISE, level(30)), Decision::Quiet);
         assert_eq!(gate.decide(SPEECH, level(28)), Decision::Quiet);
+    }
+
+    #[test]
+    fn a_floor_outlasts_sound_that_is_all_likely_speech() {
+        let mut gate = settled();
+        for _ in 0..200 {
+            gate.decide(NOISE, level(35));
+        }
+        // Game music RNNoise takes for speech, a little above the floor, for longer than the floor spans.
+        for _ in 0..1000 {
+            assert_eq!(gate.decide(SPEECH, level(30)), Decision::Quiet);
+        }
     }
 
     #[test]
