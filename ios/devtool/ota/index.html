@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BukoSpeak</title>
+  <style>
+    body {
+      font: 17px -apple-system, system-ui;
+      display: grid;
+      place-items: center;
+      min-height: 90vh;
+      margin: 0;
+      text-align: center;
+    }
+
+
+    a {
+      display: inline-block;
+      margin-top: 20px;
+      padding: 14px 32px;
+      border-radius: 999px;
+      background: #000;
+      color: #fff;
+      font-weight: 600;
+      text-decoration: none;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body {
+        background: #000;
+        color: #fff;
+      }
+
+      a {
+        background: #fff;
+        color: #000;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div>
+    <h2>BukoSpeak $version</h2>
+    <div>Built $built</div>
+    <a href="itms-services://?action=download-manifest&amp;url=$base/manifest.plist?$stamp">Install</a>
+  </div>
+</body>
+</html>

@@ -1,0 +1,7 @@
+xcuserdata/
+/build/
+/build-ota/
+.DS_Store
+__pycache__/
+.venv/
+.ruff_cache/

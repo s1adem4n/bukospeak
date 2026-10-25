@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>digital.buko.bukospeak-ota</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-c</string>
+    <string>import functools, http.server
+http.server.SimpleHTTPRequestHandler.extensions_map.update({".plist": "text/xml", ".ipa": "application/octet-stream"})
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory="$out")
+http.server.ThreadingHTTPServer(("127.0.0.1", $port), handler).serve_forever()</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>

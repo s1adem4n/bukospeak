@@ -11,6 +11,9 @@ latency, Opus at high bitrates, and an iOS app that keeps its microphone through
 | `server/` | The server, which relays each member's audio to everyone else |
 | `core/` | The client side the apps share: the engine, joining and pinning the server, noise suppression, voice activation, Opus, jitter buffers and the mix |
 | `audio/desktop/` | Plays a call on the desktop's audio devices, through cpal |
+| `audio/ios/` | Plays a call on the iPhone's microphone and speaker, through VoiceProcessingIO |
+| `ffi/` | The C interface the apps call the engine through, and its header |
+| `ios/` | The iOS app (SwiftUI, CallKit) and `ios/dev`, which builds it on a Mac |
 | `cli/` | `bukospeak`, a terminal client for trying the server on the desktop's devices |
 
 One QUIC connection per member (TLS 1.3): control messages on its first stream, Opus frames as
@@ -29,6 +32,11 @@ cargo run -p bukospeak-cli -- join localhost:9988 --name first --room-key dev
 ```
 
 On Linux, cpal needs ALSA's headers (`alsa-lib` on Arch, `libasound2-dev` on Debian).
+`mise run header` rewrites the C header after the `ffi` crate's interface changed.
+
+The iOS app builds on a Mac over ssh: `ios/dev build` syncs the repository there, builds the
+Rust library for the iPhone and then the app; `ios/dev ota` prints a tailnet-only page that
+installs it. `ios/dev help` lists the commands.
 
 ## Running the server
 

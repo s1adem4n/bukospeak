@@ -1,0 +1,4 @@
+#!/bin/sh
+# Build the iOS app on the Mac and install it on the iPhone, from this machine; `ios/dev help`
+# lists the commands. The tool is the Python package next to this file.
+exec python3 "$(dirname "$0")/devtool" "$@"
