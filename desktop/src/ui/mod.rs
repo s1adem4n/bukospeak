@@ -13,6 +13,7 @@ mod welcome;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bukospeak_audio_desktop::Direction;
 use bukospeak_desktop::call::{Call, Failure, Happening, Phase};
 use bukospeak_desktop::settings::{self as stored, Settings};
 use futures::StreamExt;
@@ -110,7 +111,7 @@ impl Step {
 enum Screen {
     Channel,
     Welcome(Form, Step),
-    Settings(Form),
+    Settings(Form, settings::Audio),
 }
 
 pub struct Main {
@@ -194,7 +195,7 @@ impl Main {
             return;
         }
         let key = key.unwrap_or_default();
-        if let Screen::Welcome(form, _) | Screen::Settings(form) = &self.screen
+        if let Screen::Welcome(form, _) | Screen::Settings(form, _) = &self.screen
             && form.value(Field::RoomKey, cx).is_empty()
         {
             form.room_key.update(cx, |input, cx| input.set_value(key.clone(), window, cx));
@@ -288,7 +289,7 @@ impl Main {
 
     fn enter(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
         match (&self.screen, field) {
-            (Screen::Settings(_), _) => self.close_settings(window, cx),
+            (Screen::Settings(..), _) => self.close_settings(window, cx),
             (Screen::Welcome(_, Step::Name), _) => self.next(window, cx),
             (Screen::Welcome(form, Step::Place), Field::Server) if form.value(Field::RoomKey, cx).is_empty() => {
                 form.focus_empty(&[Field::RoomKey], window, cx);
@@ -329,7 +330,7 @@ impl Main {
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.call.dismiss();
-        self.screen = Screen::Settings(self.form(window, cx));
+        self.screen = Screen::Settings(self.form(window, cx), self.audio(window, cx));
         window.focus(&self.focus, cx);
         self.watch();
         cx.notify();
@@ -344,7 +345,7 @@ impl Main {
     /// Takes in what the form says, keeps it, and goes back to the channel, which takes the
     /// focus from the form's fields.
     fn keep(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Screen::Welcome(form, _) | Screen::Settings(form)) = std::mem::replace(&mut self.screen, Screen::Channel) else {
+        let (Screen::Welcome(form, _) | Screen::Settings(form, _)) = std::mem::replace(&mut self.screen, Screen::Channel) else {
             return;
         };
         window.focus(&self.focus, cx);
@@ -374,13 +375,38 @@ impl Main {
         }
     }
 
+    /// Changes a setting the call takes at once, and keeps it.
+    fn change(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        edit(&mut self.settings);
+        if let Err(error) = self.settings.save(&self.settings_path) {
+            tracing::warn!("{error}");
+            self.trouble = Some(Trouble::NotSaved);
+        }
+        cx.notify();
+    }
+
+    fn set_device(&mut self, direction: Direction, id: Option<String>, cx: &mut Context<Self>) {
+        self.change(|settings| settings.set_device_id(direction, id), cx);
+        self.call.set_device(direction, self.settings.device(direction));
+    }
+
+    fn set_noise_suppression(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.change(|settings| settings.noise_suppression = on, cx);
+        self.call.set_noise_suppression(on);
+    }
+
+    fn set_echo_cancellation(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.change(|settings| settings.echo_cancellation = on, cx);
+        self.call.set_echo_cancellation(on);
+    }
+
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.call.phase(), Phase::Failed(Failure::CertificateChanged { .. })) {
             self.dismiss(cx);
             return;
         }
         match &self.screen {
-            Screen::Settings(_) => self.close_settings(window, cx),
+            Screen::Settings(..) => self.close_settings(window, cx),
             Screen::Welcome(_, Step::Place) => self.previous(window, cx),
             Screen::Welcome(_, Step::Name) | Screen::Channel => cx.propagate(),
         }
@@ -399,7 +425,7 @@ impl Main {
         let title = match &self.screen {
             Screen::Channel => Some(div().font_weight(FontWeight::SEMIBOLD).child("BukoSpeak").into_any_element()),
             // The way back and the title in one: the arrow lines up on the gutter.
-            Screen::Settings(_) => Some(
+            Screen::Settings(..) => Some(
                 Button::new("back")
                     .custom(
                         ButtonCustomVariant::new(cx)
@@ -460,7 +486,7 @@ impl Render for Main {
         let content = match &self.screen {
             Screen::Channel => self.render_channel(cx).into_any_element(),
             Screen::Welcome(form, step) => self.render_welcome(form, *step, cx).into_any_element(),
-            Screen::Settings(form) => self.render_settings(form, cx).into_any_element(),
+            Screen::Settings(form, audio) => self.render_settings(form, audio, cx).into_any_element(),
         };
         let certificate = match self.call.phase() {
             Phase::Failed(Failure::CertificateChanged { pinned, presented, .. }) => Some(self.render_certificate(*pinned, *presented, cx)),

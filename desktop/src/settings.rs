@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use bukospeak_audio_desktop::DeviceId;
+use bukospeak_audio_desktop::{DeviceId, Direction};
 use serde::{Deserialize, Serialize};
 
 use crate::call::{Devices, Join};
@@ -76,16 +76,31 @@ impl Settings {
             server: self.server.trim().to_owned(),
             name: self.name.trim().to_owned(),
             room_key: room_key.to_owned(),
-            devices: Devices { input: device(self.input.as_deref()), output: device(self.output.as_deref()) },
+            devices: Devices { input: self.device(Direction::Input), output: self.device(Direction::Output) },
         }
     }
-}
 
-/// The device a kept id names; the system's default for none, or for one that isn't an id here,
-/// as one written on another system.
-fn device(id: Option<&str>) -> Option<DeviceId> {
-    let id = id?;
-    id.parse().inspect_err(|error| tracing::warn!("the device {id} isn't one: {error}")).ok()
+    /// The id kept for a direction's device; None for the system's default.
+    pub fn device_id(&self, direction: Direction) -> Option<&str> {
+        match direction {
+            Direction::Input => self.input.as_deref(),
+            Direction::Output => self.output.as_deref(),
+        }
+    }
+
+    pub fn set_device_id(&mut self, direction: Direction, id: Option<String>) {
+        *match direction {
+            Direction::Input => &mut self.input,
+            Direction::Output => &mut self.output,
+        } = id;
+    }
+
+    /// The device kept for a direction; the system's default for none, or for an id that isn't
+    /// one here, as one written on another system.
+    pub fn device(&self, direction: Direction) -> Option<DeviceId> {
+        let id = self.device_id(direction)?;
+        id.parse().inspect_err(|error| tracing::warn!("the device {id} isn't one: {error}")).ok()
+    }
 }
 
 /// The room key, if one was kept.
