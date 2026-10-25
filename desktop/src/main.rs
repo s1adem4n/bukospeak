@@ -7,6 +7,8 @@ mod hotkey;
 mod instance;
 mod tray;
 mod ui;
+#[cfg(target_os = "windows")]
+mod update;
 
 use std::io::IsTerminal;
 
@@ -37,6 +39,8 @@ fn send(actions: &UnboundedSender<Action>, action: Action) {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    update::start();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| bukospeak_desktop::LOG_FILTER.into()))
         .with_writer(std::io::stderr)
@@ -48,6 +52,8 @@ fn main() {
     if !instance::take(&folder, actions.clone()) {
         return;
     }
+    #[cfg(target_os = "windows")]
+    update::check();
     let settings_path = folder.join("settings.toml");
     let (settings, trouble) = match Settings::load(&settings_path) {
         Ok(settings) => (settings, None),

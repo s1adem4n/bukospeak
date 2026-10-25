@@ -40,6 +40,15 @@ The iOS app builds on a Mac over ssh: `ios/dev build` syncs the repository there
 Rust library for the iPhone and then the app; `ios/dev ota` prints a tailnet-only page that
 installs it. `ios/dev help` lists the commands.
 
+## Releasing the desktop app
+
+The workspace's `version` raised, committed, and tagged with it (`v0.2.0`): pushing the tag runs
+`release.yml`, which makes a GitHub Release of
+- `BukoSpeak-win-Setup.exe`, an installer whose app downloads newer releases in the background
+  and applies them on its next start; it is unsigned, so SmartScreen warns on the first install,
+- and archives of the app and `bukospeak` for macOS (Apple Silicon) and Linux (x86_64). The
+  macOS binaries are unsigned: `xattr -d com.apple.quarantine` lets them start.
+
 ## Running the server
 
 ```sh

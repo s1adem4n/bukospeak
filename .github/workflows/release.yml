@@ -1,0 +1,108 @@
+name: Release
+
+# A tag `v` and the workspace's version releases the desktop app: on Windows an installer that
+# updates itself from these releases, on macOS and Linux an archive of the app and the CLI.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  # libopus' bundled build declares CMake 3.1; CMake 4 builds it only when told the policies of
+  # 3.5 will do.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      # The binaries carry the workspace's version, the updates compare it: the tag has to agree.
+      - id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "the tag $GITHUB_REF_NAME isn't the workspace's version $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - run: mise exec -- cargo build --release --locked -p bukospeak-desktop --bin bukospeak-desktop
+      # vpk's version is the velopack crate's, pinned in the workspace.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet tool install --global vpk --version 1.3.39-g8d2844f
+      # Only what is installed: the app.
+      - run: mkdir staging && cp target/release/bukospeak-desktop.exe staging/
+      # The last release, if there is one, from which the update is packed as a delta too.
+      - run: vpk download github --repoUrl "$REPOSITORY" --token "$GH_TOKEN"
+      - run: >-
+          vpk pack --packId BukoSpeak --packVersion "$VERSION" --packTitle BukoSpeak
+          --packDir staging --mainExe bukospeak-desktop.exe --icon desktop/windows/icon.ico
+      - run: >-
+          vpk upload github --repoUrl "$REPOSITORY" --token "$GH_TOKEN" --publish --merge
+          --tag "$GITHUB_REF_NAME" --releaseName "BukoSpeak $VERSION"
+
+  archive:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            name: macos-arm64
+          # The oldest runner, so the binaries need no newer glibc than its.
+          - os: ubuntu-22.04
+            name: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    env:
+      FOLDER: bukospeak-${{ needs.version.outputs.version }}-${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      # cpal's ALSA backend links against libasound; GPUI against the window systems' and the
+      # fonts' libraries.
+      - if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libfreetype-dev
+          libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
+      - run: mise exec -- cargo build --release --locked -p bukospeak-desktop
+      - run: |
+          mkdir "$FOLDER"
+          cp target/release/bukospeak-desktop target/release/bukospeak "$FOLDER/"
+          tar -czf "$FOLDER.tar.gz" "$FOLDER"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.FOLDER }}.tar.gz
+
+  # The archives go to the release the Windows job made.
+  attach:
+    needs: [windows, archive]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: archives
+          merge-multiple: true
+      - run: gh release upload "$GITHUB_REF_NAME" archives/*.tar.gz --repo "$GITHUB_REPOSITORY"

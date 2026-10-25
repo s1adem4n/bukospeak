@@ -1,0 +1,30 @@
+// The Windows app's icon, which GPUI also shows on its window by this id, and its version.
+
+#include <winver.h>
+
+1 ICON ICON_PATH
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION VERSION
+PRODUCTVERSION VERSION
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // German, in Unicode.
+        BLOCK "040704B0"
+        BEGIN
+            VALUE "FileDescription", "BukoSpeak"
+            VALUE "FileVersion", VERSION_TEXT
+            VALUE "InternalName", "bukospeak-desktop"
+            VALUE "OriginalFilename", "bukospeak-desktop.exe"
+            VALUE "ProductName", "BukoSpeak"
+            VALUE "ProductVersion", VERSION_TEXT
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0407, 1200
+    END
+END

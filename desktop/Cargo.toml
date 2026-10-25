@@ -31,6 +31,12 @@ ksni.workspace = true
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tray-icon.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+velopack.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
+
 [dev-dependencies]
 bukospeak-server.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
