@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::Context;
@@ -47,15 +46,15 @@ impl Identity {
     }
 }
 
+/// Writes a file only its owner reads: on Unix by its mode; on Windows it takes the folder's
+/// permissions, as Windows has no mode.
 fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .and_then(|mut file| file.write_all(contents))
-        .with_context(|| format!("writing {}", path.display()))
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path).and_then(|mut file| file.write_all(contents)).with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
