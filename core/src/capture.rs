@@ -262,6 +262,22 @@ mod tests {
     }
 
     #[test]
+    fn conditioned_speech_is_captured_without_allocating() {
+        let mut capture = Capture::new(Conditioning::Engine).unwrap();
+        let signal = voice(2 * SECOND, 0.3);
+        let (first, rest) = signal.as_chunks().0.split_first().unwrap();
+        // RNNoise sets up its FFT on the first frame.
+        capture.process(first, |_| ()).unwrap();
+        let mut sent = 0;
+        assert_no_alloc::assert_no_alloc(|| {
+            for frame in rest {
+                capture.process(frame, |_| sent += 1).unwrap();
+            }
+        });
+        assert!(sent >= 150, "only {sent} frames of 2 s of speech sent");
+    }
+
+    #[test]
     fn ending_in_speech_sends_a_silent_last_frame_and_capture_starts_anew() {
         let mut capture = Capture::new(Conditioning::Platform).unwrap();
         let mut sent = Vec::new();

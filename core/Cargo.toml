@@ -20,6 +20,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+assert_no_alloc.workspace = true
 bukospeak-server.workspace = true
 
 [lints]

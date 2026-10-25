@@ -14,6 +14,11 @@ mod speaker;
 mod speaking;
 mod uplink;
 
+/// Lets tests assert that the realtime paths don't allocate.
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+
 #[cfg(test)]
 mod signal;
 #[cfg(test)]
