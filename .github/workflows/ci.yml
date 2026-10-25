@@ -12,9 +12,34 @@ jobs:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
       - uses: Swatinem/rust-cache@v2
-      # cpal's ALSA backend links against libasound.
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # cpal's ALSA backend links against libasound; GPUI against the window systems' and the
+      # fonts' libraries.
+      - run: >-
+          sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libfreetype-dev
+          libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
       - run: mise run check
+
+  # The code only Windows and macOS build: their audio and window backends. Formatting and the
+  # header are the same everywhere, so the Linux job alone checks them.
+  platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # libopus' bundled build, which these runners compile, declares CMake 3.1; CMake 4 builds
+      # it only when told the policies of 3.5 will do.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+      - run: mise exec -- cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: mise exec -- cargo test --workspace --locked
+      # The release is what ships on Windows; it links differently than the tests.
+      - if: runner.os == 'Windows'
+        run: mise exec -- cargo build --release --locked -p bukospeak-desktop
 
   server-image:
     needs: check

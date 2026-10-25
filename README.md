@@ -27,11 +27,13 @@ Tools come from [mise](https://mise.jdx.dev): `mise install`, then `mise tasks` 
 ```sh
 mise run check                                                  # formatting, lints and tests, as CI runs them
 BUKOSPEAK_ROOM_KEY=dev cargo run -p bukospeak-server            # a server on [::]:9988, its identity in data/
+cargo run --bin bukospeak-desktop                               # the desktop app
 cargo run --bin bukospeak -- devices                            # the audio devices and their ids
 cargo run --bin bukospeak -- join localhost:9988 --name first --room-key dev
 ```
 
-On Linux, cpal needs ALSA's headers (`alsa-lib` on Arch, `libasound2-dev` on Debian).
+On Linux, cpal needs ALSA's headers (`alsa-lib` on Arch, `libasound2-dev` on Debian), and the
+desktop app those of fontconfig, freetype, wayland and xkbcommon (CI's Linux job lists Debian's).
 `mise run header` rewrites the C header after the `ios/ffi` crate's interface changed.
 
 The iOS app builds on a Mac over ssh: `ios/dev build` syncs the repository there, builds the

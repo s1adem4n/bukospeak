@@ -13,6 +13,7 @@ anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 dirs.workspace = true
+gpui-kit.workspace = true
 thiserror.workspace = true
 tracing-subscriber.workspace = true
 
