@@ -14,7 +14,7 @@ latency, Opus at high bitrates, and an iOS app that keeps its microphone through
 | `audio/ios/` | Plays a call on the iPhone's microphone and speaker, through VoiceProcessingIO |
 | `ios/` | The iOS app (SwiftUI, CallKit) and `ios/dev`, which builds it on a Mac |
 | `ios/ffi/` | The C interface the iOS app calls the engine through, and its header |
-| `cli/` | `bukospeak`, a terminal client for trying the server on the desktop's devices |
+| `desktop/` | The desktop app for Windows, macOS and Linux (GPUI), and `bukospeak`, a terminal client for trying the server on the desktop's devices |
 
 One QUIC connection per member (TLS 1.3): control messages on its first stream, Opus frames as
 datagrams. The server's certificate is self-signed; clients pin its fingerprint on the first
@@ -27,8 +27,8 @@ Tools come from [mise](https://mise.jdx.dev): `mise install`, then `mise tasks` 
 ```sh
 mise run check                                                  # formatting, lints and tests, as CI runs them
 BUKOSPEAK_ROOM_KEY=dev cargo run -p bukospeak-server            # a server on [::]:9988, its identity in data/
-cargo run -p bukospeak-cli -- devices                         # the audio devices and their ids
-cargo run -p bukospeak-cli -- join localhost:9988 --name first --room-key dev
+cargo run --bin bukospeak -- devices                            # the audio devices and their ids
+cargo run --bin bukospeak -- join localhost:9988 --name first --room-key dev
 ```
 
 On Linux, cpal needs ALSA's headers (`alsa-lib` on Arch, `libasound2-dev` on Debian).

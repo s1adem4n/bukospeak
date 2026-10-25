@@ -245,19 +245,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bukospeak-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bukospeak-audio-desktop",
- "bukospeak-core",
- "clap",
- "ctrlc",
- "dirs",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "bukospeak-core"
 version = "0.1.0"
 dependencies = [
@@ -274,6 +261,20 @@ dependencies = [
  "sonora-agc2",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "bukospeak-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bukospeak-audio-desktop",
+ "bukospeak-core",
+ "clap",
+ "ctrlc",
+ "dirs",
+ "thiserror 2.0.21",
+ "tracing-subscriber",
 ]
 
 [[package]]

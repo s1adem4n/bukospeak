@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["proto", "core", "audio/desktop", "audio/ios", "ios/ffi", "server", "cli"]
+members = ["proto", "core", "audio/desktop", "audio/ios", "ios/ffi", "server", "desktop"]
 # Upstream crates patched below, built as they are.
 exclude = ["vendor"]
 

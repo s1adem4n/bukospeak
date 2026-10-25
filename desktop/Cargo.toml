@@ -1,14 +1,10 @@
 [package]
-name = "bukospeak-cli"
-description = "A terminal client for trying the BukoSpeak server"
+name = "bukospeak-desktop"
+description = "The BukoSpeak desktop app, and `bukospeak`, a terminal client for trying the server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-
-[[bin]]
-name = "bukospeak"
-path = "src/main.rs"
 
 [dependencies]
 bukospeak-core.workspace = true
@@ -17,6 +13,7 @@ anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 dirs.workspace = true
+thiserror.workspace = true
 tracing-subscriber.workspace = true
 
 [lints]

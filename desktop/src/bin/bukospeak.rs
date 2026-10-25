@@ -1,8 +1,6 @@
 //! A terminal client for trying the server: joins the channel on the desktop's audio devices
 //! and prints what happens in it.
 
-mod known_servers;
-
 use std::io::IsTerminal;
 use std::sync::{Arc, mpsc};
 
@@ -10,13 +8,12 @@ use anyhow::Context;
 use bukospeak_audio_desktop::{Audio, DeviceId, Direction};
 use bukospeak_core::proto::MemberId;
 use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Update};
+use bukospeak_desktop::known_servers::KnownServers;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::known_servers::KnownServers;
-
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about = "A terminal client for trying the BukoSpeak server")]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -97,9 +94,10 @@ struct Processing {
 }
 
 fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, processing: Processing) -> anyhow::Result<()> {
-    let mut known = KnownServers::load()?;
+    let folder = bukospeak_desktop::config_folder().context("this system has no config folder")?;
+    let known = KnownServers::at(folder.join("known_servers"));
     let server = config.server.clone();
-    let pin = known.get(&server);
+    let pin = known.get(&server)?;
 
     let (happenings, received) = mpsc::channel();
     // `cpal` passes the microphone's signal as it is.
