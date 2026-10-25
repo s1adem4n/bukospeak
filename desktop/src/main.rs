@@ -10,7 +10,6 @@ use std::io::IsTerminal;
 use bukospeak_desktop::call::{Call, DesktopPlayer};
 use bukospeak_desktop::known_servers::KnownServers;
 use bukospeak_desktop::settings::Settings;
-use gpui_kit::assets::AllAssets;
 use gpui_kit::component::{Theme, TitleBar};
 use gpui_kit::{AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
@@ -35,8 +34,7 @@ fn main() {
     };
     let (call, happenings) = Call::new(KnownServers::at(folder.join("known_servers")), DesktopPlayer).expect("the engine's threads start");
 
-    // All of Lucide, for the icons the default set lacks.
-    gpui_kit::application().with_assets(AllAssets).run(move |cx| {
+    gpui_kit::application().with_assets(ui::Assets).run(move |cx| {
         gpui_kit::init(cx);
         ui::theme::install(cx);
         cx.bind_keys([KeyBinding::new("escape", Back, Some(CONTEXT))]);

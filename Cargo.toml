@@ -73,3 +73,8 @@ sonora-aec3 = { path = "vendor/sonora-aec3" }
 opt-level = 3
 [profile.dev.package.sonora-aec3]
 opt-level = 3
+
+# Downloads stay small: no symbols, and the linker sees across crates to drop what is unused.
+[profile.release]
+strip = true
+lto = "thin"

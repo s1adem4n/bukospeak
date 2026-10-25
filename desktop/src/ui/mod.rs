@@ -4,6 +4,8 @@
 mod certificate;
 mod channel;
 mod glyph;
+
+pub use glyph::Assets;
 mod member;
 mod settings;
 mod text;
