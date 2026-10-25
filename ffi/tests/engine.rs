@@ -124,9 +124,9 @@ fn next(updates: &mpsc::Receiver<Heard>) -> Heard {
 #[test]
 fn members_join_see_each_other_and_leave() {
     let server = serve();
-    let (first_events, first_heard) = mpsc::channel();
-    let (second_events, second_heard) = mpsc::channel();
-    let (first, second) = (engine(&first_events), engine(&second_events));
+    let (first_updates, first_heard) = mpsc::channel();
+    let (second_updates, second_heard) = mpsc::channel();
+    let (first, second) = (engine(&first_updates), engine(&second_updates));
 
     let Outcome::Joined { fingerprint } = join(&first, &server.address, "first", ROOM_KEY, None) else {
         panic!("the first member didn't join")
@@ -158,8 +158,8 @@ fn members_join_see_each_other_and_leave() {
 #[test]
 fn a_wrong_room_key_fails_with_a_message() {
     let server = serve();
-    let (events, _heard) = mpsc::channel();
-    let engine = engine(&events);
+    let (updates, _heard) = mpsc::channel();
+    let engine = engine(&updates);
     let Outcome::Failed(message) = join(&engine, &server.address, "stranger", "guess", Some(server.fingerprint)) else {
         panic!("a wrong room key joined")
     };
@@ -170,8 +170,8 @@ fn a_wrong_room_key_fails_with_a_message() {
 #[test]
 fn a_changed_certificate_is_told_with_both_fingerprints() {
     let server = serve();
-    let (events, _heard) = mpsc::channel();
-    let engine = engine(&events);
+    let (updates, _heard) = mpsc::channel();
+    let engine = engine(&updates);
     let pinned = [7; 32];
     let result = join(&engine, &server.address, "first", ROOM_KEY, Some(pinned));
     let Outcome::FingerprintChanged { pinned: told, presented, message } = result else { panic!("joined with a wrong pin: {result:?}") };

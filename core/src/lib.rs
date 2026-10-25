@@ -26,9 +26,9 @@ mod signal;
 mod simulator;
 
 pub use bukospeak_proto as proto;
-pub use channel::{Announcement, Channel, State};
+pub use channel::{Announcement, Channel, Lost, State};
 pub use conditioner::Conditioning;
-pub use engine::{Engine, Joined, Listener, Lost, Update};
+pub use engine::{Engine, Joined, Listener, Update};
 pub use microphone::Microphone;
 pub use session::{Error, JoinConfig};
 pub use speaker::Speaker;

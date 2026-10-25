@@ -190,6 +190,7 @@ final class Call: NSObject {
         }
         // Before the join's first, they are of a call that was left.
         guard isEntered else { return }
+        let changed = update.state != engineState
         engineState = update.state
         you = update.you
         members = update.members
@@ -197,7 +198,8 @@ final class Call: NSObject {
         if let lost = update.lost {
             return fail("The connection was lost: \(lost)")
         }
-        if phase != .joining {
+        // Only on a change: an update of who speaks shouldn't start audio that failed again.
+        if changed && phase != .joining {
             connected()
         }
     }

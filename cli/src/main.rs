@@ -9,7 +9,7 @@ use std::sync::{Arc, mpsc};
 use anyhow::Context;
 use bukospeak_audio_desktop::{Audio, DeviceId, Direction};
 use bukospeak_core::proto::MemberId;
-use bukospeak_core::{Announcement, Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Lost, State, Update};
+use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Update};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -48,7 +48,7 @@ enum Command {
 
 /// What the client waits for.
 enum Happening {
-    Update(Channel, Option<Announcement>, Option<Lost>),
+    Update(Update),
     AudioFailed(bukospeak_audio_desktop::Error),
     Stop,
 }
@@ -56,9 +56,9 @@ enum Happening {
 struct Forward(mpsc::Sender<Happening>);
 
 impl Listener for Forward {
-    fn update(&self, update: Update<'_>) {
+    fn update(&self, update: Update) {
         // The client stops listening only on its way out.
-        let _ = self.0.send(Happening::Update(update.channel.clone(), update.announcement, update.lost));
+        let _ = self.0.send(Happening::Update(update));
     }
 }
 
@@ -112,15 +112,13 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, n
     let audio = Audio::start(microphone, speaker, input, output, move |error| _ = failures.send(Happening::AudioFailed(error)))?;
     ctrlc::set_handler(move || _ = happenings.send(Happening::Stop))?;
 
-    let mut state = State::Out;
-    let mut speaking: Vec<MemberId> = Vec::new();
+    // The channel as last printed.
+    let mut shown = Channel::default();
     loop {
         match received.recv().expect("the client holds a sender until it leaves") {
-            Happening::Update(_, _, Some(lost)) => return Err(lost).context("the call ended"),
-            Happening::Update(channel, announcement, None) => {
-                let name =
-                    |id: &MemberId| channel.members().iter().find(|member| member.id == *id).map_or("someone", |member| &member.name);
-                if state == State::Out
+            Happening::Update(Update { lost: Some(lost), .. }) => return Err(lost).context("the call ended"),
+            Happening::Update(Update { channel, announcement, lost: None }) => {
+                if shown.you().is_none()
                     && let Some(you) = channel.you()
                 {
                     let others: Vec<&str> =
@@ -130,14 +128,13 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, n
                 if let Some(announcement) = announcement {
                     println!("{announcement}");
                 }
-                for id in channel.speaking().iter().filter(|&id| !speaking.contains(id)) {
-                    println!("{} speaks", name(id));
+                for &id in channel.speaking().iter().filter(|id| !shown.speaking().contains(id)) {
+                    println!("{} speaks", name(&channel, id));
                 }
-                for id in speaking.iter().filter(|&id| !channel.speaking().contains(id)) {
-                    println!("{} is quiet", name(id));
+                for &id in shown.speaking().iter().filter(|id| !channel.speaking().contains(id)) {
+                    println!("{} is quiet", name(&shown, id));
                 }
-                state = channel.state();
-                speaking = channel.speaking().to_vec();
+                shown = channel;
             }
             Happening::AudioFailed(error) => eprintln!("{error}"),
             Happening::Stop => break,
@@ -147,4 +144,9 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, n
     drop(audio);
     engine.leave();
     Ok(())
+}
+
+/// A member's name, as the channel knows it.
+fn name(channel: &Channel, id: MemberId) -> &str {
+    channel.members().iter().find(|member| member.id == id).map_or("someone", |member| &member.name)
 }

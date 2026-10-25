@@ -6,7 +6,7 @@ use std::fmt;
 use bukospeak_proto::MemberId;
 use bukospeak_proto::control::Member;
 
-use crate::engine::Lost;
+use crate::session::Error;
 
 /// What happens in the calls, in order; the events between an [`Entered`](Event::Entered) and
 /// the next [`Ended`](Event::Ended) or [`Lost`](Event::Lost) are one call's.
@@ -27,6 +27,14 @@ pub(crate) enum Event {
     Ended,
     /// The call ended without a leave.
     Lost(Lost),
+}
+
+/// Why a call ended without a leave: its connection was lost, and joining again failed.
+#[derive(Debug, thiserror::Error)]
+#[error("{connection}; joining again failed: {rejoin}")]
+pub struct Lost {
+    pub connection: Error,
+    pub rejoin: Error,
 }
 
 /// Whether this member is in the channel.
@@ -87,14 +95,13 @@ impl Channel {
                 Some(Announcement::Left(self.members.remove(at).name))
             }
             Event::Speaking(now) => {
-                // Voices of members gone with a lost connection may still play out.
-                self.speaking = now.iter().copied().filter(|id| self.members.iter().any(|member| member.id == *id)).collect();
+                self.speaking.clone_from(now);
                 None
             }
             Event::Reconnecting => {
                 self.state = State::Reconnecting;
                 self.speaking.clear();
-                Some(Announcement::Lost)
+                Some(Announcement::Reconnecting)
             }
             Event::Ended | Event::Lost(_) => {
                 *self = Self::default();
@@ -112,7 +119,7 @@ pub enum Announcement {
     /// Someone else left, by name.
     Left(String),
     /// The connection was lost, and the engine joins again.
-    Lost,
+    Reconnecting,
     /// The engine joined again after the connection was lost.
     Reconnected,
 }
@@ -122,7 +129,7 @@ impl fmt::Display for Announcement {
         match self {
             Self::Joined(name) => write!(f, "{name} ist beigetreten"),
             Self::Left(name) => write!(f, "{name} hat den Kanal verlassen"),
-            Self::Lost => f.write_str("Verbindung verloren"),
+            Self::Reconnecting => f.write_str("Verbindung verloren"),
             Self::Reconnected => f.write_str("Wieder verbunden"),
         }
     }
@@ -131,7 +138,6 @@ impl fmt::Display for Announcement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::Error;
 
     fn member(id: u16, name: &str) -> Member {
         Member { id: MemberId(id), name: name.into() }
@@ -170,14 +176,6 @@ mod tests {
         assert_eq!(channel.speaking(), [MemberId(1)]);
 
         assert_eq!(channel.apply(&Event::Left(MemberId(7))), None);
-    }
-
-    #[test]
-    fn shows_only_members_as_speaking() {
-        let mut channel = Channel::default();
-        channel.apply(&entered(1, &[member(1, "first"), member(3, "third")]));
-        assert_eq!(channel.apply(&Event::Speaking(vec![MemberId(1), MemberId(2), MemberId(3)])), None);
-        assert_eq!(channel.speaking(), [MemberId(1), MemberId(3)]);
     }
 
     #[test]

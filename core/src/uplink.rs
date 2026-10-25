@@ -19,7 +19,8 @@ pub fn spawn(mut frames: Consumer<Encoded>, sender: AudioSender) -> io::Result<T
                 let frame =
                     Frame { from: MemberId(0), index: frame.index, last: frame.last, level: frame.level, opus: frame.opus().to_vec() };
                 // A frame the path can't take now is lost, which the receivers conceal; while the
-                // connection is lost, until the engine joined again, they all are.
+                // connection is lost they all are, until the engine joined again or, if it
+                // couldn't, the microphone of the call that ended is dropped.
                 let _ = sender.send(&frame);
             }
             if frames.is_abandoned() {

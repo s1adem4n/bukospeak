@@ -140,7 +140,7 @@ unsafe impl Send for Foreign {}
 unsafe impl Sync for Foreign {}
 
 impl Listener for Foreign {
-    fn update(&self, update: Update<'_>) {
+    fn update(&self, update: Update) {
         let Update { channel, announcement, lost } = update;
         let members: Vec<BukoSpeakMember> = channel.members().iter().map(BukoSpeakMember::of).collect();
         let speaking: Vec<u16> = channel.speaking().iter().map(|id| id.0).collect();
