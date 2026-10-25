@@ -323,6 +323,8 @@ fn slot(index: u32) -> usize {
 struct Jitter {
     buckets: [Option<Bucket>; Jitter::BUCKETS],
     newest: u64,
+    /// The last frame's index, and its place on a timeline that doesn't wrap around.
+    last: Option<(u32, i64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -337,7 +339,10 @@ impl Jitter {
     const BUCKET_US: u64 = 200_000;
 
     fn observe(&mut self, index: u32, arrival_us: u64) {
-        let delay = arrival_us as i64 - i64::from(index) * FRAME_US as i64;
+        // Unwrapped, an index wrapping around to 0 doesn't look like a jump of 497 days.
+        let unwrapped = self.last.map_or(i64::from(index), |(last, unwrapped)| unwrapped + distance(last, index));
+        self.last = Some((index, unwrapped));
+        let delay = arrival_us as i64 - unwrapped * FRAME_US as i64;
         let id = arrival_us / Self::BUCKET_US;
         let bucket = &mut self.buckets[id as usize % Self::BUCKETS];
         match bucket {
@@ -357,7 +362,8 @@ impl Jitter {
             return MIN_TARGET;
         }
         let spread = (max - min) as u64;
-        (spread.div_ceil(FRAME_US) as u32 + 1).clamp(MIN_TARGET, MAX_TARGET)
+        // Clamped before the cast, so a huge spread can't truncate to a small target.
+        (spread.div_ceil(FRAME_US) + 1).clamp(MIN_TARGET.into(), MAX_TARGET.into()) as u32
     }
 }
 
@@ -501,6 +507,7 @@ mod tests {
         }
         let played: Vec<Played> = (0..5).map(|_| buffer.pop().into()).collect();
         assert_eq!(played, [Played::Frame(u32::MAX - 1), Played::Frame(u32::MAX), Played::Frame(0), Played::Frame(1), Played::Silent]);
+        assert_eq!(buffer.target(), MIN_TARGET);
     }
 
     #[test]
