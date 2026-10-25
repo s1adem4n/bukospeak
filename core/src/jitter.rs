@@ -78,17 +78,25 @@ pub enum Playout<'a> {
     Conceal,
 }
 
+/// What the buffer did with a sender's frames since it was created.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
+    /// Frames played as they arrived.
     pub played: u64,
+    /// Lost frames recovered by FEC.
     pub recovered: u64,
+    /// Lost frames concealed.
     pub concealed: u64,
+    /// Frames skipped because the buffer held too many.
     pub dropped: u64,
+    /// Concealed frames played in addition, because the buffer held too few or waited for a late one.
     pub inserted: u64,
     /// Frames that arrived after their turn or beyond the window held, and were thrown away.
     pub discarded: u64,
 }
 
+/// One sender's jitter buffer: [`insert`](Self::insert) frames as they arrive and
+/// [`pop`](Self::pop) what to play every 10 ms.
 pub struct JitterBuffer {
     /// Frames by index modulo [`SLOTS`]. A slot keeps its frame until another overwrites it;
     /// whether the frame is still to play follows from the state.
@@ -121,6 +129,7 @@ impl Default for JitterBuffer {
 }
 
 impl JitterBuffer {
+    /// Takes a frame that arrived, unless its turn has passed or it lies beyond the window held.
     pub fn insert(&mut self, packet: Packet) {
         // A late frame still tells how much the delay spreads.
         self.jitter.observe(packet.index, packet.arrival_us);
@@ -178,14 +187,14 @@ impl JitterBuffer {
                 self.state = State::Playing { next, concealed };
                 return Playout::Conceal;
             }
-            return self.play(next);
+            return self.play(next, last);
         }
 
         let following = next.wrapping_add(1);
         if self.pending(following).is_some() {
             self.stats.recovered += 1;
             self.state = State::Playing { next: following, concealed: 0 };
-            return Playout::Fec(self.slots[slot(following)].as_ref().expect("the following frame is held").opus());
+            return Playout::Fec(self.opus(following));
         }
 
         match self.oldest_pending() {
@@ -235,12 +244,16 @@ impl JitterBuffer {
         }
     }
 
-    fn play(&mut self, index: u32) -> Playout<'_> {
+    fn play(&mut self, index: u32, last: bool) -> Playout<'_> {
         self.stats.played += 1;
-        let last = self.pending(index).expect("the frame is held").last;
         self.state =
             if last { State::Idle { over: Some(index), waited: 0 } } else { State::Playing { next: index.wrapping_add(1), concealed: 0 } };
-        Playout::Frame(self.slots[slot(index)].as_ref().expect("the frame is held").opus())
+        Playout::Frame(self.opus(index))
+    }
+
+    /// The Opus packet of a frame known to be held.
+    fn opus(&self, index: u32) -> &[u8] {
+        self.slots[slot(index)].as_ref().expect("the frame is held").opus()
     }
 
     /// Conceals a frame, inserted or lost, with `next` to play after it; or gives up on the

@@ -45,7 +45,7 @@ impl Simulation {
         let mut random = SEED;
         let mut arrivals = Vec::new();
         while let Some(index) = sent.next() {
-            let last = sent.peek() != Some(&(index + 1));
+            let last = sent.peek() != Some(&index.wrapping_add(1));
             if (self.lost)(index) {
                 continue;
             }
