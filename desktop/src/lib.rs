@@ -19,7 +19,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, ErrorKind, Host, SampleFormat, Stream, StreamConfig, SupportedBufferSize, SupportedStreamConfigRange};
 
 use crate::convert::Format;
-use crate::lease::Lease;
+use crate::lease::{Half, Lease};
 
 /// How long a stream that couldn't be built waits before the next try.
 const RETRY: Duration = Duration::from_secs(1);
@@ -183,7 +183,7 @@ struct Side<T> {
 /// Builds a stream for a half on the chosen or default device; `broke` is its error callback.
 type Build<T> = fn(&Host, Option<&DeviceId>, Lease<T>, Box<dyn FnMut(cpal::Error) + Send>) -> Result<Stream, Error>;
 
-impl<T> Side<T> {
+impl<T: Half> Side<T> {
     fn new(direction: Direction, device: Option<DeviceId>, half: T) -> Self {
         let (back, idle) = mpsc::channel();
         back.send(half).expect("the channel was just made");
@@ -260,8 +260,6 @@ fn build_output(
     let device = device(direction, id, host.default_output_device(), host)?;
     let config = config(direction, device.supported_output_configs().map_err(|error| Error::Device(direction, error))?)?;
     let mut output = convert::Output::new(format(config)).map_err(|error| Error::Format(direction, error))?;
-    // What arrived while no stream played is too late now.
-    speaker.flush();
     let stream = device
         .build_output_stream(config, move |samples: &mut [f32], _: &_| output.pull(samples, |frame| speaker.pull(frame)), broke, None)
         .map_err(|error| Error::Device(direction, error))?;

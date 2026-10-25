@@ -84,6 +84,7 @@ impl Capture {
     /// Takes a captured frame and hands `send` what the gate lets through: nothing, the frame,
     /// or, when speech starts, the pre-roll and then the frame.
     pub fn process(&mut self, input: &[f32; FRAME_SAMPLES], mut send: impl FnMut(&Encoded)) -> Result<(), opus::Error> {
+        let index = self.take_index();
         // A NaN, infinite or huge sample from a faulty driver would turn RNNoise's state to NaN for
         // good, and NaN in its spectrum is undefined behavior in its FFT: clip to full scale, as an
         // integer device would, and take NaN for silence.
@@ -97,9 +98,6 @@ impl Capture {
 
         let level = Level::of(signal);
         let decision = self.gate.decide(voice_probability, level);
-        let index = self.next_index;
-        // The index counts a frame the encoder failed on too, so the timeline stays true.
-        self.next_index = self.next_index.wrapping_add(1);
         let mut frame = Encoded { index, last: decision == Decision::Closes, level, len: 0, opus: [0; MAX_OPUS_LEN] };
         frame.len = self.encoder.encode_float(signal, &mut frame.opus)? as u16;
 
@@ -115,6 +113,29 @@ impl Capture {
             Decision::Speaks | Decision::Closes => send(&frame),
         }
         Ok(())
+    }
+
+    /// Ends what input that stopped left unfinished, so capture can resume later: the pre-roll
+    /// is stale by then, and a talkspurt the gate holds open gets a silent last frame, which
+    /// `send` is handed.
+    pub fn end(&mut self, send: impl FnOnce(&Encoded)) -> Result<(), opus::Error> {
+        self.preroll = [None; PREROLL];
+        if !self.gate.end() {
+            return Ok(());
+        }
+        let index = self.take_index();
+        let mut frame = Encoded { index, last: true, level: Level::SILENT, len: 0, opus: [0; MAX_OPUS_LEN] };
+        frame.len = self.encoder.encode_float(&[0.0; FRAME_SAMPLES], &mut frame.opus)? as u16;
+        send(&frame);
+        Ok(())
+    }
+
+    /// The next frame's index. It counts a frame the encoder fails on too, so the timeline
+    /// stays true.
+    fn take_index(&mut self) -> u32 {
+        let index = self.next_index;
+        self.next_index = self.next_index.wrapping_add(1);
+        index
     }
 }
 
@@ -200,5 +221,31 @@ mod tests {
         for frame in sent {
             assert_eq!(frame.level, Level::of(&frames[frame.index as usize]), "frame {}", frame.index);
         }
+    }
+
+    #[test]
+    fn ending_in_speech_sends_a_silent_last_frame_and_capture_starts_anew() {
+        let mut capture = Capture::new().unwrap();
+        let mut sent = Vec::new();
+        for frame in voice(SECOND, 0.3).as_chunks().0 {
+            capture.process(frame, |encoded| sent.push(*encoded)).unwrap();
+        }
+        assert!(!sent.last().unwrap().last, "still speaking");
+        capture.end(|encoded| sent.push(*encoded)).unwrap();
+        let ended = sent.last().unwrap();
+        assert!(ended.last);
+        assert_eq!(ended.level, Level::SILENT);
+        assert_eq!(ended.index, 100);
+
+        let mut nothing = true;
+        capture.end(|_| nothing = false).unwrap();
+        assert!(nothing, "a closed gate has nothing to end");
+        let mut resumed = Vec::new();
+        for frame in voice(SECOND, 0.3).as_chunks().0 {
+            capture.process(frame, |encoded| resumed.push(*encoded)).unwrap();
+        }
+        // The input settles anew before the gate opens again, after the frame ended on.
+        let first = resumed[0].index;
+        assert!(first >= 101 + gate::SETTLE - PREROLL as u32, "resumed at frame {first}");
     }
 }

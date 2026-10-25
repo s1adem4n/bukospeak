@@ -13,11 +13,12 @@ use crate::speaking::Speaking;
 /// The engine's settings the capture follows.
 pub(crate) struct Settings {
     pub noise_suppression: AtomicBool,
+    pub muted: AtomicBool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { noise_suppression: AtomicBool::new(true) }
+        Self { noise_suppression: AtomicBool::new(true), muted: AtomicBool::new(false) }
     }
 }
 
@@ -68,13 +69,31 @@ impl Microphone {
         }
     }
 
+    /// Ends what the capture left unfinished, for when the platform's audio stops calling
+    /// [`push`](Self::push): a talkspurt gets its last frame, and this member shows as quiet.
+    pub fn stopped(&mut self) {
+        self.filled = 0;
+        let mut sent = false;
+        // As in a frame pushed, libopus fails only on arguments the fixed frame size rules out.
+        let _ = self.capture.end(|frame| {
+            send(&mut self.frames, frame);
+            sent = true;
+        });
+        self.speaking.set_you(false);
+        if sent {
+            self.uplink.0.unpark();
+        }
+    }
+
     fn process(&mut self) {
         self.capture.set_noise_suppression(self.settings.noise_suppression.load(Ordering::Relaxed));
+        if self.settings.muted.load(Ordering::Relaxed) {
+            // Muted, the microphone hears silence, and the gate ends a talkspurt as in a pause.
+            self.frame.fill(0.0);
+        }
         let mut last_sent = None;
         let processed = self.capture.process(&self.frame, |frame| {
-            // A full ring means the uplink fell a second behind: the frame is lost, as it would
-            // be on the way.
-            let _ = self.frames.push(*frame);
+            send(&mut self.frames, frame);
             last_sent = Some(frame.last);
         });
         // libopus fails only on arguments the fixed frame size rules out; such a frame is lost.
@@ -88,34 +107,80 @@ impl Microphone {
     }
 }
 
+fn send(frames: &mut Producer<Encoded>, frame: &Encoded) {
+    // A full ring means the uplink fell a second behind: the frame is lost, as it would be on
+    // the way.
+    let _ = frames.push(*frame);
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
 
     use bukospeak_proto::MemberId;
-    use bukospeak_proto::audio::SAMPLE_RATE;
-    use rtrb::RingBuffer;
+    use bukospeak_proto::audio::{Level, SAMPLE_RATE};
+    use rtrb::{Consumer, RingBuffer};
 
     use super::*;
     use crate::signal::voice;
 
+    fn microphone(settings: Arc<Settings>) -> (Microphone, Consumer<Encoded>, Arc<Speaking>) {
+        let (frames, sent) = RingBuffer::new(1000);
+        let speaking = Arc::new(Speaking::default());
+        (Microphone::new(Capture::new().unwrap(), frames, thread::current(), settings, Arc::clone(&speaking)), sent, speaking)
+    }
+
+    fn speaks(speaking: &Speaking) -> bool {
+        speaking.members(MemberId(1)) == [MemberId(1)]
+    }
+
     #[test]
     fn speech_in_buffers_of_any_length_is_framed_sent_and_shown_as_speaking() {
-        let (frames, mut sent) = RingBuffer::new(1000);
-        let speaking = Arc::new(Speaking::default());
-        let mut microphone = Microphone::new(Capture::new().unwrap(), frames, thread::current(), Arc::default(), Arc::clone(&speaking));
+        let (mut microphone, mut sent, speaking) = microphone(Arc::default());
 
         let signal = voice(SAMPLE_RATE as usize, 0.3);
         let mut spoke = false;
         // 441 samples, as a 44.1 kHz device's 10 ms would be, never line up with a frame.
         for buffer in signal.chunks(441) {
             microphone.push(buffer);
-            spoke |= speaking.members(MemberId(1)) == [MemberId(1)];
+            spoke |= speaks(&speaking);
         }
         assert!(spoke);
 
         let indices: Vec<u32> = std::iter::from_fn(|| sent.pop().ok()).map(|frame| frame.index).collect();
         assert!(indices.len() > 50, "only {} frames sent", indices.len());
         assert!(indices.windows(2).all(|pair| pair[1] == pair[0] + 1), "frames missing or out of order");
+    }
+
+    #[test]
+    fn stopping_in_speech_ends_the_talkspurt_and_shows_quiet() {
+        let (mut microphone, mut sent, speaking) = microphone(Arc::default());
+        microphone.push(&voice(SAMPLE_RATE as usize, 0.3));
+        microphone.push(&[0.1; 100]);
+        assert!(speaks(&speaking));
+        microphone.stopped();
+        assert!(!speaks(&speaking));
+        let frames: Vec<Encoded> = std::iter::from_fn(|| sent.pop().ok()).collect();
+        assert_eq!(frames.iter().filter(|frame| frame.last).count(), 1);
+        assert!(frames.last().unwrap().last);
+    }
+
+    #[test]
+    fn muted_speech_ends_after_the_hold_like_a_pause() {
+        let settings = Arc::new(Settings::default());
+        let (mut microphone, mut sent, speaking) = microphone(Arc::clone(&settings));
+        microphone.push(&voice(SAMPLE_RATE as usize, 0.3));
+        assert!(speaks(&speaking));
+        settings.muted.store(true, Ordering::Relaxed);
+        let before = std::iter::from_fn(|| sent.pop().ok()).count();
+        assert!(before > 50);
+
+        microphone.push(&voice(SAMPLE_RATE as usize, 0.3));
+        assert!(!speaks(&speaking));
+        let after: Vec<Encoded> = std::iter::from_fn(|| sent.pop().ok()).collect();
+        // The hold's 300 ms, silent once the denoiser's tail faded out, the last marking the end.
+        assert_eq!(after.len(), 30);
+        assert!(after[10..].iter().all(|frame| frame.level == Level::SILENT));
+        assert!(after.last().unwrap().last);
     }
 }

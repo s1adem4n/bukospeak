@@ -36,7 +36,8 @@ const DOWNLINK_FRAMES: usize = 50 * crate::playout::VOICES;
 /// How often the engine looks who speaks: quick enough for an indicator to feel live.
 const SPEAKING_EVERY: Duration = Duration::from_millis(50);
 
-/// Receives the engine's events, on a thread of their own, so it may call the engine.
+/// Receives the engine's events, in order, on a thread of their own, so it may call the
+/// engine; but not drop it, since dropping waits for that thread.
 pub trait Listener: Send + Sync {
     fn event(&self, event: Event);
 }
@@ -62,11 +63,27 @@ pub struct Joined {
     pub speaker: Speaker,
 }
 
+/// Joins and leaves the channel, one call at a time. Dropping it leaves the call and returns
+/// once the listener has had its last event.
 pub struct Engine {
     runtime: Runtime,
-    events: mpsc::Sender<Event>,
     settings: Arc<Settings>,
     call: Mutex<Option<Call>>,
+    // Fields drop in order: the last sender of events goes before the listener's thread, which
+    // ends with it, is waited for.
+    events: mpsc::Sender<Event>,
+    _listening: Listening,
+}
+
+/// The listener's thread, waited for when dropped.
+struct Listening(Option<thread::JoinHandle<()>>);
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        if let Some(thread) = self.0.take() {
+            thread.join().expect("the listener doesn't panic");
+        }
+    }
 }
 
 struct Call {
@@ -81,11 +98,13 @@ impl Engine {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("bukospeak-network").enable_all().build()?;
         let (events, inbox) = mpsc::channel();
-        thread::Builder::new().name("bukospeak-events".into()).spawn(move || inbox.into_iter().for_each(|event| listener.event(event)))?;
-        Ok(Self { runtime, events, settings: Arc::default(), call: Mutex::default() })
+        let listening = thread::Builder::new()
+            .name("bukospeak-events".into())
+            .spawn(move || inbox.into_iter().for_each(|event| listener.event(event)))?;
+        Ok(Self { runtime, settings: Arc::default(), call: Mutex::default(), events, _listening: Listening(Some(listening)) })
     }
 
-    /// Joins the channel, after leaving the call before if there is one.
+    /// Joins the channel, after leaving the call before if there is one. A call starts unmuted.
     pub fn join(&self, config: JoinConfig) -> Result<Joined, Error> {
         // Held until the call is in place, so a leave meanwhile, say from the listener's
         // thread, waits for the join and then ends its call instead of missing it.
@@ -96,6 +115,7 @@ impl Engine {
         let mixer = Mixer::new().expect("the decoders can be created");
 
         let session = self.runtime.block_on(Session::join(config))?;
+        self.settings.muted.store(false, Ordering::Relaxed);
         let (you, members, fingerprint) = (session.you(), session.members().to_vec(), session.fingerprint());
         let speaking = Arc::new(Speaking::default());
         let (frames, uplink_frames) = RingBuffer::new(UPLINK_FRAMES);
@@ -123,6 +143,11 @@ impl Engine {
     /// Whether the microphone's noise is suppressed (the default), or sent as captured.
     pub fn set_noise_suppression(&self, on: bool) {
         self.settings.noise_suppression.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the microphone sends silence, so a talkspurt ends as in a pause.
+    pub fn set_muted(&self, muted: bool) {
+        self.settings.muted.store(muted, Ordering::Relaxed);
     }
 
     fn end(&self, call: Option<Call>) {
@@ -355,5 +380,13 @@ mod tests {
         assert_eq!(take(&mut speaker), [(true, first), (true, second)]);
         deliveries.frame(third, packet());
         assert_eq!(take(&mut speaker), [(false, third)]);
+    }
+
+    #[test]
+    fn dropping_waits_for_the_listener() {
+        let (engine, events) = engine();
+        drop(engine);
+        // The listener, holding the only sender, is gone with its thread.
+        assert_eq!(events.try_recv().unwrap_err(), mpsc::TryRecvError::Disconnected);
     }
 }

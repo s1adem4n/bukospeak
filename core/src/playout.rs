@@ -138,31 +138,11 @@ fn limit(sample: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use bukospeak_proto::audio::{FRAME_DURATION, Level};
-    use opus::{Application, Bitrate, Encoder};
 
     use super::*;
+    use crate::signal::talkspurt;
 
     const FRAME_US: u64 = FRAME_DURATION.as_micros() as u64;
-
-    /// A talkspurt of a sine as the sender would encode it, its frames arriving 10 ms apart.
-    fn talkspurt(frames: u32, frequency: f32, amplitude: f32) -> Vec<Packet> {
-        let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip).unwrap();
-        encoder.set_bitrate(Bitrate::Bits(48_000)).unwrap();
-        encoder.set_inband_fec(true).unwrap();
-        encoder.set_packet_loss_perc(10).unwrap();
-        (0..frames)
-            .map(|index| {
-                let samples: Vec<f32> = (0..FRAME_SAMPLES)
-                    .map(|n| {
-                        let t = (index as usize * FRAME_SAMPLES + n) as f32 / SAMPLE_RATE as f32;
-                        amplitude * (std::f32::consts::TAU * frequency * t).sin()
-                    })
-                    .collect();
-                let opus = encoder.encode_vec_float(&samples, 320).unwrap();
-                Packet::new(index, index + 1 == frames, Level::of(&samples), u64::from(index) * FRAME_US, &opus).unwrap()
-            })
-            .collect()
-    }
 
     fn rms(samples: &[f32]) -> f32 {
         (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()

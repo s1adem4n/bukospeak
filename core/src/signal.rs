@@ -1,8 +1,11 @@
-//! Signals for tests, at 48 kHz in −1.0..=1.0.
+//! Signals for tests, at 48 kHz in −1.0..=1.0, and packets of them as they arrive.
 
 use std::f32::consts::{PI, TAU};
 
-use bukospeak_proto::audio::SAMPLE_RATE;
+use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES, Level, SAMPLE_RATE};
+use opus::{Application, Bitrate, Channels, Encoder};
+
+use crate::jitter::Packet;
 
 const RATE: f32 = SAMPLE_RATE as f32;
 
@@ -49,6 +52,24 @@ pub fn noise(samples: usize, peak: f32) -> Vec<f32> {
             state ^= state >> 17;
             state ^= state << 5;
             (state as f32 / u32::MAX as f32 * 2.0 - 1.0) * peak
+        })
+        .collect()
+}
+
+/// A talkspurt of a sine as the sender would encode it, its frames arriving 10 ms apart.
+pub fn talkspurt(frames: u32, frequency: f32, amplitude: f32) -> Vec<Packet> {
+    let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip).unwrap();
+    encoder.set_bitrate(Bitrate::Bits(48_000)).unwrap();
+    encoder.set_inband_fec(true).unwrap();
+    encoder.set_packet_loss_perc(10).unwrap();
+    (0..frames)
+        .map(|index| {
+            let samples: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|n| amplitude * (TAU * frequency * (index as usize * FRAME_SAMPLES + n) as f32 / RATE).sin())
+                .collect();
+            let opus = encoder.encode_vec_float(&samples, 320).unwrap();
+            let arrival_us = u64::from(index) * FRAME_DURATION.as_micros() as u64;
+            Packet::new(index, index + 1 == frames, Level::of(&samples), arrival_us, &opus).unwrap()
         })
         .collect()
 }

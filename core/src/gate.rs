@@ -95,6 +95,13 @@ impl Gate {
         decision
     }
 
+    /// Closes the gate for input that stopped, so the next frame starts anew, as after digital
+    /// silence; whether it was open, with a talkspurt to end.
+    pub fn end(&mut self) -> bool {
+        self.settling = SETTLE;
+        self.open_for.take().is_some()
+    }
+
     fn track_floor(&mut self, dbov: f32, likely_speech: bool) {
         let stretch = (self.frames / FLOOR_STRETCH) as usize % FLOOR_STRETCHES;
         if self.frames.is_multiple_of(FLOOR_STRETCH) {
@@ -162,6 +169,19 @@ mod tests {
         gate.decide(SPEECH, level(20));
         for _ in 0..HOLD {
             gate.decide(NOISE, level(70));
+        }
+        assert_eq!(gate.decide(SPEECH, level(20)), Decision::Opens);
+    }
+
+    #[test]
+    fn ending_closes_it_and_the_input_settles_anew() {
+        let mut gate = settled();
+        assert!(!gate.end());
+        gate = settled();
+        gate.decide(SPEECH, level(20));
+        assert!(gate.end());
+        for _ in 0..SETTLE {
+            assert_eq!(gate.decide(SPEECH, level(20)), Decision::Quiet);
         }
         assert_eq!(gate.decide(SPEECH, level(20)), Decision::Opens);
     }

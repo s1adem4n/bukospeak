@@ -25,14 +25,20 @@ pub struct Speaker {
     frame: [f32; FRAME_SAMPLES],
     played: usize,
     speaking: Arc<Speaking>,
+    /// Whether the platform's audio stopped calling [`pull`](Self::pull) since it last did.
+    stopped: bool,
 }
 
 impl Speaker {
     pub(crate) fn new(mixer: Mixer, downlink: Consumer<Downlink>, speaking: Arc<Speaking>) -> Self {
-        Self { mixer, downlink, frame: [0.0; FRAME_SAMPLES], played: FRAME_SAMPLES, speaking }
+        Self { mixer, downlink, frame: [0.0; FRAME_SAMPLES], played: FRAME_SAMPLES, speaking, stopped: false }
     }
 
     pub fn pull(&mut self, mut samples: &mut [f32]) {
+        if self.stopped {
+            self.stopped = false;
+            self.flush();
+        }
         while !samples.is_empty() {
             if self.played == FRAME_SAMPLES {
                 self.render();
@@ -45,9 +51,14 @@ impl Speaker {
         }
     }
 
-    /// Forgets the frames held and arriving so far, for a speaker that resumes after its audio
-    /// stopped: they are too late to play.
-    pub fn flush(&mut self) {
+    /// For when the platform's audio stops calling [`pull`](Self::pull): nobody shows as
+    /// speaking meanwhile, and what arrived by the time it resumes is too late to play.
+    pub fn stopped(&mut self) {
+        self.stopped = true;
+        self.speaking.set_voices(std::iter::empty());
+    }
+
+    fn flush(&mut self) {
         while let Ok(delivered) = self.downlink.pop() {
             if let Downlink::Left(member) = delivered {
                 self.mixer.remove(member);
@@ -55,7 +66,6 @@ impl Speaker {
         }
         self.mixer.flush();
         self.played = FRAME_SAMPLES;
-        self.speaking.set_voices(std::iter::empty());
     }
 
     fn render(&mut self) {
@@ -69,5 +79,38 @@ impl Speaker {
         self.mixer.render(&mut self.frame);
         self.played = 0;
         self.speaking.set_voices(self.mixer.speaking());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rtrb::RingBuffer;
+
+    use super::*;
+    use crate::signal::talkspurt;
+
+    #[test]
+    fn a_stopped_speaker_shows_nobody_and_resumes_without_what_arrived_meanwhile() {
+        let (mut downlink, delivered) = RingBuffer::new(100);
+        let speaking = Arc::new(Speaking::default());
+        let mut speaker = Speaker::new(Mixer::new().unwrap(), delivered, Arc::clone(&speaking));
+        let (member, you) = (MemberId(2), MemberId(1));
+        let packets = talkspurt(60, 440.0, 0.5);
+        let mut played = [0.0; FRAME_SAMPLES];
+        for packet in &packets[..20] {
+            downlink.push(Downlink::Frame(member, *packet)).unwrap();
+            speaker.pull(&mut played);
+        }
+        assert_eq!(speaking.members(you), [member]);
+        assert!(played.iter().any(|&sample| sample != 0.0));
+
+        speaker.stopped();
+        assert!(speaking.members(you).is_empty());
+        for packet in &packets[20..] {
+            downlink.push(Downlink::Frame(member, *packet)).unwrap();
+        }
+        speaker.pull(&mut played);
+        assert!(played.iter().all(|&sample| sample == 0.0));
+        assert!(speaking.members(you).is_empty());
     }
 }
