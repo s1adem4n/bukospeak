@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 bukospeak-proto.workspace = true
+nnnoiseless.workspace = true
 opus.workspace = true
 bytes.workspace = true
 quinn.workspace = true
