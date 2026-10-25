@@ -123,6 +123,8 @@ pub struct Room {
     /// Output callbacks that come so late, as `(callback, buffers)`, that the device plays this
     /// many buffers of silence before what they ask for.
     pub output_stalls: &'static [(usize, usize)],
+    /// Seeds the jitter, so every run with the same has the same.
+    pub seed: u64,
 }
 
 impl Default for Room {
@@ -139,6 +141,7 @@ impl Default for Room {
             timestamp_jitter_us: 200,
             input_lost: &[],
             output_stalls: &[],
+            seed: SEED,
         }
     }
 }
@@ -155,7 +158,7 @@ impl Room {
         mut play: impl FnMut(Duration, &mut [f32]),
         mut capture: impl FnMut(Duration, &[f32]),
     ) {
-        let mut random = SEED;
+        let mut random = self.seed;
         let mut uniform = move |range_us: u64| {
             if range_us == 0 { 0.0 } else { (next_random(&mut random) % (range_us + 1)) as f64 / 1e6 }
         };

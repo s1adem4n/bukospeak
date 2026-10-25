@@ -12,7 +12,7 @@
 //! starts anew where the device lost samples; the reference is resampled from the speaker's line
 //! to the microphone's. Nothing here allocates after construction.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bukospeak_proto::audio::{FRAME_SAMPLES, SAMPLE_RATE};
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -32,9 +32,9 @@ const LEAD_SECONDS: f64 = 0.005;
 /// warm up.
 const HORIZON_SECONDS: f64 = 30.0;
 
-/// How far a device's rate may be from the nominal, or from the rate before its callbacks
-/// stopped, as a standard deviation: 300 ppm. A line holds to that rate while the times told
-/// say less about it, as when they are few or noisy.
+/// How far a device's rate may be from the nominal, as a standard deviation: 300 ppm. A line
+/// holds to the nominal while the times told say less about the rate, as when they are few or
+/// noisy.
 const PRIOR_DEVIATION: f64 = 300e-6;
 
 /// The least noise the times told are taken to have: 20 µs, so a line doesn't trust a few
@@ -55,21 +55,56 @@ const SETTLE_TOLD: u32 = 10;
 pub(crate) fn reference() -> (Tap, Reference) {
     let (producer, consumer) = RingBuffer::new(RING_FRAMES);
     let epoch = Instant::now();
-    (
-        Tap { ring: producer, line: Line::new(), index: 0, epoch },
-        Reference { ring: consumer, line: Line::new(), captured: 0, read: 0, epoch },
-    )
+    (Tap { ring: producer, clock: Clock::new(epoch) }, Reference { ring: consumer, clock: Clock::new(epoch) })
 }
 
-/// A frame the speaker mixed, where it is in what the speaker played, and when it plays by the
-/// speaker's line.
+/// A frame the speaker mixed, and when it plays by the speaker's line.
 struct Played {
     samples: [f32; FRAME_SAMPLES],
-    index: u64,
     /// In seconds since the epoch.
     at: f64,
     /// The speaker's samples per second.
     rate: f64,
+}
+
+/// When a device's samples pass, by the times the platform tells for its callbacks, and where
+/// the next frame starts among them.
+struct Clock {
+    line: Line,
+    epoch: Instant,
+    /// The samples the callbacks handed over or asked for since they started, and the index of
+    /// the next frame's first sample among them.
+    samples: u64,
+    frame: u64,
+}
+
+impl Clock {
+    fn new(epoch: Instant) -> Self {
+        Self { line: Line::new(), epoch, samples: 0, frame: 0 }
+    }
+
+    /// Takes a callback's `samples`, the first of which passes at `at`.
+    fn tell(&mut self, samples: usize, at: Instant) {
+        let seconds = match at.checked_duration_since(self.epoch) {
+            Some(after) => after.as_secs_f64(),
+            None => -self.epoch.duration_since(at).as_secs_f64(),
+        };
+        self.line.tell(self.samples, seconds);
+        self.samples += samples as u64;
+    }
+
+    /// When the next frame's first sample passes, in seconds since the epoch; None until told.
+    fn next_frame(&mut self) -> Option<f64> {
+        let at = self.line.seconds_at(self.frame as f64);
+        self.frame += FRAME_SAMPLES as u64;
+        at
+    }
+
+    /// For when the callbacks stop, and may come back from another device: the samples after
+    /// count anew.
+    fn stopped(&mut self) {
+        *self = Self::new(self.epoch);
+    }
 }
 
 /// When a device's samples pass: a line through the times told for them, weighted to the
@@ -78,11 +113,12 @@ struct Played {
 struct Line {
     told: u32,
     /// The mean of the samples' indices and of their times told, in seconds since the epoch;
-    /// the co-moment of the two, and the indices' second moment.
+    /// the co-moment of the two, and each one's second moment.
     mean_index: f64,
     mean_seconds: f64,
     co_moment: f64,
     index_moment: f64,
+    seconds_moment: f64,
     /// The sum of the times' squared weights, whose inverse is how many times the line is
     /// effectively made of.
     squared_weights: f64,
@@ -91,8 +127,6 @@ struct Line {
     /// inverse of its variance; that fades as the times told before it would have.
     prior: f64,
     prior_precision: f64,
-    /// The mean square of how far the times told are off the line.
-    noise: f64,
     off: Option<Off>,
 }
 
@@ -108,21 +142,21 @@ struct Off {
 impl Line {
     fn new() -> Self {
         let nominal = 1.0 / f64::from(SAMPLE_RATE);
-        Self::holding_to(nominal, (nominal * PRIOR_DEVIATION).powi(-2), 0.0)
+        Self::holding_to(nominal, (nominal * PRIOR_DEVIATION).powi(-2))
     }
 
-    fn holding_to(prior: f64, prior_precision: f64, noise: f64) -> Self {
+    fn holding_to(prior: f64, prior_precision: f64) -> Self {
         Self {
             told: 0,
             mean_index: 0.0,
             mean_seconds: 0.0,
             co_moment: 0.0,
             index_moment: 0.0,
+            seconds_moment: 0.0,
             squared_weights: 0.0,
             last_seconds: 0.0,
             prior,
             prior_precision,
-            noise,
             off: None,
         }
     }
@@ -130,10 +164,13 @@ impl Line {
     /// Takes the time the platform told for the sample with this index.
     fn tell(&mut self, index: u64, seconds: f64) {
         let index = index as f64;
-        let mut off = None;
+        // Times a horizon apart say nothing of each other.
+        if self.told > 0 && seconds - self.last_seconds >= HORIZON_SECONDS {
+            *self = Self::new();
+        }
         if self.told >= SETTLE_TOLD {
             let by = seconds - self.on_line(index);
-            if by.abs() > OFF_SECONDS.max(OFF_NOISE * self.noise.sqrt()) {
+            if by.abs() > OFF_SECONDS.max(OFF_NOISE * self.noise().sqrt()) {
                 let in_a_row = self.off.map_or(0, |off| off.in_a_row) + 1;
                 self.off = Some(Off { index, seconds, in_a_row });
                 if in_a_row < OFF_IN_A_ROW {
@@ -141,13 +178,12 @@ impl Line {
                 }
                 // The device lost or skipped samples: the line moved, but its rate didn't.
                 let precision = self.fit_precision() + self.prior_precision;
-                *self = Self::holding_to(self.seconds_per_sample(), precision, self.noise);
+                *self = Self::holding_to(self.seconds_per_sample(), precision);
             } else {
                 self.off = None;
-                off = Some(by);
             }
         }
-        let forget = if self.told == 0 { 0.0 } else { ((seconds - self.last_seconds) / HORIZON_SECONDS).clamp(0.0, 1.0) };
+        let forget = if self.told == 0 { 0.0 } else { ((seconds - self.last_seconds) / HORIZON_SECONDS).max(0.0) };
         self.told = self.told.saturating_add(1);
         let weight = (1.0 / f64::from(self.told)).max(forget);
         self.last_seconds = seconds;
@@ -158,23 +194,29 @@ impl Line {
         self.mean_seconds += weight * seconds_off;
         self.co_moment = (1.0 - weight) * (self.co_moment + weight * index_off * seconds_off);
         self.index_moment = (1.0 - weight) * (self.index_moment + weight * index_off * index_off);
+        self.seconds_moment = (1.0 - weight) * (self.seconds_moment + weight * seconds_off * seconds_off);
         self.squared_weights = (1.0 - weight).powi(2) * self.squared_weights + weight * weight;
-        if let Some(off) = off {
-            self.noise += weight * (off * off - self.noise);
-        }
     }
 
-    /// Starts anew, for a device whose callbacks stopped and may come back from another
-    /// device: holding to the rate so far, as loosely as to the nominal.
-    fn restart(&mut self) {
-        let prior = self.seconds_per_sample();
-        *self = Self::holding_to(prior, (prior * PRIOR_DEVIATION).powi(-2), 0.0);
+    /// The mean square of how far the times told are off the line, unbiased for the two
+    /// parameters the line takes from them; 0 until they say.
+    fn noise(&self) -> f64 {
+        let left = 1.0 - 2.0 * self.squared_weights;
+        if self.index_moment > 0.0 && left > 0.0 {
+            ((self.seconds_moment - self.co_moment * self.co_moment / self.index_moment) / left).max(0.0)
+        } else {
+            0.0
+        }
     }
 
     /// How precisely the times told give the rate, as the inverse of its variance: by how many
     /// they are, how far apart and how noisy.
     fn fit_precision(&self) -> f64 {
-        if self.index_moment > 0.0 { self.index_moment / (self.squared_weights * self.noise.max(LEAST_NOISE_SECONDS.powi(2))) } else { 0.0 }
+        if self.index_moment > 0.0 {
+            self.index_moment / (self.squared_weights * self.noise().max(LEAST_NOISE_SECONDS.powi(2)))
+        } else {
+            0.0
+        }
     }
 
     /// The fitted rate and the prior, each weighted by how precisely it is known.
@@ -201,76 +243,57 @@ impl Line {
     }
 }
 
-/// How long `samples` take at 48 kHz.
-pub(crate) fn duration_of(samples: usize) -> Duration {
-    Duration::from_nanos(samples as u64 * 1_000_000_000 / u64::from(SAMPLE_RATE))
-}
-
-fn seconds_since(epoch: Instant, at: Instant) -> f64 {
-    match at.checked_duration_since(epoch) {
-        Some(after) => after.as_secs_f64(),
-        None => -epoch.duration_since(at).as_secs_f64(),
-    }
-}
-
 /// The speaker's end: hands over each frame it mixed, with when it plays.
 pub(crate) struct Tap {
     ring: Producer<Played>,
-    line: Line,
-    /// The index of the next frame's first sample in what the speaker played.
-    index: u64,
-    epoch: Instant,
+    clock: Clock,
 }
 
 impl Tap {
-    /// Hands over a frame the speaker mixed, whose first sample plays at `plays`.
-    pub fn push(&mut self, frame: &[f32; FRAME_SAMPLES], plays: Instant) {
-        self.line.tell(self.index, seconds_since(self.epoch, plays));
-        let at = self.line.seconds_at(self.index as f64).expect("the line was just told");
-        let played = Played { samples: *frame, index: self.index, at, rate: self.line.rate() };
-        self.index += FRAME_SAMPLES as u64;
+    /// Counts `samples` the platform's render callback asks for, the first of which plays at
+    /// `plays`.
+    pub fn plays(&mut self, samples: usize, plays: Instant) {
+        self.clock.tell(samples, plays);
+    }
+
+    /// Hands over the next frame the speaker mixed, which plays right after the one before,
+    /// among the samples counted.
+    pub fn push(&mut self, frame: &[f32; FRAME_SAMPLES]) {
+        let at = self.clock.next_frame().expect("the speaker counts the samples asked for before it mixes them");
         // A full ring means the capture stopped reading; it reads by time, and finds the frames
         // missing silent.
-        let _ = self.ring.push(played);
+        let _ = self.ring.push(Played { samples: *frame, at, rate: self.clock.line.rate() });
     }
 
     /// For when the platform's render callback stops calling.
     pub fn stopped(&mut self) {
-        self.line.restart();
+        self.clock.stopped();
     }
 }
 
 /// The capture's end: what the speaker played as each frame was captured.
 pub(crate) struct Reference {
     ring: Consumer<Played>,
-    line: Line,
-    /// The samples captured, and those of them read for, since the capture started.
-    captured: u64,
-    read: u64,
-    epoch: Instant,
+    clock: Clock,
 }
 
 impl Reference {
     /// Counts `samples` the platform's capture callback hands over, the first of them captured
     /// at `at`.
     pub fn captured(&mut self, samples: usize, at: Instant) {
-        self.line.tell(self.captured, seconds_since(self.epoch, at));
-        self.captured += samples as u64;
+        self.clock.tell(samples, at);
     }
 
-    /// For when the platform's capture callback stops calling: the samples after count anew.
+    /// For when the platform's capture callback stops calling.
     pub fn stopped(&mut self) {
-        self.line.restart();
-        (self.captured, self.read) = (0, 0);
+        self.clock.stopped();
     }
 
     /// Reads the reference for the next captured frame: what the speaker played as it was
     /// captured, and silence where the speaker played nothing.
     pub fn read(&mut self, frame: &mut [f32; FRAME_SAMPLES]) {
         frame.fill(0.0);
-        let index = self.read;
-        self.read += FRAME_SAMPLES as u64;
-        let Some(captured_at) = self.line.seconds_at(index as f64) else {
+        let Some(captured_at) = self.clock.next_frame() else {
             return;
         };
         let at = captured_at + LEAD_SECONDS;
@@ -288,23 +311,21 @@ impl Reference {
         let Some(front) = first.first() else {
             return;
         };
-        let start = front.index as f64 + (at - front.at) * front.rate;
-        let step = front.rate / self.line.rate();
-        // The speaker's sample with this index, if the ring holds it.
-        let sample = |index: f64| -> f32 {
-            if index < front.index as f64 {
+        // Where the reference starts among the samples from the front's first on.
+        let start = (at - front.at) * front.rate;
+        let step = front.rate / self.clock.line.rate();
+        // The speaker's sample at this position, if the ring holds it.
+        let sample = |position: f64| -> f32 {
+            if position < 0.0 {
                 return 0.0;
             }
-            let offset = (index as u64 - front.index) as usize;
+            let offset = position as usize;
             let frame = offset / FRAME_SAMPLES;
             let played = if frame < first.len() { first.get(frame) } else { second.get(frame - first.len()) };
-            // A frame the ring dropped, a restart of the speaker's count, or one that plays
-            // apart from the front's line, as after the speaker skipped, leaves a gap.
+            // A frame the ring dropped, or one that plays apart from the front's line, as after
+            // the speaker stalled or restarted, leaves a gap.
             played
-                .filter(|played| {
-                    let after = (frame * FRAME_SAMPLES) as u64;
-                    played.index == front.index + after && (played.at - (front.at + after as f64 / front.rate)).abs() <= OFF_SECONDS
-                })
+                .filter(|played| (played.at - (front.at + (frame * FRAME_SAMPLES) as f64 / front.rate)).abs() <= OFF_SECONDS)
                 .map_or(0.0, |played| played.samples[offset % FRAME_SAMPLES])
         };
         for (n, out) in frame.iter_mut().enumerate() {
@@ -355,6 +376,7 @@ impl EchoCanceller {
 #[cfg(test)]
 mod tests {
     use std::f32::consts::TAU;
+    use std::time::Duration;
 
     use super::*;
     use crate::signal::{noise, noise_from, voice};
@@ -383,10 +405,11 @@ mod tests {
             duration_us,
             |plays, samples| {
                 // As the speaker does: mixes a frame when it played the one before.
-                for (offset, sample) in samples.iter_mut().enumerate() {
+                tap.plays(samples.len(), start + plays);
+                for sample in samples {
                     if played == FRAME_SAMPLES {
                         mixed = far_frames.next().copied().unwrap_or([0.0; FRAME_SAMPLES]);
-                        tap.push(&mixed, start + plays + duration_of(offset));
+                        tap.push(&mixed);
                         played = 0;
                     }
                     *sample = mixed[played];
@@ -427,7 +450,13 @@ mod tests {
         let off = misaligned(room, 60);
         let misaligned: Vec<(usize, f32)> =
             off.iter().copied().enumerate().skip(settle * 100).filter(|&(_, off)| off.is_nan() || off.abs() > samples).collect();
-        assert!(misaligned.len() <= but, "{} frames misaligned, the first {:?}", misaligned.len(), &misaligned[..misaligned.len().min(10)]);
+        assert!(
+            misaligned.len() <= but,
+            "seed {}: {} frames misaligned, the first {:?}",
+            room.seed,
+            misaligned.len(),
+            &misaligned[..misaligned.len().min(10)]
+        );
     }
 
     #[test]
@@ -448,15 +477,19 @@ mod tests {
 
     #[test]
     fn the_reference_stays_aligned_through_noisy_times_and_late_callbacks() {
-        // Times 2 ms off leave the lines off by a few samples.
-        let noisy = Room {
-            output_drift_ppm: -250.0,
-            input_drift_ppm: 250.0,
-            timestamp_jitter_us: 2_000,
-            callback_jitter_us: 8_000,
-            ..Room::default()
-        };
-        assert_aligned(&noisy, 10, 8.0, 0);
+        // Times 2 ms off leave the lines off by a few samples, and up to 13 in the worst minute
+        // of these.
+        for seed in 1..=12 {
+            let noisy = Room {
+                output_drift_ppm: -250.0,
+                input_drift_ppm: 250.0,
+                timestamp_jitter_us: 2_000,
+                callback_jitter_us: 8_000,
+                seed,
+                ..Room::default()
+            };
+            assert_aligned(&noisy, 10, 16.0, 0);
+        }
     }
 
     #[test]
@@ -504,6 +537,16 @@ mod tests {
         let off_us = (line.seconds_at(index).unwrap() - (index / rate + 0.01)).abs() * 1e6;
         assert!(off_us <= 1_000.0, "{off_us:.0} µs off after the gap");
         assert!((line.rate() / rate - 1.0).abs() <= 3e-6, "the rate is held");
+    }
+
+    #[test]
+    fn a_line_told_after_a_long_pause_starts_anew() {
+        let mut line = Line::new();
+        line.tell(0, 0.0);
+        line.tell(480, 40.0);
+        let off_us = (line.seconds_at(480.0).unwrap() - 40.0).abs() * 1e6;
+        assert!(off_us <= 1.0, "{off_us} µs off");
+        assert!((line.rate() - 48_000.0).abs() < 1.0);
     }
 
     /// What the microphone captured and what is left after echo cancellation.
@@ -640,7 +683,8 @@ mod tests {
         assert_no_alloc::assert_no_alloc(|| {
             for (index, played) in frames.iter().enumerate() {
                 let now = start + Duration::from_millis(10 * index as u64);
-                tap.push(played, now + Duration::from_millis(30));
+                tap.plays(FRAME_SAMPLES, now + Duration::from_millis(30));
+                tap.push(played);
                 reference.captured(FRAME_SAMPLES, now - Duration::from_millis(10));
                 reference.read(&mut frame);
                 canceller.render(&frame);

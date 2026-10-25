@@ -217,7 +217,8 @@ mod tests {
         for (index, played) in frames.iter().enumerate() {
             let now = start + Duration::from_millis(10 * index as u64);
             // Each frame plays 30 ms after it is mixed, and its echo is captured as it plays.
-            tap.push(played, now + Duration::from_millis(30));
+            tap.plays(FRAME_SAMPLES, now + Duration::from_millis(30));
+            tap.push(played);
             let echo = index.checked_sub(3).map_or([0.0; FRAME_SAMPLES], |played| frames[played].map(|sample| 0.5 * sample));
             conditioner.set_echo_cancellation(!(10..20).contains(&(index / 100)));
             conditioner.captured(FRAME_SAMPLES, now);

@@ -7,7 +7,7 @@ use bukospeak_proto::MemberId;
 use bukospeak_proto::audio::FRAME_SAMPLES;
 use rtrb::Consumer;
 
-use crate::echo::{Tap, duration_of};
+use crate::echo::Tap;
 use crate::jitter::Packet;
 use crate::playout::Mixer;
 use crate::speaking::Speaking;
@@ -45,16 +45,17 @@ impl Speaker {
             self.stopped = false;
             self.flush();
         }
-        let mut filled = 0;
+        if let Some(tap) = &mut self.tap {
+            tap.plays(samples.len(), plays);
+        }
         while !samples.is_empty() {
             if self.played == FRAME_SAMPLES {
-                self.render(plays + duration_of(filled));
+                self.render();
             }
             let take = (FRAME_SAMPLES - self.played).min(samples.len());
             let (now, rest) = samples.split_at_mut(take);
             now.copy_from_slice(&self.frame[self.played..][..take]);
             self.played += take;
-            filled += take;
             samples = rest;
         }
     }
@@ -79,8 +80,8 @@ impl Speaker {
         self.played = FRAME_SAMPLES;
     }
 
-    /// Mixes the next frame, which starts playing at `plays`.
-    fn render(&mut self, plays: Instant) {
+    /// Mixes the next frame.
+    fn render(&mut self) {
         while let Ok(delivered) = self.downlink.pop() {
             match delivered {
                 // Every other member the server admits has a voice, so the insert can't fail.
@@ -90,7 +91,7 @@ impl Speaker {
         }
         self.mixer.render(&mut self.frame);
         if let Some(tap) = &mut self.tap {
-            tap.push(&self.frame, plays);
+            tap.push(&self.frame);
         }
         self.played = 0;
         self.speaking.set_voices(self.mixer.speaking());
