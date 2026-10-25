@@ -233,8 +233,9 @@ impl Deliveries {
 mod tests {
     use std::time::Instant;
 
-    use bukospeak_proto::audio::SAMPLE_RATE;
+    use bukospeak_proto::audio::{Level, SAMPLE_RATE};
     use bukospeak_server::{Identity, Room};
+    use rtrb::Consumer;
 
     use super::*;
     use crate::signal::voice;
@@ -323,5 +324,36 @@ mod tests {
             _ => None,
         });
         assert_eq!(left, talking.you);
+    }
+
+    /// What the speaker takes from the ring now, as `(was a leave, member)`.
+    fn take(ring: &mut Consumer<Downlink>) -> Vec<(bool, MemberId)> {
+        std::iter::from_fn(|| ring.pop().ok())
+            .map(|delivered| match delivered {
+                Downlink::Frame(from, _) => (false, from),
+                Downlink::Left(member) => (true, member),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn leaves_the_full_ring_refuses_wait_and_arrive_in_order_once_it_has_room() {
+        let (ring, mut speaker) = RingBuffer::new(2);
+        let mut deliveries = Deliveries::new(ring);
+        let packet = || Packet::new(0, false, Level::new(20), 0, &[0]).unwrap();
+        let (first, second, third) = (MemberId(1), MemberId(2), MemberId(3));
+
+        deliveries.frame(first, packet());
+        deliveries.frame(second, packet());
+        deliveries.left(first);
+        deliveries.left(second);
+        // A frame the full ring refuses is lost.
+        deliveries.frame(third, packet());
+        assert_eq!(take(&mut speaker), [(false, first), (false, second)]);
+
+        deliveries.retry();
+        assert_eq!(take(&mut speaker), [(true, first), (true, second)]);
+        deliveries.frame(third, packet());
+        assert_eq!(take(&mut speaker), [(false, third)]);
     }
 }
