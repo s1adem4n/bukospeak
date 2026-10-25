@@ -4,16 +4,6 @@
 //! Linux shows it through the StatusNotifierItem interface over D-Bus, which its desktops' trays
 //! read; Windows and macOS through their own tray, which `tray-icon` draws.
 
-use futures::channel::mpsc::UnboundedSender;
-
-/// What the tray asks the app to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    Open,
-    ToggleMute,
-    Quit,
-}
-
 const OPEN: &str = "Öffnen";
 const MUTE: &str = "Stummschalten";
 const QUIT: &str = "Beenden";
@@ -21,12 +11,6 @@ const QUIT: &str = "Beenden";
 /// The tray's icon, the microphone of the app's icon, 64 pixels square, as RGBA.
 const ICON: &[u8] = include_bytes!("../assets/tray.rgba");
 const ICON_SIZE: u32 = 64;
-
-/// Sends an action to the app; one sent while the app quits has no one left to do it.
-fn send(actions: &UnboundedSender<Action>, action: Action) {
-    // A closed channel means the app is quitting, which nothing in the tray changes.
-    let _ = actions.unbounded_send(action);
-}
 
 pub use platform::Tray;
 
@@ -36,7 +20,8 @@ mod platform {
     use ksni::blocking::{Handle, TrayMethods};
     use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
 
-    use super::{Action, ICON, ICON_SIZE, MUTE, OPEN, QUIT, send};
+    use super::{ICON, ICON_SIZE, MUTE, OPEN, QUIT};
+    use crate::{Action, send};
 
     struct Item {
         muted: bool,
@@ -116,7 +101,8 @@ mod platform {
     use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-    use super::{Action, ICON, ICON_SIZE, MUTE, OPEN, QUIT, send};
+    use super::{ICON, ICON_SIZE, MUTE, OPEN, QUIT};
+    use crate::{Action, send};
 
     pub struct Tray {
         mute: CheckMenuItem,

@@ -24,9 +24,11 @@ cpal = "0.18.2"
 ctrlc = "3.5.2"
 dirs = "7.0.0"
 futures = "0.3.34"
+global-hotkey = "0.9.0"
 # GPUI and its components; gpui-pre is a weekly snapshot of Zed's main whose API changes, so
 # the version is exact and an upgrade is a step of its own.
 gpui-kit = "=0.8.0"
+interprocess = "2.4.7"
 keyring = "4.2.0"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 nnnoiseless = { version = "0.5.2", default-features = false }
