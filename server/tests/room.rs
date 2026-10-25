@@ -58,6 +58,13 @@ async fn a_wrong_room_key_is_turned_away() {
 }
 
 #[tokio::test]
+async fn a_name_with_control_characters_is_turned_away() {
+    let server = serve();
+    let joined = Session::join(config(&server, "first\u{1b}[2J")).await;
+    assert!(matches!(joined, Err(Error::Rejected(Rejection::Name))));
+}
+
+#[tokio::test]
 async fn the_first_join_learns_the_fingerprint_and_a_changed_one_is_refused() {
     let server = serve();
     let first = Session::join(JoinConfig { pin: None, ..config(&server, "first") }).await.unwrap();

@@ -50,7 +50,7 @@ pub enum Rejection {
     Version,
     #[error("the room key is wrong")]
     RoomKey,
-    #[error("a name has 1 to {MAX_NAME_CHARS} characters")]
+    #[error("a name has 1 to {MAX_NAME_CHARS} characters, none of them control characters")]
     Name,
     #[error("the channel is full")]
     Full,
