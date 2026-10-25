@@ -4,8 +4,6 @@
 mod certificate;
 mod channel;
 mod glyph;
-
-pub use glyph::Assets;
 mod member;
 mod settings;
 mod text;
@@ -15,7 +13,7 @@ mod welcome;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bukospeak_desktop::call::{Call, Devices, Failure, Happening, Join, Phase};
+use bukospeak_desktop::call::{Call, Failure, Happening, Phase};
 use bukospeak_desktop::settings::{self as stored, Settings};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -28,6 +26,7 @@ use gpui_kit::{
     ParentElement, Render, Styled, Subscription, Task, Window, actions, div,
 };
 
+pub use crate::ui::glyph::Assets;
 use crate::ui::glyph::Glyph;
 
 /// The microphone of the app's icon, cut out, as the iOS app shows it.
@@ -50,17 +49,9 @@ pub enum Trouble {
     /// The settings file couldn't be read: the app starts from the defaults.
     Unreadable,
     NotSaved,
+    /// The keyring couldn't be read: the room key is to be given anew.
+    RoomKeyUnreadable,
     RoomKeyNotKept,
-}
-
-impl Trouble {
-    fn text(self) -> &'static str {
-        match self {
-            Self::Unreadable => "Einstellungen nicht lesbar",
-            Self::NotSaved => "Einstellungen nicht gespeichert",
-            Self::RoomKeyNotKept => "Raumschlüssel nicht gespeichert",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,9 +116,9 @@ enum Screen {
 pub struct Main {
     call: Call,
     settings: Settings,
-    /// Where the settings are kept; None if the system has no config folder.
-    settings_path: Option<PathBuf>,
-    room_key: String,
+    settings_path: PathBuf,
+    /// The room key; None until the keyring answered, or one is given before.
+    room_key: Option<String>,
     screen: Screen,
     trouble: Option<Trouble>,
     mark: Arc<Image>,
@@ -142,7 +133,7 @@ impl Main {
         call: Call,
         mut happenings: UnboundedReceiver<Happening>,
         settings: Settings,
-        settings_path: Option<PathBuf>,
+        settings_path: PathBuf,
         trouble: Option<Trouble>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -163,22 +154,9 @@ impl Main {
         });
         // The keyring may ask the system, and the system the user: not on the window's thread.
         let room_key = cx.spawn_in(window, async move |this, cx| {
-            let key = cx.background_spawn(async { stored::room_key() }).await;
+            let read = cx.background_spawn(async { stored::room_key() }).await;
             // The window may be gone before the keyring answered.
-            let _ = this.update_in(cx, |main, window, cx| {
-                match key {
-                    Ok(key) => main.room_key = key.unwrap_or_default(),
-                    Err(error) => {
-                        tracing::warn!("the room key isn't readable: {error}");
-                        main.trouble = Some(Trouble::RoomKeyNotKept);
-                    }
-                }
-                if matches!(main.screen, Screen::Channel) && main.room_key.is_empty() {
-                    main.welcome(Step::Place, window, cx);
-                }
-                main.watch();
-                cx.notify();
-            });
+            let _ = this.update_in(cx, |main, window, cx| main.read_room_key(read, window, cx));
         });
         let appearance = cx.observe_window_appearance(window, |_, window, cx| Theme::sync_system_appearance(Some(window), cx));
         let focus = cx.focus_handle();
@@ -187,7 +165,7 @@ impl Main {
             call,
             settings,
             settings_path,
-            room_key: String::new(),
+            room_key: None,
             screen: Screen::Channel,
             trouble,
             mark: Arc::new(Image::from_bytes(ImageFormat::Png, MARK.to_vec())),
@@ -204,18 +182,59 @@ impl Main {
         main
     }
 
-    fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings.is_complete(&self.room_key) {
-            self.trouble = None;
-            self.call.join(self.request());
+    /// Takes in the room key the keyring kept, unless one was given meanwhile, into an open
+    /// form's field too while it is empty; asks for it if there is none.
+    fn read_room_key(&mut self, read: Result<Option<String>, stored::Error>, window: &mut Window, cx: &mut Context<Self>) {
+        let key = read.unwrap_or_else(|error| {
+            tracing::warn!("the room key isn't readable: {error}");
+            self.trouble = Some(Trouble::RoomKeyUnreadable);
+            None
+        });
+        if self.room_key.is_some() {
+            return;
+        }
+        let key = key.unwrap_or_default();
+        if let Screen::Welcome(form, _) | Screen::Settings(form) = &self.screen
+            && form.value(Field::RoomKey, cx).is_empty()
+        {
+            form.room_key.update(cx, |input, cx| input.set_value(key.clone(), window, cx));
+        }
+        self.room_key = Some(key);
+        if matches!(self.screen, Screen::Channel)
+            && let Some(step) = self.missing()
+        {
+            self.welcome(step, window, cx);
+        }
+        self.watch();
+        cx.notify();
+    }
+
+    fn room_key(&self) -> &str {
+        self.room_key.as_deref().unwrap_or_default()
+    }
+
+    /// The welcome's step that asks for what is missing to join, if anything is.
+    fn missing(&self) -> Option<Step> {
+        if self.settings.name.trim().is_empty() {
+            Some(Step::Name)
         } else {
-            self.welcome(if self.settings.name.trim().is_empty() { Step::Name } else { Step::Place }, window, cx);
+            (!self.settings.is_complete(self.room_key())).then_some(Step::Place)
+        }
+    }
+
+    fn join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.missing() {
+            Some(step) => self.welcome(step, window, cx),
+            None => {
+                self.trouble = None;
+                self.call.join(self.settings.join(self.room_key()));
+            }
         }
         cx.notify();
     }
 
     fn trust(&mut self, cx: &mut Context<Self>) {
-        self.call.trust(self.request());
+        self.call.trust(self.settings.join(self.room_key()));
         cx.notify();
     }
 
@@ -236,22 +255,11 @@ impl Main {
         cx.notify();
     }
 
-    /// The join the settings make.
-    fn request(&self) -> Join {
-        let device = |id: &Option<String>| id.as_deref().and_then(|id| id.parse().ok());
-        Join {
-            server: self.settings.server.trim().to_owned(),
-            name: self.settings.name.trim().to_owned(),
-            room_key: self.room_key.clone(),
-            devices: Devices { input: device(&self.settings.input), output: device(&self.settings.output) },
-        }
-    }
-
     /// Watches who is in the channel while it is shown from outside.
     fn watch(&mut self) {
         let outside = matches!(self.call.phase(), Phase::Idle | Phase::Failed(_)) && matches!(self.screen, Screen::Channel);
-        let channel =
-            (outside && self.settings.is_complete(&self.room_key)).then(|| (self.settings.server.trim().to_owned(), self.room_key.clone()));
+        let channel = (outside && self.settings.is_complete(self.room_key()))
+            .then(|| (self.settings.server.trim().to_owned(), self.room_key().to_owned()));
         self.call.watch(channel);
     }
 
@@ -263,7 +271,7 @@ impl Main {
         };
         let name = input(&self.settings.name, "Name", false);
         let server = input(&self.settings.server, "server.example:9988", false);
-        let room_key = input(&self.room_key, "Raumschlüssel", true);
+        let room_key = input(self.room_key(), "Raumschlüssel", true);
         let events = [(Field::Name, &name), (Field::Server, &server), (Field::RoomKey, &room_key)]
             .into_iter()
             .map(|(field, input)| {
@@ -315,7 +323,7 @@ impl Main {
         if form.focus_empty(&[Field::Name, Field::Server, Field::RoomKey], window, cx) {
             return;
         }
-        self.keep(cx);
+        self.keep(window, cx);
         self.join(window, cx);
     }
 
@@ -328,30 +336,29 @@ impl Main {
     }
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.keep(cx);
-        window.focus(&self.focus, cx);
+        self.keep(window, cx);
         self.watch();
         cx.notify();
     }
 
-    /// Takes in what the form says, keeps it, and goes back to the channel.
-    fn keep(&mut self, cx: &mut Context<Self>) {
+    /// Takes in what the form says, keeps it, and goes back to the channel, which takes the
+    /// focus from the form's fields.
+    fn keep(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Screen::Welcome(form, _) | Screen::Settings(form)) = std::mem::replace(&mut self.screen, Screen::Channel) else {
             return;
         };
+        window.focus(&self.focus, cx);
         let settings = Settings { name: form.value(Field::Name, cx), server: form.value(Field::Server, cx), ..self.settings.clone() };
         if settings != self.settings {
-            if let Some(path) = &self.settings_path
-                && let Err(error) = settings.save(path)
-            {
+            if let Err(error) = settings.save(&self.settings_path) {
                 tracing::warn!("{error}");
                 self.trouble = Some(Trouble::NotSaved);
             }
             self.settings = settings;
         }
         let room_key = form.value(Field::RoomKey, cx);
-        if room_key != self.room_key {
-            self.room_key.clone_from(&room_key);
+        if room_key != self.room_key() {
+            self.room_key = Some(room_key.clone());
             cx.spawn(async move |this, cx| {
                 let kept = cx.background_spawn(async move { stored::set_room_key(&room_key) }).await;
                 if let Err(error) = kept {
@@ -432,7 +439,7 @@ impl Main {
         let theme = cx.theme();
         let message = match (self.call.notice(), self.trouble) {
             (Some(notice), _) => text::notice(notice),
-            (None, Some(trouble)) => trouble.text(),
+            (None, Some(trouble)) => text::trouble(trouble),
             (None, None) => return None,
         };
         Some(

@@ -54,7 +54,7 @@ fn main() {
         };
         gpui_kit::open_window(options, cx, |window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
-            cx.new(|cx| Main::new(call, happenings, settings, Some(settings_path), trouble, window, cx))
+            cx.new(|cx| Main::new(call, happenings, settings, settings_path, trouble, window, cx))
         })
         .expect("the window opens");
         cx.activate(true);

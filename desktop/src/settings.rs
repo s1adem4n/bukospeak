@@ -6,7 +6,10 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
+use bukospeak_audio_desktop::DeviceId;
 use serde::{Deserialize, Serialize};
+
+use crate::call::{Devices, Join};
 
 /// Where the room key is kept in the keyring.
 const KEYRING_SERVICE: &str = "bukospeak";
@@ -66,6 +69,23 @@ impl Settings {
     pub fn is_complete(&self, room_key: &str) -> bool {
         ![self.name.as_str(), self.server.as_str(), room_key].iter().any(|text| text.trim().is_empty())
     }
+
+    /// The join these settings make with the room key.
+    pub fn join(&self, room_key: &str) -> Join {
+        Join {
+            server: self.server.trim().to_owned(),
+            name: self.name.trim().to_owned(),
+            room_key: room_key.to_owned(),
+            devices: Devices { input: device(self.input.as_deref()), output: device(self.output.as_deref()) },
+        }
+    }
+}
+
+/// The device a kept id names; the system's default for none, or for one that isn't an id here,
+/// as one written on another system.
+fn device(id: Option<&str>) -> Option<DeviceId> {
+    let id = id?;
+    id.parse().inspect_err(|error| tracing::warn!("the device {id} isn't one: {error}")).ok()
 }
 
 /// The room key, if one was kept.
@@ -128,6 +148,15 @@ mod tests {
         fs::write(&path, "name = \"first\"\n").unwrap();
         assert_eq!(Settings::load(&path).unwrap(), Settings { name: "first".into(), ..Settings::default() });
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_join_takes_the_settings_trimmed_and_the_default_for_a_device_that_isnt_one() {
+        let settings =
+            Settings { name: " first ".into(), server: "example.com:9988 ".into(), input: Some("nonsense".into()), ..Settings::default() };
+        let join = settings.join("key");
+        assert_eq!((join.name.as_str(), join.server.as_str(), join.room_key.as_str()), ("first", "example.com:9988", "key"));
+        assert_eq!(join.devices, Devices::default());
     }
 
     #[test]

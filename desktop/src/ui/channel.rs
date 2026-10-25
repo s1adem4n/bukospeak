@@ -94,11 +94,8 @@ impl Main {
                     .h(theme::CONTROL)
                     .px_3p5()
                     .loading(joining)
-                    .on_click(cx.listener(|main, _, window, cx| {
-                        if *main.call.phase() != Phase::Joining {
-                            main.join(window, cx);
-                        }
-                    }))
+                    // A join under way takes no other.
+                    .on_click(cx.listener(|main, _, window, cx| main.join(window, cx)))
                     .into_any_element(),
             ]
         };

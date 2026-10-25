@@ -4,6 +4,8 @@ use bukospeak_audio_desktop::Direction;
 use bukospeak_core::proto::control::Rejection;
 use bukospeak_desktop::call::{Failure, Notice};
 
+use crate::ui::Trouble;
+
 pub fn failure(failure: &Failure) -> &'static str {
     match failure {
         Failure::CertificateChanged { .. } => "Zertifikat geändert",
@@ -27,5 +29,14 @@ pub fn notice(notice: &Notice) -> &'static str {
         Notice::DeviceFailed(Direction::Input) => "Mikrofon gestört",
         Notice::DeviceFailed(Direction::Output) => "Ausgabegerät gestört",
         Notice::PinNotKept => "Zertifikat nicht gespeichert",
+    }
+}
+
+pub fn trouble(trouble: Trouble) -> &'static str {
+    match trouble {
+        Trouble::Unreadable => "Einstellungen nicht lesbar",
+        Trouble::NotSaved => "Einstellungen nicht gespeichert",
+        Trouble::RoomKeyUnreadable => "Raumschlüssel nicht lesbar",
+        Trouble::RoomKeyNotKept => "Raumschlüssel nicht gespeichert",
     }
 }
