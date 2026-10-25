@@ -77,8 +77,9 @@ pub const FIELD: Pixels = px(36.);
 /// The welcome's column, and the widest the settings grow.
 pub const WELCOME: Pixels = px(280.);
 pub const SETTINGS: Pixels = px(440.);
-/// The app's mark and one's own avatar, large, in the welcome.
-pub const MARK: Pixels = px(64.);
+/// The microphone that welcomes, and one's own avatar after it.
+pub const MARK: Pixels = px(112.);
+pub const WELCOME_AVATAR: Pixels = px(64.);
 
 /// The speaking ring, quick enough to follow speech.
 pub const SPEAKING_FADE: Duration = Duration::from_millis(120);

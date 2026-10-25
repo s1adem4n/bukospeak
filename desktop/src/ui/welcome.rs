@@ -5,7 +5,8 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    Animation, AnimationExt, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, Pixels, SharedString, Styled, div, img, px,
+    Animation, AnimationExt, Context, Entity, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement, SharedString, Styled, StyledImage,
+    div, img, px,
 };
 
 use crate::ui::member::Avatar;
@@ -15,20 +16,13 @@ impl Main {
     pub(super) fn render_welcome(&self, form: &Form, step: Step, cx: &mut Context<Self>) -> impl IntoElement {
         let name = form.value(Field::Name, cx);
         let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
+        let muted = theme.muted_foreground;
         let quiet = ButtonCustomVariant::new(cx).foreground(muted).hover(theme.secondary_hover).active(theme.secondary_active);
         let content = match step {
             Step::Name => v_flex()
                 .w_full()
                 .items_center()
-                .child(
-                    div()
-                        .size(theme::MARK)
-                        .rounded(corner(theme::MARK))
-                        .border_1()
-                        .border_color(border)
-                        .child(img(self.icon.clone()).size_full().rounded(corner(theme::MARK))),
-                )
+                .child(img(self.mark.clone()).size(theme::MARK).object_fit(ObjectFit::Contain))
                 .child(headline("Willkommen bei BukoSpeak"))
                 .child(subline("Wie sollen dich die anderen nennen?", muted))
                 .child(
@@ -44,7 +38,7 @@ impl Main {
                 v_flex()
                     .w_full()
                     .items_center()
-                    .child(Avatar::new(name.clone(), theme::MARK))
+                    .child(Avatar::new(name.clone(), theme::WELCOME_AVATAR))
                     .child(headline(format!("Hallo, {name}")))
                     .child(subline("Wo trefft ihr euch?", muted))
                     .child(
@@ -115,9 +109,4 @@ fn subline(text: &'static str, color: Hsla) -> impl IntoElement {
 
 fn field(input: &Entity<InputState>) -> impl IntoElement {
     Input::new(input).large().context_menu(edit_menu)
-}
-
-/// The corner of the app's icon, as systems round it.
-fn corner(size: Pixels) -> Pixels {
-    size * 0.225
 }

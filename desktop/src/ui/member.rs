@@ -4,7 +4,7 @@
 use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    Animation, AnimationExt, App, FontWeight, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled, Window, div,
+    Animation, AnimationExt, App, FontWeight, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled, Window, div, relative,
 };
 
 use crate::ui::glyph::Glyph;
@@ -37,6 +37,8 @@ impl RenderOnce for Avatar {
             .bg(background)
             .text_color(initial_color)
             .text_size(self.size * 0.44)
+            // As high as the letter, so it sits in the middle and not on the line's lower part.
+            .line_height(relative(1.))
             .font_weight(FontWeight::SEMIBOLD)
             .child(initial)
     }

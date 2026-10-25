@@ -28,8 +28,8 @@ use gpui_kit::{
 
 use crate::ui::glyph::Glyph;
 
-/// The app's icon, as the iOS app has it.
-const ICON: &[u8] = include_bytes!("../../assets/icon.png");
+/// The microphone of the app's icon, cut out, as the iOS app shows it.
+const MARK: &[u8] = include_bytes!("../../assets/mark.png");
 
 actions!(
     bukospeak,
@@ -128,7 +128,7 @@ pub struct Main {
     room_key: String,
     screen: Screen,
     trouble: Option<Trouble>,
-    icon: Arc<Image>,
+    mark: Arc<Image>,
     focus: FocusHandle,
     _happenings: Task<()>,
     _room_key: Task<()>,
@@ -188,7 +188,7 @@ impl Main {
             room_key: String::new(),
             screen: Screen::Channel,
             trouble,
-            icon: Arc::new(Image::from_bytes(ImageFormat::Png, ICON.to_vec())),
+            mark: Arc::new(Image::from_bytes(ImageFormat::Png, MARK.to_vec())),
             focus,
             _happenings: happenings,
             _room_key: room_key,

@@ -30,34 +30,22 @@ impl Main {
             let present = self.call.present().iter();
             present.map(|member| Row::new(member.id.0, member.name.clone(), false, member.muted, member.reconnecting)).collect()
         };
-        let list = if rows.is_empty() { self.render_empty(cx) } else { self.render_list(rows, cx) };
+        let list = if rows.is_empty() { self.render_empty(cx) } else { self.render_list(rows) };
         let message = self.render_message(cx).map(|message| div().px_4().pb_2().child(message));
         v_flex().flex_1().min_h_0().child(list).children(message).child(self.render_bar(cx))
     }
 
-    fn render_list(&self, rows: Vec<Row>, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let header = h_flex()
-            .h(px(28.))
-            .px_2()
-            .justify_between()
-            .text_size(theme::TEXT_SM)
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.muted_foreground)
-            .child("Im Kanal")
-            .child(rows.len().to_string());
+    fn render_list(&self, rows: Vec<Row>) -> AnyElement {
         div()
             .id("members")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .px_2()
-            .pb_2()
+            .p_2()
             .flex()
             .flex_col()
             .gap_0p5()
             .when(*self.call.phase() == Phase::Reconnecting, |list| list.opacity(theme::RECONNECTING_OPACITY))
-            .child(header)
             .children(rows)
             .into_any_element()
     }
