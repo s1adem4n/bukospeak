@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use bukospeak_audio_desktop::{DeviceId, Direction};
+use crate::audio::{DeviceId, Direction};
 use serde::{Deserialize, Serialize};
 
 use crate::call::{Devices, Join};

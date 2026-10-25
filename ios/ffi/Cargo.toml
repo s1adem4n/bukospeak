@@ -1,6 +1,6 @@
 [package]
 name = "bukospeak-ffi"
-description = "The C interface the BukoSpeak iOS app calls the engine through"
+description = "The C interface the BukoSpeak iOS app calls the engine through, and the call's audio on the iPhone"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,13 +14,16 @@ crate-type = ["lib", "staticlib"]
 bukospeak-core.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
-bukospeak-audio-ios.workspace = true
+objc2-audio-toolbox.workspace = true
+objc2-core-audio-types.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 bukospeak-server.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
-# The workspace's lints, but with unsafe code: this crate is the C interface.
+# The workspace's lints, but with unsafe code: this crate is the C interface, and binds
+# AudioToolbox on iOS.
 [lints.rust]
 unused_qualifications = "warn"
 

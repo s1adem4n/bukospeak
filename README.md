@@ -10,11 +10,9 @@ latency, Opus at high bitrates, and an iOS app that keeps its microphone through
 | `proto/` | The protocol: control messages, audio datagrams, certificate fingerprints |
 | `server/` | The server, which relays each member's audio to everyone else |
 | `core/` | The client side the apps share: the engine, joining and pinning the server and joining again after a lost connection, the channel as the member sees it and what to announce about it, noise suppression, gain control, echo cancellation, voice activation, Opus, jitter buffers and the mix |
-| `audio/desktop/` | Plays a call on the desktop's audio devices, through cpal |
-| `audio/ios/` | Plays a call on the iPhone's microphone and speaker, through VoiceProcessingIO |
 | `ios/` | The iOS app (SwiftUI, CallKit) and `ios/dev`, which builds it on a Mac |
-| `ios/ffi/` | The C interface the iOS app calls the engine through, and its header |
-| `desktop/` | The desktop app for Windows, macOS and Linux (GPUI), and `bukospeak`, a terminal client for trying the server on the desktop's devices |
+| `ios/ffi/` | The C interface the iOS app calls the engine through, and its header; plays the call on the iPhone's microphone and speaker, through VoiceProcessingIO |
+| `desktop/` | The desktop app for Windows, macOS and Linux (GPUI), and `bukospeak`, a terminal client for trying the server on the desktop's devices; both play the call through cpal |
 
 One QUIC connection per member (TLS 1.3): control messages on its first stream, Opus frames as
 datagrams. The server's certificate is self-signed; clients pin its fingerprint on the first

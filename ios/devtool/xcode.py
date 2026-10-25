@@ -57,7 +57,7 @@ def rust(target: Target) -> None:
         f"""cd "$dir"
 mise install --quiet rust
 export IPHONEOS_DEPLOYMENT_TARGET=26.0
-mise exec -- cargo clippy -p bukospeak-ffi -p bukospeak-audio-ios {flags} -- -D warnings
+mise exec -- cargo clippy -p bukospeak-ffi {flags} -- -D warnings
 mise exec -- cargo build -p bukospeak-ffi {flags}
 """,
     )

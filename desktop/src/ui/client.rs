@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use bukospeak_audio_desktop::Direction;
+use bukospeak_desktop::audio::Direction;
 use bukospeak_desktop::call::{Call, Happening, Phase};
 use bukospeak_desktop::settings::{self as stored, Settings};
 use futures::StreamExt;

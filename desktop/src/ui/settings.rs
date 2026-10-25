@@ -1,7 +1,7 @@
 //! The settings: groups of rows, a label and its control each. The fields are kept when the
 //! settings close; the audio's choices at once, as the call takes them at once.
 
-use bukospeak_audio_desktop::{self as audio, Direction};
+use bukospeak_desktop::audio::{self, Direction};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;

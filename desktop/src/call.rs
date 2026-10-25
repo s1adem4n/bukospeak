@@ -15,7 +15,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Instant;
 
-use bukospeak_audio_desktop::{Audio, DeviceId, Direction};
+use crate::audio::{self, Audio, DeviceId, Direction};
 use bukospeak_core::proto::control::{Member, Rejection};
 use bukospeak_core::proto::{Fingerprint, MemberId};
 use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Microphone, Speaker, State, Update};
@@ -89,7 +89,7 @@ pub struct Join {
 }
 
 /// Hears why a device doesn't play, once each time it stops.
-pub type Report = Box<dyn Fn(bukospeak_audio_desktop::Error) + Send>;
+pub type Report = Box<dyn Fn(audio::Error) + Send>;
 
 /// Plays a call's two ends: on the desktop's devices, or on stand-ins in tests.
 pub trait Player: Send + 'static {
@@ -130,7 +130,7 @@ enum Event {
     /// A leave came back with the engine's call it left.
     Left(u64),
     /// A call's device report, by the call's number.
-    Device(u64, bukospeak_audio_desktop::Error),
+    Device(u64, audio::Error),
     Notice(Notice),
 }
 
@@ -446,8 +446,8 @@ impl Drop for Call {
 }
 
 /// What the user is told of a device's report.
-fn notice(error: &bukospeak_audio_desktop::Error) -> Notice {
-    use bukospeak_audio_desktop::Error;
+fn notice(error: &audio::Error) -> Notice {
+    use audio::Error;
     match *error {
         Error::Missing(direction, _) | Error::NoDevice(direction) => Notice::DeviceMissing(direction),
         Error::NoFormat(direction) | Error::Format(direction, _) | Error::Device(direction, _) => Notice::DeviceFailed(direction),

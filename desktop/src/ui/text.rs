@@ -1,7 +1,7 @@
 //! What the app tells the user, in German, of what went wrong.
 
-use bukospeak_audio_desktop::Direction;
 use bukospeak_core::proto::control::Rejection;
+use bukospeak_desktop::audio::Direction;
 use bukospeak_desktop::call::{Failure, Notice};
 
 use crate::ui::Trouble;

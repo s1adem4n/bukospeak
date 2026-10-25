@@ -21,8 +21,8 @@ use cpal::{
     SupportedStreamConfigRange,
 };
 
-use crate::convert::Format;
-use crate::lease::{Half, Lease};
+use crate::audio::convert::Format;
+use crate::audio::lease::{Half, Lease};
 
 /// How long a stream that couldn't be built waits before the next try.
 const RETRY: Duration = Duration::from_secs(1);

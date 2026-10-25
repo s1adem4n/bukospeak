@@ -14,3 +14,7 @@ usize_is_size_t = true
 [enum]
 rename_variants = "ScreamingSnakeCase"
 prefix_with_name = true
+
+# The system's own function the voice unit declares to read the host time's ticks, not ours.
+[export]
+exclude = ["mach_timebase_info", "Timebase"]

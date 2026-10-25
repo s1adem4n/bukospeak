@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bukospeak_audio_desktop::{DeviceId, Direction};
 use bukospeak_core::proto::Fingerprint;
 use bukospeak_core::proto::control::Rejection;
 use bukospeak_core::{Microphone, Speaker};
+use bukospeak_desktop::audio::{DeviceId, Direction};
 use bukospeak_desktop::call::{Call, Devices, Failure, Happening, Join, Phase, Player, Playing, Report};
 use bukospeak_desktop::known_servers::KnownServers;
 use bukospeak_server::{Identity, Room};

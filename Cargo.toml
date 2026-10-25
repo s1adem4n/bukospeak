@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["proto", "core", "audio/desktop", "audio/ios", "ios/ffi", "server", "desktop"]
+members = ["proto", "core", "ios/ffi", "server", "desktop"]
 # Upstream crates patched below, built as they are.
 exclude = ["vendor"]
 
@@ -11,8 +11,6 @@ rust-version = "1.98"
 repository = "https://github.com/s1adem4n/bukospeak"
 
 [workspace.dependencies]
-bukospeak-audio-desktop = { path = "audio/desktop" }
-bukospeak-audio-ios = { path = "audio/ios" }
 bukospeak-core = { path = "core" }
 bukospeak-proto = { path = "proto" }
 bukospeak-server = { path = "server" }

@@ -3,7 +3,7 @@
 
 use std::mem;
 
-use bukospeak_audio_ios::{Error, Failure, VoiceUnit};
+use crate::voice_unit::{Error, Failure, VoiceUnit};
 use bukospeak_core::{Microphone, Speaker};
 
 #[expect(clippy::large_enum_variant, reason = "an engine holds one, so its size doesn't matter")]

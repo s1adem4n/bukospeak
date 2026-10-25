@@ -5,9 +5,9 @@ use std::io::IsTerminal;
 use std::sync::{Arc, mpsc};
 
 use anyhow::Context;
-use bukospeak_audio_desktop::{Audio, DeviceId, Direction};
 use bukospeak_core::proto::MemberId;
 use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Update};
+use bukospeak_desktop::audio::{self, Audio, DeviceId, Direction};
 use bukospeak_desktop::known_servers::KnownServers;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -49,7 +49,7 @@ enum Command {
 /// What the client waits for.
 enum Happening {
     Update(Box<Update>),
-    AudioFailed(bukospeak_audio_desktop::Error),
+    AudioFailed(audio::Error),
     Stop,
 }
 
@@ -80,7 +80,7 @@ fn main() -> anyhow::Result<()> {
 fn devices() -> anyhow::Result<()> {
     for direction in [Direction::Input, Direction::Output] {
         println!("{direction}:");
-        for device in bukospeak_audio_desktop::devices(direction)? {
+        for device in audio::devices(direction)? {
             println!("  {} {}  {}", if device.is_default { "*" } else { " " }, device.id, device.name);
         }
     }

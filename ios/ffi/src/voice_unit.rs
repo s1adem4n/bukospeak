@@ -5,8 +5,6 @@
 //! mono, so a route change, to Bluetooth say, needs nothing here. A [`VoiceUnit`] plays while
 //! the session is active and is stopped when it isn't.
 
-#![cfg(target_os = "ios")]
-
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::panic::{self, AssertUnwindSafe};

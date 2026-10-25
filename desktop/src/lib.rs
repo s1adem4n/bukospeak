@@ -1,5 +1,6 @@
 //! What the BukoSpeak desktop app and the terminal client share.
 
+pub mod audio;
 pub mod call;
 pub mod known_servers;
 pub mod settings;

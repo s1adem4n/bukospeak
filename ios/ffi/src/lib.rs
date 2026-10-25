@@ -10,6 +10,8 @@
 
 #[cfg(target_os = "ios")]
 mod ios;
+#[cfg(target_os = "ios")]
+mod voice_unit;
 
 use std::ffi::{CStr, c_char, c_void};
 use std::str::Utf8Error;
