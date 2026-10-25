@@ -58,12 +58,12 @@ jobs:
       - run: |
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$GITHUB_REF_NAME" > notes.md
-      # The last release, if there is one, from which the update is packed as a delta too.
-      - run: vpk download github --repoUrl "$REPOSITORY" --token "$GH_TOKEN"
+      # The installer and the full package updates download: no portable app beside the archive
+      # below, and no delta, which would save little of a download this size.
       - run: >-
           vpk pack --packId BukoSpeak --packVersion "$VERSION" --packTitle BukoSpeak
           --packDir staging --mainExe bukospeak-desktop.exe --icon desktop/windows/icon.ico
-          --releaseNotes notes.md
+          --releaseNotes notes.md --noPortable --delta none
       - run: >-
           vpk upload github --repoUrl "$REPOSITORY" --token "$GH_TOKEN" --publish --merge
           --tag "$GITHUB_REF_NAME" --releaseName "BukoSpeak $VERSION"
