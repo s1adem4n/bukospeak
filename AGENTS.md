@@ -1,4 +1,4 @@
-# bukospeak
+# BukoSpeak
 
 See `README.md` for what the parts are. Run `mise run check` before calling a change done.
 

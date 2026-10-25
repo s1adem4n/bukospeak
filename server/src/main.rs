@@ -6,7 +6,7 @@ use bukospeak_server::{Identity, Room, endpoint};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-/// The bukospeak voice server.
+/// The BukoSpeak voice server.
 #[derive(Parser)]
 #[command(version)]
 struct Args {

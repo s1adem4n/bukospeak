@@ -1,6 +1,6 @@
 [package]
 name = "bukospeak-proto"
-description = "What the bukospeak server and its clients say to each other"
+description = "What the BukoSpeak server and its clients say to each other"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "bukospeak-cli"
-description = "A terminal client for trying the bukospeak server"
+description = "A terminal client for trying the BukoSpeak server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

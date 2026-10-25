@@ -1,4 +1,4 @@
-# bukospeak
+# BukoSpeak
 
 Voice chat for a few friends: one channel, a join button, who's in and who's speaking. Low
 latency, Opus at high bitrates, and an iOS app that keeps its microphone through phone calls.

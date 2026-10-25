@@ -1,6 +1,6 @@
 [package]
 name = "bukospeak-desktop"
-description = "Plays a bukospeak call on a desktop's audio devices"
+description = "Plays a BukoSpeak call on a desktop's audio devices"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

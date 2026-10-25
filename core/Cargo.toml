@@ -1,6 +1,6 @@
 [package]
 name = "bukospeak-core"
-description = "The client side the bukospeak apps share"
+description = "The client side the BukoSpeak apps share"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
