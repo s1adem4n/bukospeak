@@ -1,16 +1,18 @@
 //! The captured voice, from microphone frames to the Opus frames the uplink sends.
 //!
 //! The capture callback owns it and hands it one 10 ms frame at a time. It suppresses noise
-//! with RNNoise, lets the gate decide, and encodes every frame, sent or not, so the encoder
-//! stays warm and the frame index counts the sender's whole timeline. Nothing here allocates
-//! after construction but the first frame on each thread, where RNNoise's FFT sets up its plans
-//! and scratch buffers in thread-locals.
+//! with RNNoise, conditions the signal where the platform doesn't, lets the gate decide, and
+//! encodes every frame, sent or not, so the encoder stays warm and the frame index counts the
+//! sender's whole timeline. Nothing here allocates after construction but the first frame on
+//! each thread, where RNNoise's FFT sets up its plans and scratch buffers in thread-locals.
 
 use bukospeak_proto::audio::{FRAME_SAMPLES, Level, MAX_OPUS_LEN, SAMPLE_RATE};
 use nnnoiseless::DenoiseState;
 use opus::{Application, Bitrate, Channels, Encoder, Signal};
 
+use crate::conditioner::{Conditioner, Conditioning};
 use crate::gate::{Decision, Gate};
+use crate::limiter::limit;
 
 /// Low enough that libopus stays in hybrid mode, where in-band FEC exists.
 const BITRATE: i32 = 48_000;
@@ -46,6 +48,8 @@ impl Encoded {
 
 pub struct Capture {
     denoiser: Box<DenoiseState<'static>>,
+    /// None where the platform's audio conditions the signal.
+    conditioner: Option<Conditioner>,
     encoder: Encoder,
     gate: Gate,
     noise_suppression: bool,
@@ -57,7 +61,7 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn new() -> Result<Self, opus::Error> {
+    pub fn new(conditioning: Conditioning) -> Result<Self, opus::Error> {
         let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
         encoder.set_bitrate(Bitrate::Bits(BITRATE))?;
         encoder.set_signal(Signal::Voice)?;
@@ -65,6 +69,7 @@ impl Capture {
         encoder.set_packet_loss_perc(EXPECTED_LOSS_PERCENT)?;
         Ok(Self {
             denoiser: DenoiseState::new(),
+            conditioner: (conditioning == Conditioning::Engine).then(Conditioner::new),
             encoder,
             gate: Gate::default(),
             noise_suppression: true,
@@ -91,13 +96,25 @@ impl Capture {
         self.scaled.iter_mut().zip(input).for_each(|(scaled, sample)| {
             *scaled = if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) * PCM_SCALE };
         });
+        if let Some(conditioner) = &mut self.conditioner {
+            conditioner.filter(&mut self.scaled);
+        }
         let voice_probability = self.denoiser.process_frame(&mut self.denoised, &self.scaled);
         // Without suppression RNNoise still tells the gate what is speech; the frame goes out as captured.
         let signal = if self.noise_suppression { &mut self.denoised } else { &mut self.scaled };
-        signal.iter_mut().for_each(|sample| *sample /= PCM_SCALE);
+        // The gate measures the level before the gain, which follows the voice's.
+        let gate_level = Level::of(&signal.map(|sample| sample / PCM_SCALE));
+        let level = if let Some(conditioner) = &mut self.conditioner {
+            conditioner.gain(signal, voice_probability);
+            // The gain may raise peaks beyond full scale.
+            signal.iter_mut().for_each(|sample| *sample = limit(*sample / PCM_SCALE));
+            Level::of(signal)
+        } else {
+            signal.iter_mut().for_each(|sample| *sample /= PCM_SCALE);
+            gate_level
+        };
 
-        let level = Level::of(signal);
-        let decision = self.gate.decide(voice_probability, level);
+        let decision = self.gate.decide(voice_probability, gate_level);
         let mut frame = Encoded { index, last: decision == Decision::Closes, level, len: 0, opus: [0; MAX_OPUS_LEN] };
         frame.len = self.encoder.encode_float(signal, &mut frame.opus)? as u16;
 
@@ -153,13 +170,14 @@ mod tests {
 
     const SECOND: usize = SAMPLE_RATE as usize;
 
-    /// Captures a signal with noise suppression and returns the frames sent.
+    /// Captures a signal with noise suppression, conditioned by the platform, and returns the
+    /// frames sent.
     fn capture(signal: &[f32]) -> Vec<Encoded> {
-        capture_with(signal, true)
+        capture_with(signal, true, Conditioning::Platform)
     }
 
-    fn capture_with(signal: &[f32], noise_suppression: bool) -> Vec<Encoded> {
-        let mut capture = Capture::new().unwrap();
+    fn capture_with(signal: &[f32], noise_suppression: bool, conditioning: Conditioning) -> Vec<Encoded> {
+        let mut capture = Capture::new(conditioning).unwrap();
         capture.set_noise_suppression(noise_suppression);
         let mut sent = Vec::new();
         for frame in signal.as_chunks().0 {
@@ -218,11 +236,11 @@ mod tests {
 
     #[test]
     fn without_suppression_noise_still_sends_nothing_and_speech_goes_out_as_captured() {
-        assert!(capture_with(&noise(3 * SECOND, 0.05), false).is_empty());
+        assert!(capture_with(&noise(3 * SECOND, 0.05), false, Conditioning::Platform).is_empty());
 
         let signal = voice(2 * SECOND, 0.3);
         let frames = signal.as_chunks::<FRAME_SAMPLES>().0;
-        let sent = capture_with(&signal, false);
+        let sent = capture_with(&signal, false, Conditioning::Platform);
         assert!(sent.len() >= 150, "only {} frames of 2 s of speech sent", sent.len());
         for frame in sent {
             assert_eq!(frame.level, Level::of(&frames[frame.index as usize]), "frame {}", frame.index);
@@ -230,8 +248,22 @@ mod tests {
     }
 
     #[test]
+    fn conditioned_quiet_speech_goes_out_louder_and_noise_still_sends_nothing() {
+        let loudest = |conditioning| {
+            let sent = capture_with(&voice(5 * SECOND, 0.03), true, conditioning);
+            assert!(sent.len() >= 400, "only {} frames of 5 s of speech sent", sent.len());
+            sent.iter().map(|frame| frame.level.minus_dbov()).min().unwrap()
+        };
+        let (captured, conditioned) = (loudest(Conditioning::Platform), loudest(Conditioning::Engine));
+        assert!(conditioned + 15 <= captured, "loudest frame at −{captured} dBov, conditioned at −{conditioned} dBov");
+
+        let signal: Vec<f32> = [vec![0.0; SECOND], noise(3 * SECOND, 0.05), vec![0.0; SECOND]].concat();
+        assert!(capture_with(&signal, true, Conditioning::Engine).is_empty());
+    }
+
+    #[test]
     fn ending_in_speech_sends_a_silent_last_frame_and_capture_starts_anew() {
-        let mut capture = Capture::new().unwrap();
+        let mut capture = Capture::new(Conditioning::Platform).unwrap();
         let mut sent = Vec::new();
         for frame in voice(SECOND, 0.3).as_chunks().0 {
             capture.process(frame, |encoded| sent.push(*encoded)).unwrap();

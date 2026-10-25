@@ -27,7 +27,7 @@ A datagram is a 7-byte header and the Opus packet:
 ## Threads
 
 ```
-capture callback (realtime)  10 ms frames → [HPF, AEC] → RNNoise → [AGC] → gate → Opus → ring → wakes the uplink
+capture callback (realtime)  10 ms frames → [HPF, AEC] → RNNoise → [AGC, limiter] → gate → Opus → ring → wakes the uplink
 uplink thread                 drains the ring into QUIC datagrams
 network task (tokio)          datagrams of current members, and their leaves → one ring to the render callback
 render callback (realtime)   jitter buffers → Opus decoders → mix → soft limiter → device
@@ -97,6 +97,14 @@ Mute holds across calls: the app owns it.
 Noise suppression can be turned off, for a microphone whose noise the system or the device
 suppresses already: RNNoise then still tells the gate what is speech, and the frame goes out as
 captured.
+
+Where the platform's audio passes the microphone's signal as it is, on the desktop, the engine
+conditions it, as iOS's voice processing unit does there: a high-pass filter takes out rumble
+and hum before RNNoise, and WebRTC's AGC2, from `sonora`, raises quiet speech towards a steady
+level after it, without raising the noise between words above −50 dBFS; it doesn't lower loud
+speech. AGC2's voice detector is replaced by RNNoise's voice probability, and its limiter, which
+allocates, by the mix's soft limiter. The level in a frame's header is the one sent, after the
+gain.
 
 `unsafe` is allowed only in the crates that bind native interfaces: `ffi` and `audio/ios`.
 

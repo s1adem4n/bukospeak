@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use bukospeak_core::proto::Fingerprint;
 use bukospeak_core::proto::control::Member;
-use bukospeak_core::{Engine, Error, Event, JoinConfig, Joined, Listener};
+use bukospeak_core::{Conditioning, Engine, Error, Event, JoinConfig, Joined, Listener};
 
 #[cfg(target_os = "ios")]
 use crate::ios::Audio;
@@ -193,11 +193,14 @@ impl Listener for Foreign {
     }
 }
 
+/// iOS's voice processing unit conditions the microphone's signal; elsewhere the engine does.
+const CONDITIONING: Conditioning = if cfg!(target_os = "ios") { Conditioning::Platform } else { Conditioning::Engine };
+
 /// A new engine, or null if its threads couldn't start. The listener hears its events with
 /// `context` until `bukospeak_engine_free` returns, never after.
 #[unsafe(no_mangle)]
 pub extern "C" fn bukospeak_engine_new(context: *mut c_void, listener: BukoSpeakListener) -> Option<Box<BukoSpeakEngine>> {
-    let engine = Engine::new(Arc::new(Foreign { context, listener })).ok()?;
+    let engine = Engine::new(CONDITIONING, Arc::new(Foreign { context, listener })).ok()?;
     Some(Box::new(BukoSpeakEngine {
         #[cfg(target_os = "ios")]
         audio: Mutex::new(Audio::None),

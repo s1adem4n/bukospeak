@@ -131,12 +131,17 @@ mod tests {
     use rtrb::{Consumer, RingBuffer};
 
     use super::*;
+    use crate::conditioner::Conditioning;
     use crate::signal::voice;
 
     fn microphone(settings: Arc<Settings>) -> (Microphone, Consumer<Encoded>, Arc<Speaking>) {
         let (frames, sent) = RingBuffer::new(1000);
         let speaking = Arc::new(Speaking::default());
-        (Microphone::new(Capture::new().unwrap(), frames, thread::current(), settings, Arc::clone(&speaking)), sent, speaking)
+        (
+            Microphone::new(Capture::new(Conditioning::Platform).unwrap(), frames, thread::current(), settings, Arc::clone(&speaking)),
+            sent,
+            speaking,
+        )
     }
 
     fn speaks(speaking: &Speaking) -> bool {

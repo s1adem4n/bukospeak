@@ -9,12 +9,10 @@ use bukospeak_proto::audio::{FRAME_SAMPLES, SAMPLE_RATE};
 use opus::{Channels, Decoder};
 
 use crate::jitter::{self, JitterBuffer, Packet, Playout};
+use crate::limiter::limit;
 
 /// The voices a mixer holds: the server admits 16 members, and one of them is this one.
 pub const VOICES: usize = 15;
-
-/// Where the limiter starts to bend the mix; below it the mix passes unchanged.
-const LIMITER_KNEE: f32 = 0.8;
 
 pub struct Mixer {
     voices: Box<[Voice]>,
@@ -124,17 +122,6 @@ impl Voice {
     }
 }
 
-/// Bends samples beyond the knee smoothly towards ±1, so a loud mix never clips: linear below
-/// the knee, and tanh above it, which meets it with the same slope.
-fn limit(sample: f32) -> f32 {
-    let magnitude = sample.abs();
-    if magnitude <= LIMITER_KNEE {
-        return sample;
-    }
-    let headroom = 1.0 - LIMITER_KNEE;
-    (LIMITER_KNEE + headroom * ((magnitude - LIMITER_KNEE) / headroom).tanh()).copysign(sample)
-}
-
 #[cfg(test)]
 mod tests {
     use bukospeak_proto::audio::{FRAME_DURATION, Level};
@@ -237,17 +224,5 @@ mod tests {
         mixer.insert(MemberId(1), garbage);
         assert_eq!(play(&mut mixer, &[], 1)[0].0, 0.0);
         assert_eq!(mixer.stats(MemberId(1)).unwrap().undecodable, 1);
-    }
-
-    #[test]
-    fn the_limiter_passes_quiet_samples_and_bends_loud_ones_below_full_scale() {
-        assert_eq!(limit(0.5), 0.5);
-        assert_eq!(limit(-LIMITER_KNEE), -LIMITER_KNEE);
-        for loud in [0.9, 1.0, 2.0, 100.0] {
-            // tanh reaches 1.0 in f32 for large arguments, so the bound is inclusive.
-            assert!(limit(loud) > LIMITER_KNEE && limit(loud) <= 1.0, "limit({loud}) = {}", limit(loud));
-            assert_eq!(limit(-loud), -limit(loud));
-        }
-        assert!(limit(0.9) < limit(1.0) && limit(1.0) < limit(2.0));
     }
 }

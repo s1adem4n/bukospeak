@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::capture::Capture;
+use crate::conditioner::Conditioning;
 use crate::jitter::Packet;
 use crate::microphone::{Microphone, Settings};
 use crate::playout::Mixer;
@@ -70,6 +71,7 @@ pub struct Joined {
 /// once the listener has had its last event.
 pub struct Engine {
     runtime: Runtime,
+    conditioning: Conditioning,
     settings: Arc<Settings>,
     call: Mutex<Option<Call>>,
     // Fields drop in order: the last sender of events goes before the listener's thread, which
@@ -95,7 +97,8 @@ struct Call {
 }
 
 impl Engine {
-    pub fn new(listener: Arc<dyn Listener>) -> std::io::Result<Self> {
+    /// An engine whose calls condition the microphone's signal as `conditioning` says.
+    pub fn new(conditioning: Conditioning, listener: Arc<dyn Listener>) -> std::io::Result<Self> {
         // One worker runs the network side; a current-thread runtime would run it only while
         // a call into the engine blocks on it.
         let runtime =
@@ -104,7 +107,7 @@ impl Engine {
         let listening = thread::Builder::new()
             .name("bukospeak-events".into())
             .spawn(move || inbox.into_iter().for_each(|event| listener.event(event)))?;
-        Ok(Self { runtime, settings: Arc::default(), call: Mutex::default(), events, _listening: Listening(Some(listening)) })
+        Ok(Self { runtime, conditioning, settings: Arc::default(), call: Mutex::default(), events, _listening: Listening(Some(listening)) })
     }
 
     /// Joins the channel, after leaving the call before if there is one.
@@ -114,7 +117,7 @@ impl Engine {
         let mut call = self.call.lock().expect("the call lock is never poisoned");
         self.end(call.take());
         // libopus creates codecs without fail for the fixed formats asked for.
-        let capture = Capture::new().expect("the encoder can be created");
+        let capture = Capture::new(self.conditioning).expect("the encoder can be created");
         let mixer = Mixer::new().expect("the decoders can be created");
 
         let session = self.runtime.block_on(Session::join(config))?;
@@ -282,7 +285,7 @@ mod tests {
 
     fn engine() -> (Engine, mpsc::Receiver<Event>) {
         let (events, received) = mpsc::channel();
-        (Engine::new(Arc::new(Events(events))).unwrap(), received)
+        (Engine::new(Conditioning::Engine, Arc::new(Events(events))).unwrap(), received)
     }
 
     /// Waits for the first event that `wanted` picks.

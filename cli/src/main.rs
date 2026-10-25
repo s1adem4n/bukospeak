@@ -10,7 +10,7 @@ use std::sync::{Arc, mpsc};
 use anyhow::Context;
 use bukospeak_audio_desktop::{Audio, DeviceId, Direction};
 use bukospeak_core::proto::MemberId;
-use bukospeak_core::{Engine, Error, Event, JoinConfig, Joined, Listener};
+use bukospeak_core::{Conditioning, Engine, Error, Event, JoinConfig, Joined, Listener};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -93,7 +93,8 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, n
     let pin = known.get(&server);
 
     let (happenings, received) = mpsc::channel();
-    let engine = Engine::new(Arc::new(Forward(happenings.clone())))?;
+    // `cpal` passes the microphone's signal as it is.
+    let engine = Engine::new(Conditioning::Engine, Arc::new(Forward(happenings.clone())))?;
     engine.set_noise_suppression(noise_suppression);
     let Joined { fingerprint, microphone, speaker } = match engine.join(JoinConfig { pin, ..config }) {
         Err(Error::FingerprintChanged { pinned, presented }) => anyhow::bail!(
