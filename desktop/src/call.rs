@@ -13,6 +13,7 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Instant;
 
 use bukospeak_audio_desktop::{Audio, DeviceId, Direction};
 use bukospeak_core::proto::control::{Member, Rejection};
@@ -134,7 +135,7 @@ enum Event {
 }
 
 enum Command {
-    Join { number: u64, join: Join, trust: Option<Fingerprint> },
+    Join { number: u64, join: Join, trust: Option<Fingerprint>, asked: Instant },
     Leave,
     Watch { server: String, room_key: String },
     Unwatch,
@@ -154,6 +155,9 @@ pub struct Call {
     call: Option<(u64, String)>,
     /// Whether the call's join came back.
     joined: bool,
+    /// When the join under way or the call up was asked for, for the log to tell how long each
+    /// step of the join took.
+    asked: Instant,
     /// Leaves sent whose engine call hasn't come back: updates meanwhile may be of the call left.
     leaves: usize,
     /// The engine's call left last: updates of it or of one before are stale.
@@ -188,6 +192,7 @@ impl Call {
             numbers: 0,
             call: None,
             joined: false,
+            asked: Instant::now(),
             leaves: 0,
             left_call: 0,
             watched: None,
@@ -329,8 +334,9 @@ impl Call {
         self.phase = Phase::Joining;
         self.notice = None;
         self.current.store(number, Ordering::Relaxed);
+        self.asked = Instant::now();
         // The engine stops watching on a join.
-        self.send(Command::Join { number, join, trust });
+        self.send(Command::Join { number, join, trust, asked: self.asked });
     }
 
     fn joined(&mut self, number: u64, result: Result<(), Failure>) {
@@ -381,7 +387,12 @@ impl Call {
             return;
         }
         match self.channel.state() {
-            State::Connected => self.phase = Phase::Connected,
+            State::Connected => {
+                if self.phase == Phase::Joining {
+                    log_step("the call shows connected", self.asked);
+                }
+                self.phase = Phase::Connected;
+            }
             State::Reconnecting => self.phase = Phase::Reconnecting,
             // Not entered yet: the update that tells who is in the call is still on its way. A
             // call left or lost ended here before its last update.
@@ -454,6 +465,11 @@ fn failure(error: Error, server: String) -> Failure {
     }
 }
 
+/// Logs a step of a join, with how long after it was asked for it came.
+fn log_step(step: &str, asked: Instant) {
+    tracing::info!("{step}: {} ms after the join was asked for", asked.elapsed().as_millis());
+}
+
 /// Hands the engine's updates on, without waiting.
 struct Forward(UnboundedSender<Happening>);
 
@@ -478,7 +494,7 @@ impl Worker {
         let mut playing: Option<Box<dyn Playing>> = None;
         for command in inbox {
             match command {
-                Command::Join { number, join, trust } => playing = self.join(number, join, trust),
+                Command::Join { number, join, trust, asked } => playing = self.join(number, join, trust, asked),
                 Command::Leave => {
                     // The audio stops before the call, so nothing plays into a call that is gone.
                     playing = None;
@@ -509,7 +525,7 @@ impl Worker {
 
     /// Joins, pins the server and starts the call's audio, and tells the call how it went; the
     /// audio returned plays the call until the next leave.
-    fn join(&mut self, number: u64, join: Join, trust: Option<Fingerprint>) -> Option<Box<dyn Playing>> {
+    fn join(&mut self, number: u64, join: Join, trust: Option<Fingerprint>, asked: Instant) -> Option<Box<dyn Playing>> {
         let Join { server, name, room_key, devices } = join;
         let pinned = match self.known.get(&server) {
             Ok(pinned) => pinned,
@@ -520,7 +536,10 @@ impl Worker {
         };
         let config = JoinConfig { server: server.clone(), name, room_key, pin: trust.or(pinned) };
         let Joined { fingerprint, microphone, speaker } = match self.engine.join(config) {
-            Ok(joined) => joined,
+            Ok(joined) => {
+                log_step("the server welcomed the join", asked);
+                joined
+            }
             Err(error) => {
                 tracing::warn!("joining {server}: {error}");
                 return self.joined(number, Err(failure(error, server)));
@@ -543,6 +562,7 @@ impl Worker {
         });
         match self.player.play(microphone, speaker, &devices, report) {
             Ok(playing) => {
+                log_step("the call's audio plays", asked);
                 self.tell(Event::Joined(number, Ok(())));
                 Some(playing)
             }
