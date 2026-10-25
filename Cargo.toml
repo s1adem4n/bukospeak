@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["proto", "core", "audio/desktop", "audio/ios", "ffi", "server", "cli"]
+# Upstream crates patched below, built as they are.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -53,3 +55,9 @@ unused_qualifications = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# sonora as published allocates on every frame; these copies, patched where they do, run on
+# the capture callback. vendor/README.md says what changed.
+[patch.crates-io]
+sonora = { path = "vendor/sonora" }
+sonora-aec3 = { path = "vendor/sonora-aec3" }
