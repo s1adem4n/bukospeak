@@ -28,6 +28,7 @@ futures = "0.3.34"
 # the version is exact and an upgrade is a step of its own.
 gpui-kit = "=0.8.0"
 keyring = "4.2.0"
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 nnnoiseless = { version = "0.5.2", default-features = false }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -51,6 +52,7 @@ sonora = "0.2.0"
 sonora-agc2 = "0.2.0"
 thiserror = "2.0.21"
 toml = "1.1.8"
+tray-icon = "0.26.1"
 tokio = "1.54.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
