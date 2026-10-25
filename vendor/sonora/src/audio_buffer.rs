@@ -319,9 +319,7 @@ impl AudioBuffer {
         if resampling_needed {
             for i in 0..self.num_channels {
                 let src = self.data.bands(i);
-                let mut temp = vec![0.0f32; buf_frames];
-                self.output_resamplers[i].resample(src, &mut temp);
-                buffer.channel_mut(i)[..buf_frames].copy_from_slice(&temp);
+                self.output_resamplers[i].resample(src, &mut buffer.channel_mut(i)[..buf_frames]);
             }
         } else {
             for i in 0..self.num_channels {

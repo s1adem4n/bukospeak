@@ -151,6 +151,67 @@ pub(crate) struct EchoRemover {
     block_counter: usize,
     gain_change_hangover: i32,
     refined_filter_output_last_selected: bool,
+    scratch: CaptureScratch,
+}
+
+/// The per-channel working storage of `EchoRemover::process_capture`, kept so that processing
+/// a block doesn't allocate, and cleared before each block.
+#[derive(Debug, Default)]
+struct CaptureScratch {
+    e: Vec<[f32; FFT_LENGTH_BY_2]>,
+    y2: Vec<[f32; FFT_LENGTH_BY_2_PLUS_1]>,
+    e2: Vec<[f32; FFT_LENGTH_BY_2_PLUS_1]>,
+    r2: Vec<[f32; FFT_LENGTH_BY_2_PLUS_1]>,
+    r2_unbounded: Vec<[f32; FFT_LENGTH_BY_2_PLUS_1]>,
+    s2_linear: Vec<[f32; FFT_LENGTH_BY_2_PLUS_1]>,
+    y_fft: Vec<FftData>,
+    e_fft: Vec<FftData>,
+    comfort_noise: Vec<FftData>,
+    high_band_comfort_noise: Vec<FftData>,
+    subtractor_output: Vec<SubtractorOutput>,
+}
+
+impl CaptureScratch {
+    fn new(num_capture_channels: usize) -> Self {
+        Self {
+            e: vec![[0.0; FFT_LENGTH_BY_2]; num_capture_channels],
+            y2: vec![[0.0; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels],
+            e2: vec![[0.0; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels],
+            r2: vec![[0.0; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels],
+            r2_unbounded: vec![[0.0; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels],
+            s2_linear: vec![[0.0; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels],
+            y_fft: vec![FftData::default(); num_capture_channels],
+            e_fft: vec![FftData::default(); num_capture_channels],
+            comfort_noise: vec![FftData::default(); num_capture_channels],
+            high_band_comfort_noise: vec![FftData::default(); num_capture_channels],
+            subtractor_output: (0..num_capture_channels)
+                .map(|_| SubtractorOutput::default())
+                .collect(),
+        }
+    }
+
+    /// Zeroes everything, as freshly allocated storage would be.
+    fn clear(&mut self) {
+        for spectrum in [
+            &mut self.y2,
+            &mut self.e2,
+            &mut self.r2,
+            &mut self.r2_unbounded,
+            &mut self.s2_linear,
+        ] {
+            spectrum.fill([0.0; FFT_LENGTH_BY_2_PLUS_1]);
+        }
+        self.e.fill([0.0; FFT_LENGTH_BY_2]);
+        for fft in [
+            &mut self.y_fft,
+            &mut self.e_fft,
+            &mut self.comfort_noise,
+            &mut self.high_band_comfort_noise,
+        ] {
+            fft.fill(FftData::default());
+        }
+        self.subtractor_output.fill_with(SubtractorOutput::default);
+    }
 }
 
 impl EchoRemover {
@@ -184,6 +245,7 @@ impl EchoRemover {
             block_counter: 0,
             gain_change_hangover: 0,
             refined_filter_output_last_selected: true,
+            scratch: CaptureScratch::new(num_capture_channels),
         }
     }
 
@@ -221,20 +283,22 @@ impl EchoRemover {
         );
         debug_assert_eq!(capture.num_channels(), num_capture_channels);
 
-        // Per-channel working storage.
-        let mut e = vec![[0.0f32; FFT_LENGTH_BY_2]; num_capture_channels];
-        let mut y2 = vec![[0.0f32; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels];
-        let mut e2 = vec![[0.0f32; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels];
-        let mut r2 = vec![[0.0f32; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels];
-        let mut r2_unbounded = vec![[0.0f32; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels];
-        let mut s2_linear = vec![[0.0f32; FFT_LENGTH_BY_2_PLUS_1]; num_capture_channels];
-        let mut y_fft = vec![FftData::default(); num_capture_channels];
-        let mut e_fft = vec![FftData::default(); num_capture_channels];
-        let mut comfort_noise = vec![FftData::default(); num_capture_channels];
-        let mut high_band_comfort_noise = vec![FftData::default(); num_capture_channels];
-        let mut subtractor_output: Vec<SubtractorOutput> = (0..num_capture_channels)
-            .map(|_| SubtractorOutput::default())
-            .collect();
+        // Per-channel working storage, taken for the block and put back after it.
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        let CaptureScratch {
+            mut e,
+            mut y2,
+            mut e2,
+            mut r2,
+            mut r2_unbounded,
+            mut s2_linear,
+            mut y_fft,
+            mut e_fft,
+            mut comfort_noise,
+            mut high_band_comfort_noise,
+            mut subtractor_output,
+        } = scratch;
 
         self.aec_state
             .update_capture_saturation(capture_signal_saturation);
@@ -439,6 +503,19 @@ impl EchoRemover {
         // Update the metrics.
         self.metrics
             .update(&self.aec_state, &self.cng.noise_spectrum()[0], &g);
+        self.scratch = CaptureScratch {
+            e,
+            y2,
+            e2,
+            r2,
+            r2_unbounded,
+            s2_linear,
+            y_fft,
+            e_fft,
+            comfort_noise,
+            high_band_comfort_noise,
+            subtractor_output,
+        };
     }
 
     /// Updates the status on whether echo leakage is detected.

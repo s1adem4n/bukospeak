@@ -33,9 +33,9 @@ impl FrameBlocker {
     ///
     /// `sub_frame` is indexed as `sub_frame[band][channel]`, where each inner
     /// slice has `SUB_FRAME_LENGTH` (80) samples.
-    pub fn insert_sub_frame_and_extract_block(
+    pub fn insert_sub_frame_and_extract_block<Band: AsRef<[Channel]>, Channel: AsRef<[f32]>>(
         &mut self,
-        sub_frame: &[Vec<&[f32]>],
+        sub_frame: &[Band],
         block: &mut Block,
     ) {
         debug_assert_eq!(self.num_bands, block.num_bands());
@@ -43,8 +43,10 @@ impl FrameBlocker {
         for (band, (buf_band, sf_band)) in self.buffer.iter_mut().zip(sub_frame.iter()).enumerate()
         {
             debug_assert_eq!(self.num_channels, block.num_channels());
+            let sf_band = sf_band.as_ref();
             debug_assert_eq!(self.num_channels, sf_band.len());
             for (channel, (buf_ch, sf_ch)) in buf_band.iter_mut().zip(sf_band.iter()).enumerate() {
+                let sf_ch = sf_ch.as_ref();
                 debug_assert!(buf_ch.len() <= BLOCK_SIZE - 16);
                 debug_assert_eq!(SUB_FRAME_LENGTH, sf_ch.len());
 
