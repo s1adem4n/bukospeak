@@ -1,0 +1,21 @@
+[package]
+name = "bukospeak-audio-ios"
+description = "Plays a BukoSpeak call on the iPhone's microphone and speaker, through VoiceProcessingIO"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+bukospeak-core.workspace = true
+objc2-audio-toolbox.workspace = true
+objc2-core-audio-types.workspace = true
+thiserror.workspace = true
+
+# The workspace's lints, but with unsafe code: this crate binds AudioToolbox.
+[lints.rust]
+unused_qualifications = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

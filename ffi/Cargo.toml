@@ -1,0 +1,29 @@
+[package]
+name = "bukospeak-ffi"
+description = "The C interface the BukoSpeak apps call the engine through"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+# The static library the apps link; the Rust library is for the tests.
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+bukospeak-core.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+bukospeak-audio-ios.workspace = true
+
+[dev-dependencies]
+bukospeak-server.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+# The workspace's lints, but with unsafe code: this crate is the C interface.
+[lints.rust]
+unused_qualifications = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

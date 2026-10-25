@@ -1,5 +1,6 @@
 [tools]
-rust = { version = "1.98.1", components = "clippy,rustfmt" }
+rust = { version = "1.98.1", components = "clippy,rustfmt", targets = "aarch64-apple-ios" }
+"cargo:cbindgen" = "0.29.4"
 
 [tasks.check]
 description = "Formatting, lints and tests, as CI runs them"
@@ -7,7 +8,12 @@ run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
   "cargo test --workspace --locked",
+  "cbindgen --config ffi/cbindgen.toml --crate bukospeak-ffi --output ffi/include/bukospeak.h --verify",
 ]
+
+[tasks.header]
+description = "Write the C header of ffi/ from its source"
+run = "cbindgen --config ffi/cbindgen.toml --crate bukospeak-ffi --output ffi/include/bukospeak.h"
 
 [tasks.image]
 description = "Build the server's container image"

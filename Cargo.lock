@@ -229,6 +229,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bukospeak-audio-ios"
+version = "0.1.0"
+dependencies = [
+ "bukospeak-core",
+ "objc2-audio-toolbox",
+ "objc2-core-audio-types",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "bukospeak-cli"
 version = "0.1.0"
 dependencies = [
@@ -254,6 +264,16 @@ dependencies = [
  "rtrb",
  "rustls",
  "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "bukospeak-ffi"
+version = "0.1.0"
+dependencies = [
+ "bukospeak-audio-ios",
+ "bukospeak-core",
+ "bukospeak-server",
  "tokio",
 ]
 

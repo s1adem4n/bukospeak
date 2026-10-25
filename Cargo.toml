@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["proto", "core", "audio/desktop", "server", "cli"]
+members = ["proto", "core", "audio/desktop", "audio/ios", "ffi", "server", "cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ repository = "https://github.com/s1adem4n/bukospeak"
 
 [workspace.dependencies]
 bukospeak-audio-desktop = { path = "audio/desktop" }
+bukospeak-audio-ios = { path = "audio/ios" }
 bukospeak-core = { path = "core" }
 bukospeak-proto = { path = "proto" }
 bukospeak-server = { path = "server" }
@@ -20,6 +21,15 @@ cpal = "0.18.2"
 ctrlc = "3.5.2"
 dirs = "7.0.0"
 nnnoiseless = { version = "0.5.2", default-features = false }
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "AUComponent",
+  "AudioComponent",
+  "AudioOutputUnit",
+  "AudioUnitProperties",
+  "objc2-core-audio-types",
+] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 opus = "0.4.0"
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rcgen = "0.14.10"

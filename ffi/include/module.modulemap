@@ -1,0 +1,4 @@
+module BukoSpeakFFI {
+    header "bukospeak.h"
+    export *
+}
