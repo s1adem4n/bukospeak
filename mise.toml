@@ -8,12 +8,12 @@ run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
   "cargo test --workspace --locked",
-  "cbindgen --config ffi/cbindgen.toml --crate bukospeak-ffi --output ffi/include/bukospeak.h --verify",
+  "cbindgen --config ios/ffi/cbindgen.toml --crate bukospeak-ffi --output ios/ffi/include/bukospeak.h --verify",
 ]
 
 [tasks.header]
-description = "Write the C header of ffi/ from its source"
-run = "cbindgen --config ffi/cbindgen.toml --crate bukospeak-ffi --output ffi/include/bukospeak.h"
+description = "Write the C header of ios/ffi/ from its source"
+run = "cbindgen --config ios/ffi/cbindgen.toml --crate bukospeak-ffi --output ios/ffi/include/bukospeak.h"
 
 [tasks.image]
 description = "Build the server's container image"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["proto", "core", "audio/desktop", "audio/ios", "ffi", "server", "cli"]
+members = ["proto", "core", "audio/desktop", "audio/ios", "ios/ffi", "server", "desktop"]
 # Upstream crates patched below, built as they are.
 exclude = ["vendor"]
 
@@ -23,6 +23,15 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 cpal = "0.18.2"
 ctrlc = "3.5.2"
 dirs = "7.0.0"
+embed-resource = "3.0.12"
+futures = "0.3.34"
+global-hotkey = "0.9.0"
+# GPUI and its components; gpui-pre is a weekly snapshot of Zed's main whose API changes, so
+# the version is exact and an upgrade is a step of its own.
+gpui-kit = "=0.8.0"
+interprocess = "2.4.7"
+keyring = "4.2.0"
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 nnnoiseless = { version = "0.5.2", default-features = false }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -45,9 +54,13 @@ sha2 = "0.11.1"
 sonora = "0.2.0"
 sonora-agc2 = "0.2.0"
 thiserror = "2.0.21"
+toml = "1.1.8"
 tokio = "1.54.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tray-icon = "0.26.1"
+# The same version as the `vpk` that packs the app in release.yml, so they agree on the format.
+velopack = "=1.3.39-g8d2844f"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -67,3 +80,8 @@ sonora-aec3 = { path = "vendor/sonora-aec3" }
 opt-level = 3
 [profile.dev.package.sonora-aec3]
 opt-level = 3
+
+# Downloads stay small: no symbols, and the linker sees across crates to drop what is unused.
+[profile.release]
+strip = true
+lto = "thin"

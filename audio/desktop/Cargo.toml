@@ -14,3 +14,8 @@ thiserror.workspace = true
 
 [lints]
 workspace = true
+
+# On Linux the sound server's devices, named as the system names them and following its default;
+# ALSA lists every plug and alias of each card instead.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { workspace = true, features = ["pulseaudio"] }
