@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ServerMessage};
-use bukospeak_proto::{ALPN, Fingerprint, MemberId, PROTOCOL_VERSION, SERVER_NAME, audio};
+use bukospeak_proto::{ALPN, Fingerprint, IDLE_TIMEOUT, MemberId, PROTOCOL_VERSION, SERVER_NAME, audio};
 use bytes::Bytes;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
@@ -11,9 +11,8 @@ use tokio::sync::mpsc;
 
 use crate::pin::PinVerifier;
 
-/// Often enough to keep NAT and Tailscale paths open, and well within the server's idle timeout.
+/// Often enough to keep NAT and Tailscale paths open, and well within the idle timeout.
 const KEEP_ALIVE: Duration = Duration::from_secs(5);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct JoinConfig {
     /// The server as `host:port`.
@@ -175,7 +174,7 @@ fn client_config(pin: Option<Fingerprint>) -> (quinn::ClientConfig, Arc<Mutex<Op
 
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(KEEP_ALIVE));
-    transport.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("15 s is a valid idle timeout")));
+    transport.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("the idle timeout fits QUIC's varint")));
     let tls = QuicClientConfig::try_from(tls).expect("the config has TLS 1.3 and no early data");
     let mut client = quinn::ClientConfig::new(Arc::new(tls));
     client.transport_config(Arc::new(transport));
@@ -185,18 +184,11 @@ fn client_config(pin: Option<Fingerprint>) -> (quinn::ClientConfig, Arc<Mutex<Op
 /// Moves the server's control messages into a channel, which `next_event` can wait on beside
 /// datagrams: a read cut off mid-message would lose its part.
 async fn read_control(mut recv: RecvStream, forward: mpsc::UnboundedSender<Result<ServerMessage, control::Error>>) {
-    loop {
-        match control::read(&mut recv).await {
-            Ok(Some(message)) => {
-                if forward.send(Ok(message)).is_err() {
-                    return;
-                }
-            }
-            Ok(None) => return,
-            Err(error) => {
-                let _ = forward.send(Err(error));
-                return;
-            }
+    while let Some(message) = control::read(&mut recv).await.transpose() {
+        let failed = message.is_err();
+        // A failed send means the session is gone; a failed read ends the stream.
+        if forward.send(message).is_err() || failed {
+            return;
         }
     }
 }

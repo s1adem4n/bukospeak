@@ -5,17 +5,13 @@ mod room;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
-use bukospeak_proto::ALPN;
+use bukospeak_proto::{ALPN, IDLE_TIMEOUT};
 use quinn::crypto::rustls::QuicServerConfig;
 
 pub use identity::Identity;
 pub use room::Room;
-
-/// A connection that stays silent this long is gone; clients send keep-alives well within it.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A QUIC endpoint on `listen` that presents the identity's certificate.
 pub fn endpoint(identity: &Identity, listen: SocketAddr) -> anyhow::Result<quinn::Endpoint> {

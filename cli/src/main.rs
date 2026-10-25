@@ -65,10 +65,12 @@ async fn join(server: String, name: String, room_key: String) -> anyhow::Result<
     println!("joined; also here: {}", if others.is_empty() { "nobody".into() } else { others.join(", ") });
 
     let mut speaking = BTreeSet::new();
+    // One listener for the whole session: a Ctrl-C between two of them would be missed.
+    let mut stop = std::pin::pin!(tokio::signal::ctrl_c());
     loop {
         let event = tokio::select! {
             event = session.next_event() => event?,
-            _ = tokio::signal::ctrl_c() => break,
+            _ = &mut stop => break,
         };
         match event {
             Event::Joined(member) => {
