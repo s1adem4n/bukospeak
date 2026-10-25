@@ -77,7 +77,7 @@ struct Input {
 
 impl VoiceUnit {
     /// Creates the unit and starts it playing the halves, which come back if it can't.
-    pub fn start(microphone: Microphone, speaker: Speaker) -> Result<Self, Failure> {
+    pub fn start(microphone: Microphone, speaker: Speaker) -> Result<Self, Box<Failure>> {
         let input = Box::new(Input { unit: ptr::null_mut(), samples: Box::new([0.0; MAX_FRAMES as usize]), microphone });
         let mut this =
             Self { unit: ptr::null_mut(), input: NonNull::from(Box::leak(input)), speaker: NonNull::from(Box::leak(Box::new(speaker))) };
@@ -85,7 +85,7 @@ impl VoiceUnit {
             Ok(()) => Ok(this),
             Err(error) => {
                 let (microphone, speaker) = this.stop();
-                Err(Failure { error, microphone, speaker })
+                Err(Box::new(Failure { error, microphone, speaker }))
             }
         }
     }

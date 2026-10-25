@@ -40,7 +40,11 @@ final class Call: NSObject {
     /// The call CallKit knows, from asking it to start until it ended.
     @ObservationIgnored private var id: UUID?
     /// Whether CallKit activated the audio session for the call.
-    @ObservationIgnored private var isAudioActive = false
+    @ObservationIgnored private var isSessionActive = false
+    /// Whether an interruption took the active session away.
+    @ObservationIgnored private var isInterrupted = false
+    /// Whether the call plays on the microphone and speaker.
+    @ObservationIgnored private var isPlaying = false
 
     private static let log = Logger(subsystem: "digital.buko.BukoSpeak", category: "call")
 
@@ -72,15 +76,15 @@ final class Call: NSObject {
 
     /// Starts a call that joins the channel.
     func join() async {
-        guard id == nil else { return }
+        guard id == nil, phase != .joining else { return }
+        phase = .joining
+        changedServer = nil
         guard await AudioSession.microphoneAllowed() else {
             phase = .failed("BukoSpeak may not use the microphone. Allow it in the Settings app.")
             return
         }
         let id = UUID()
         self.id = id
-        changedServer = nil
-        phase = .joining
         let start = CXStartCallAction(call: id, handle: CXHandle(type: .generic, value: "BukoSpeak"))
         // Configured again before every call: iOS can otherwise hold on to a stale audio session
         // for the provider and never activate the new call's.
@@ -171,6 +175,7 @@ final class Call: NSObject {
         members = joined.members
         speaking = []
         phase = .connected
+        updateAudio()
     }
 
     private func handle(_ event: EngineEvent) {
@@ -194,15 +199,13 @@ final class Call: NSObject {
         guard let id else { return }
         phase = .reconnecting
         speaking = []
+        updateAudio()
         do {
             let joined = try await joinChannel()
             guard self.id == id else { return }
-            connected(joined)
             // A join starts unmuted.
             engine.setMuted(isMuted)
-            if isAudioActive {
-                startAudio()
-            }
+            connected(joined)
         } catch {
             guard self.id == id else { return }
             provider.reportCall(with: id, endedAt: nil, reason: .failed)
@@ -210,12 +213,23 @@ final class Call: NSObject {
         }
     }
 
-    private func startAudio() {
-        do throws(AudioError) {
-            try engine.startAudio()
-        } catch {
-            fail("The microphone and speaker didn't start: \(error.message)")
+    /// Plays the call on the microphone and speaker exactly while it is connected and its
+    /// audio session active: CallKit may activate the session before the join is done.
+    private func updateAudio() {
+        let plays = phase == .connected && isSessionActive && !isInterrupted
+        guard plays != isPlaying else { return }
+        if plays {
+            do throws(AudioError) {
+                try engine.startAudio()
+            } catch {
+                return fail("The microphone and speaker didn't start: \(error.message)")
+            }
+            Self.log.info("the call's audio plays")
+        } else {
+            engine.stopAudio()
+            Self.log.info("the call's audio stopped")
         }
+        isPlaying = plays
     }
 
     /// Ends a call that is up, after telling CallKit it failed.
@@ -229,7 +243,9 @@ final class Call: NSObject {
     private func end(failure: String?) async {
         // First, so a join or a reconnect under way sees the call is over.
         id = nil
+        // Leaving stops the call's audio.
         await engine.leave()
+        isPlaying = false
         members = []
         speaking = []
         you = nil
@@ -240,15 +256,17 @@ final class Call: NSObject {
 
     private func interrupted(_ notification: Notification) {
         guard
-            isAudioActive,
+            isSessionActive,
             let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
             let type = AVAudioSession.InterruptionType(rawValue: raw)
         else { return }
+        Self.log.info("interruption \(raw)")
         switch type {
         case .began:
-            engine.stopAudio()
+            isInterrupted = true
+            updateAudio()
         case .ended:
-            resumeAudio()
+            reactivateSession()
         @unknown default:
             break
         }
@@ -256,7 +274,9 @@ final class Call: NSObject {
 
     private func mediaServicesWereReset() {
         guard id != nil else { return }
-        engine.stopAudio()
+        Self.log.info("media services were reset")
+        isInterrupted = true
+        updateAudio()
         do {
             try AudioSession.configure()
         } catch {
@@ -264,27 +284,28 @@ final class Call: NSObject {
                 "The audio system restarted, and the call's audio couldn't be set up again: \(error.localizedDescription)"
             )
         }
-        if isAudioActive {
-            resumeAudio()
+        if isSessionActive {
+            reactivateSession()
         }
     }
 
     /// Activates the audio session again after it was taken away, the one case CallKit leaves
-    /// to the app, and plays the call.
-    private func resumeAudio() {
+    /// to the app.
+    private func reactivateSession() {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             return fail("The call's audio didn't come back: \(error.localizedDescription)")
         }
-        startAudio()
+        isInterrupted = false
+        updateAudio()
     }
 }
 
 extension Call: @MainActor CXProviderDelegate {
     func providerDidReset(_ provider: CXProvider) {
         // CallKit ended every call.
-        isAudioActive = false
+        isSessionActive = false
         Task { await end(failure: nil) }
     }
 
@@ -334,13 +355,16 @@ extension Call: @MainActor CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        isAudioActive = true
-        startAudio()
+        Self.log.info("CallKit activated the audio session")
+        isSessionActive = true
+        isInterrupted = false
+        updateAudio()
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-        isAudioActive = false
-        engine.stopAudio()
+        Self.log.info("CallKit deactivated the audio session")
+        isSessionActive = false
+        updateAudio()
     }
 }
 

@@ -6,6 +6,7 @@ use std::mem;
 use bukospeak_audio_ios::{Error, Failure, VoiceUnit};
 use bukospeak_core::{Microphone, Speaker};
 
+#[expect(clippy::large_enum_variant, reason = "an engine holds one, so its size doesn't matter")]
 pub enum Audio {
     /// No call.
     None,
@@ -22,7 +23,8 @@ impl Audio {
                     *self = Self::Playing(unit);
                     Ok(())
                 }
-                Err(Failure { error, microphone, speaker }) => {
+                Err(failure) => {
+                    let Failure { error, microphone, speaker } = *failure;
                     *self = Self::Idle(microphone, speaker);
                     Err(error)
                 }

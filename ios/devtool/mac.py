@@ -50,7 +50,7 @@ def run(target: Target, *argv: str, capture: bool = False, check: bool = True) -
 
 def stream(target: Target, script: str) -> subprocess.Popen:
     """Starts a script whose output, stdout and stderr together, the caller reads line by line."""
-    command = shlex.join(["bash", "-c", "set -uo pipefail\n" + _environment(target) + script])
+    command = shlex.join(["bash", "-c", "set -euo pipefail\n" + _environment(target) + script])
     return subprocess.Popen([*_SSH, target.host, command], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
