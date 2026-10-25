@@ -1,5 +1,5 @@
 [package]
-name = "bukospeak-desktop"
+name = "bukospeak-audio-desktop"
 description = "Plays a BukoSpeak call on a desktop's audio devices"
 version.workspace = true
 edition.workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["proto", "core", "desktop", "server", "cli"]
+members = ["proto", "core", "audio/desktop", "server", "cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,8 +9,8 @@ rust-version = "1.98"
 repository = "https://github.com/s1adem4n/bukospeak"
 
 [workspace.dependencies]
+bukospeak-audio-desktop = { path = "audio/desktop" }
 bukospeak-core = { path = "core" }
-bukospeak-desktop = { path = "desktop" }
 bukospeak-proto = { path = "proto" }
 bukospeak-server = { path = "server" }
 anyhow = "1.0.104"

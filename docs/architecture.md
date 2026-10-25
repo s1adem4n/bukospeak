@@ -70,7 +70,7 @@ A join hands back the call's two realtime ends, a `Microphone` the capture callb
 48 kHz mono into and a `Speaker` the render callback pulls it from, in buffers of any length.
 They, the audio and the uplink thread exist only for a call.
 
-- Desktop (Linux, Windows): the `desktop` crate plays them on `cpal` streams, which a thread of
+- Desktop (Linux, Windows): the `audio/desktop` crate plays them on `cpal` streams, which a thread of
   its own builds anew when a stream reports its device lost or itself invalid (a stream the
   backend rerouted itself plays on). A stream lends its end to the callback, which hands it back
   when the stream drops. Devices without 48 kHz are mixed to mono and resampled with rubato's
@@ -95,7 +95,7 @@ captured.
    (virtual clocks, drift, jitter, loss traces)
 2. Playout: decoding, mixing, limiter, speaking state
 3. Gate and capture: RNNoise, Opus, the hybrid-mode test
-4. Engine: threads, uplink, network task, synchronous API; the `desktop` crate (`cpal`), devices in the CLI
+4. Engine: threads, uplink, network task, synchronous API; the `audio/desktop` crate (`cpal`), devices in the CLI
 5. Desktop AGC and high-pass with `sonora`
 6. Desktop AEC: `cpal` with `sonora`, or native WASAPI (communications mode, loopback reference)
 7. iOS app (`ffi`, VoiceProcessingIO, CallKit), Windows app (WinUI 3)

@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 bukospeak-core.workspace = true
-bukospeak-desktop.workspace = true
+bukospeak-audio-desktop.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true

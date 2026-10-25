@@ -10,7 +10,7 @@ latency, Opus at high bitrates, and an iOS app that keeps its microphone through
 | `proto/` | The protocol: control messages, audio datagrams, certificate fingerprints |
 | `server/` | The server, which relays each member's audio to everyone else |
 | `core/` | The client side the apps share: the engine, joining and pinning the server, noise suppression, voice activation, Opus, jitter buffers and the mix |
-| `desktop/` | Plays a call on the desktop's audio devices, through cpal |
+| `audio/desktop/` | Plays a call on the desktop's audio devices, through cpal |
 | `cli/` | `bukospeak`, a terminal client for trying the server on the desktop's devices |
 
 One QUIC connection per member (TLS 1.3): control messages on its first stream, Opus frames as

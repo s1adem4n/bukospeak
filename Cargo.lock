@@ -219,12 +219,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bukospeak-audio-desktop"
+version = "0.1.0"
+dependencies = [
+ "bukospeak-core",
+ "cpal",
+ "rubato",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "bukospeak-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bukospeak-audio-desktop",
  "bukospeak-core",
- "bukospeak-desktop",
  "clap",
  "ctrlc",
  "dirs",
@@ -245,16 +255,6 @@ dependencies = [
  "rustls",
  "thiserror 2.0.21",
  "tokio",
-]
-
-[[package]]
-name = "bukospeak-desktop"
-version = "0.1.0"
-dependencies = [
- "bukospeak-core",
- "cpal",
- "rubato",
- "thiserror 2.0.21",
 ]
 
 [[package]]
