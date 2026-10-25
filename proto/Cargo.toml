@@ -4,7 +4,6 @@ description = "What the bukospeak server and its clients say to each other"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [dependencies]
