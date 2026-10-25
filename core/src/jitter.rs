@@ -124,6 +124,13 @@ impl JitterBuffer {
     pub fn insert(&mut self, packet: Packet) {
         // A late frame still tells how much the delay spreads.
         self.jitter.observe(packet.index, packet.arrival_us);
+        if let State::Idle { over: Some(over), waited } = self.state
+            && distance(over, packet.index) <= -(SLOTS as i64)
+            && self.oldest_pending().is_none()
+        {
+            // Far behind the last talkspurt is no straggler: the sender's timeline started over.
+            self.state = State::Idle { over: None, waited };
+        }
         if let State::Idle { over, waited } = self.state
             && self.oldest_pending().is_none()
         {
@@ -497,6 +504,17 @@ mod tests {
         buffer.insert(packet(1, false, 30_000));
         assert_eq!(buffer.pop(), Playout::Silent);
         assert_eq!(buffer.stats().discarded, 1);
+    }
+
+    #[test]
+    fn a_timeline_that_starts_over_plays_again() {
+        let mut buffer = JitterBuffer::default();
+        buffer.insert(packet(1000, true, 0));
+        assert_eq!(Played::from(buffer.pop()), Played::Frame(1000));
+        buffer.insert(packet(0, false, FRAME_US));
+        buffer.insert(packet(1, true, 2 * FRAME_US));
+        let played: Vec<Played> = (0..2).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, [Played::Frame(0), Played::Frame(1)]);
     }
 
     #[test]
