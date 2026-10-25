@@ -1,6 +1,7 @@
 //! Evens out the microphone's signal where the platform's audio doesn't: a high-pass filter takes
-//! out rumble and hum below the voice before RNNoise, and WebRTC's AGC2 brings speech to a
-//! steady level after it, without raising the noise between words above −50 dBFS.
+//! out rumble and hum below the voice before RNNoise, with the speaker's echo if it plays aloud,
+//! and WebRTC's AGC2 brings speech to a steady level after it, without raising the noise between
+//! words above −50 dBFS.
 //!
 //! Both are `sonora`'s, the Rust port of WebRTC's audio processing. Its `AudioProcessing`
 //! allocates on every frame, so this puts the AGC's parts together itself; they take samples
@@ -17,8 +18,10 @@ use sonora_agc2::noise_level_estimator::NoiseLevelEstimator;
 use sonora_agc2::saturation_protector::SaturationProtector;
 use sonora_agc2::speech_level_estimator::{AdaptiveDigitalConfig, SpeechLevelEstimator};
 
-/// Who conditions the microphone's signal: takes out the rumble below the voice and evens out
-/// its level.
+use crate::echo::EchoCanceller;
+
+/// Who conditions the microphone's signal: takes out the rumble below the voice and the
+/// speaker's echo, and evens out its level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Conditioning {
     /// The platform's audio, as iOS's voice processing unit does.
@@ -28,7 +31,11 @@ pub enum Conditioning {
 }
 
 pub struct Conditioner {
+    /// The high-pass filter alone, and with AEC3 after it, for when the speaker's echo is
+    /// cancelled.
     high_pass: HighPassFilter,
+    echo: EchoCanceller,
+    echo_cancellation: bool,
     /// The frame the high-pass filter works on, in the form it takes.
     filtered: [Vec<f32>; 1],
     noise: NoiseLevelEstimator,
@@ -45,6 +52,8 @@ impl Conditioner {
         let config = AdaptiveDigitalConfig::default();
         Self {
             high_pass: HighPassFilter::new(SAMPLE_RATE as i32, 1),
+            echo: EchoCanceller::new(),
+            echo_cancellation: true,
             filtered: [vec![0.0; FRAME_SAMPLES]],
             noise: NoiseLevelEstimator::default(),
             speech: SpeechLevelEstimator::new(&config, ADJACENT_SPEECH_FRAMES_THRESHOLD),
@@ -54,8 +63,23 @@ impl Conditioner {
         }
     }
 
-    /// Filters a frame, as captured, of samples scaled like 16-bit PCM.
-    pub fn filter(&mut self, frame: &mut [f32; FRAME_SAMPLES]) {
+    /// Whether the speaker's echo is cancelled (the default) or left, for a headset whose own
+    /// audio cancels it.
+    pub fn set_echo_cancellation(&mut self, on: bool) {
+        self.echo_cancellation = on;
+    }
+
+    /// Filters a frame, as captured, in −1.0..=1.0; and with what the speaker played meanwhile,
+    /// if it plays, takes out its echo. AEC3 hears what it played even while echo cancellation
+    /// is off, so it has its delay when turned on.
+    pub fn filter(&mut self, frame: &mut [f32; FRAME_SAMPLES], played: Option<&[f32; FRAME_SAMPLES]>) {
+        if let Some(played) = played {
+            self.echo.render(played);
+            if self.echo_cancellation {
+                self.echo.capture(frame);
+                return;
+            }
+        }
         self.filtered[0].copy_from_slice(frame);
         self.high_pass.process_channels(&mut self.filtered);
         frame.copy_from_slice(&self.filtered[0]);
@@ -91,12 +115,10 @@ mod tests {
     use bukospeak_proto::audio::Level;
 
     use super::*;
+    use crate::capture::PCM_SCALE;
     use crate::signal::voice;
 
     const SECOND: usize = SAMPLE_RATE as usize;
-
-    /// RNNoise scales like 16-bit PCM.
-    const PCM_SCALE: f32 = 32_768.0;
 
     /// Conditions a signal, speech throughout, and returns its frames' levels after the gain.
     fn levels(signal: &[f32], speech_probability: f32) -> Vec<Level> {
@@ -106,8 +128,9 @@ mod tests {
             .0
             .iter()
             .map(|frame| {
+                let mut frame = *frame;
+                conditioner.filter(&mut frame, None);
                 let mut frame = frame.map(|sample| sample * PCM_SCALE);
-                conditioner.filter(&mut frame);
                 conditioner.gain(&mut frame, speech_probability);
                 Level::of(&frame.map(|sample| sample / PCM_SCALE))
             })
@@ -148,9 +171,9 @@ mod tests {
             .0
             .iter()
             .flat_map(|frame| {
-                let mut frame = frame.map(|sample| sample * PCM_SCALE);
-                conditioner.filter(&mut frame);
-                frame.map(|sample| sample / PCM_SCALE)
+                let mut frame = *frame;
+                conditioner.filter(&mut frame, None);
+                frame
             })
             .collect();
         // After the filter's first 100 ms, 50 Hz at −9 dBov falls by over 20 dB.

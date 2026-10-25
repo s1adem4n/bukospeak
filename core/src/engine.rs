@@ -22,6 +22,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::capture::Capture;
 use crate::channel::{Announcement, Channel, Event, Lost};
 use crate::conditioner::Conditioning;
+use crate::echo;
 use crate::jitter::Packet;
 use crate::microphone::{Microphone, Settings};
 use crate::playout::Mixer;
@@ -123,6 +124,13 @@ impl Engine {
         // libopus creates codecs without fail for the fixed formats asked for.
         let capture = Capture::new(self.conditioning).expect("the encoder can be created");
         let mixer = Mixer::new().expect("the decoders can be created");
+        let (tap, played) = match self.conditioning {
+            Conditioning::Engine => {
+                let (tap, played) = echo::reference();
+                (Some(tap), Some(played))
+            }
+            Conditioning::Platform => (None, None),
+        };
 
         let session = self.runtime.block_on(Session::join(config.clone()))?;
         let fingerprint = session.fingerprint();
@@ -143,8 +151,8 @@ impl Engine {
         *call = Some(Call { stop, task });
         Ok(Joined {
             fingerprint,
-            microphone: Microphone::new(capture, frames, uplink, Arc::clone(&self.settings), Arc::clone(&speaking)),
-            speaker: Speaker::new(mixer, speaker_downlink, speaking),
+            microphone: Microphone::new(capture, played, frames, uplink, Arc::clone(&self.settings), Arc::clone(&speaking)),
+            speaker: Speaker::new(mixer, speaker_downlink, speaking, tap),
         })
     }
 
@@ -157,6 +165,13 @@ impl Engine {
     /// Whether the microphone's noise is suppressed (the default), or sent as captured.
     pub fn set_noise_suppression(&self, on: bool) {
         self.settings.noise_suppression.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the speaker's echo is cancelled in what the microphone hears (the default), where
+    /// the engine conditions the signal. A headset doesn't echo, and AEC3 then leaves the voice
+    /// as it is within seconds; off, it doesn't touch it at all.
+    pub fn set_echo_cancellation(&self, on: bool) {
+        self.settings.echo_cancellation.store(on, Ordering::Relaxed);
     }
 
     /// Whether the microphone sends silence, so a talkspurt ends as in a pause.

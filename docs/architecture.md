@@ -27,10 +27,10 @@ A datagram is a 7-byte header and the Opus packet:
 ## Threads
 
 ```
-capture callback (realtime)  10 ms frames → [HPF, AEC] → RNNoise → [AGC, limiter] → gate → Opus → ring → wakes the uplink
+capture callback (realtime)  10 ms frames → [HPF, AEC with the played reference] → RNNoise → [AGC, limiter] → gate → Opus → ring → wakes the uplink
 uplink thread                 drains the ring into QUIC datagrams
 network task (tokio)          datagrams of current members, and their leaves → one ring to the render callback
-render callback (realtime)   jitter buffers → Opus decoders → mix → soft limiter → device
+render callback (realtime)   jitter buffers → Opus decoders → mix → soft limiter → device, and the reference ring
                               the network task also polls who speaks (atomics the callbacks write) → events
 ```
 
@@ -105,6 +105,21 @@ level after it, without raising the noise between words above −50 dBFS; it doe
 speech. AGC2's voice detector is replaced by RNNoise's voice probability, and its limiter, which
 allocates, by the mix's soft limiter. The level in a frame's header is the one sent, after the
 gain.
+
+There the engine also cancels the echo of what the speakers play, with WebRTC's AEC3 from
+`sonora`. The render callback hands its mixed frames to the capture callback through a ring of
+200 ms; the capture callback reads one frame from it per frame captured. The two devices run on
+clocks that drift apart, so it reads at the ratio of their rates, interpolating between samples.
+Each callback measures its device's rate by a linear regression of the samples it handled over
+the time they came in, which callback jitter barely moves; the ratio is used once both measured
+for 5 s. The ring's fill only aligns the reference: the reader starts 40 ms behind and, after
+a second, skips ahead to keep 15 ms of reference in the ring at the least; it starts anew when
+the ring runs dry or holds more than 100 ms. AEC3's delay estimator finds the rest. AEC3 runs in
+its newer transparent mode, which passes speech unchanged where it hears no echo, as with a
+headset. Echo cancellation can be turned off for a device that cancels its own echo.
+
+`sonora` allocates on many of its frames, so it is vendored with patches in `vendor/`, which
+says what each changes.
 
 `unsafe` is allowed only in the crates that bind native interfaces: `ffi` and `audio/ios`.
 

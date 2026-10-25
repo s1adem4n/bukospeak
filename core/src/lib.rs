@@ -3,6 +3,7 @@
 mod capture;
 mod channel;
 mod conditioner;
+mod echo;
 mod engine;
 mod gate;
 mod jitter;

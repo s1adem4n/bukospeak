@@ -43,6 +43,9 @@ enum Command {
         /// Send the microphone as captured, for one whose noise is suppressed already.
         #[arg(long)]
         no_noise_suppression: bool,
+        /// Leave the speakers' echo in what the microphone hears, for a headset.
+        #[arg(long)]
+        no_echo_cancellation: bool,
     },
 }
 
@@ -70,8 +73,9 @@ fn main() -> anyhow::Result<()> {
         .init();
     match Args::parse().command {
         Command::Devices => devices(),
-        Command::Join { server, name, room_key, input, output, no_noise_suppression } => {
-            join(JoinConfig { server, name, room_key, pin: None }, input, output, !no_noise_suppression)
+        Command::Join { server, name, room_key, input, output, no_noise_suppression, no_echo_cancellation } => {
+            let processing = Processing { noise_suppression: !no_noise_suppression, echo_cancellation: !no_echo_cancellation };
+            join(JoinConfig { server, name, room_key, pin: None }, input, output, processing)
         }
     }
 }
@@ -86,7 +90,13 @@ fn devices() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, noise_suppression: bool) -> anyhow::Result<()> {
+/// What the engine does to the microphone's signal.
+struct Processing {
+    noise_suppression: bool,
+    echo_cancellation: bool,
+}
+
+fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, processing: Processing) -> anyhow::Result<()> {
     let mut known = KnownServers::load()?;
     let server = config.server.clone();
     let pin = known.get(&server);
@@ -94,7 +104,8 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, n
     let (happenings, received) = mpsc::channel();
     // `cpal` passes the microphone's signal as it is.
     let engine = Engine::new(Conditioning::Engine, Arc::new(Forward(happenings.clone())))?;
-    engine.set_noise_suppression(noise_suppression);
+    engine.set_noise_suppression(processing.noise_suppression);
+    engine.set_echo_cancellation(processing.echo_cancellation);
     let Joined { fingerprint, microphone, speaker } = match engine.join(JoinConfig { pin, ..config }) {
         Err(Error::FingerprintChanged { pinned, presented }) => anyhow::bail!(
             "{server}'s certificate changed from {pinned} to {presented}: if the server was set up anew, remove its line from {}",

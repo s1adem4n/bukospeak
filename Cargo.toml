@@ -61,3 +61,9 @@ all = { level = "warn", priority = -1 }
 [patch.crates-io]
 sonora = { path = "vendor/sonora" }
 sonora-aec3 = { path = "vendor/sonora-aec3" }
+
+# AEC3 in a debug build is too slow for the tests' minutes of simulated audio.
+[profile.dev.package.sonora]
+opt-level = 3
+[profile.dev.package.sonora-aec3]
+opt-level = 3

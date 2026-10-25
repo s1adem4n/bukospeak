@@ -9,17 +9,19 @@ use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES};
 use rtrb::Producer;
 
 use crate::capture::{Capture, Encoded};
+use crate::echo::Reference;
 use crate::speaking::Speaking;
 
 /// The engine's settings the capture follows.
 pub(crate) struct Settings {
     pub noise_suppression: AtomicBool,
+    pub echo_cancellation: AtomicBool,
     pub muted: AtomicBool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { noise_suppression: AtomicBool::new(true), muted: AtomicBool::new(false) }
+        Self { noise_suppression: AtomicBool::new(true), echo_cancellation: AtomicBool::new(true), muted: AtomicBool::new(false) }
     }
 }
 
@@ -27,6 +29,10 @@ impl Default for Settings {
 /// here allocates, locks or waits; it wakes the uplink thread when there is a frame to send.
 pub struct Microphone {
     capture: Capture,
+    /// What the speaker played, where its echo is the engine's to cancel, and the frame of it
+    /// read for the frame captured.
+    played: Option<Reference>,
+    played_frame: [f32; FRAME_SAMPLES],
     frame: [f32; FRAME_SAMPLES],
     filled: usize,
     /// When the platform's audio last stopped calling [`push`](Self::push), until it resumes.
@@ -50,15 +56,30 @@ impl Drop for Uplink {
 impl Microphone {
     pub(crate) fn new(
         capture: Capture,
+        played: Option<Reference>,
         frames: Producer<Encoded>,
         uplink: Thread,
         settings: Arc<Settings>,
         speaking: Arc<Speaking>,
     ) -> Self {
-        Self { capture, frame: [0.0; FRAME_SAMPLES], filled: 0, stopped_at: None, settings, speaking, frames, uplink: Uplink(uplink) }
+        Self {
+            capture,
+            played,
+            played_frame: [0.0; FRAME_SAMPLES],
+            frame: [0.0; FRAME_SAMPLES],
+            filled: 0,
+            stopped_at: None,
+            settings,
+            speaking,
+            frames,
+            uplink: Uplink(uplink),
+        }
     }
 
     pub fn push(&mut self, mut samples: &[f32]) {
+        if let Some(played) = &mut self.played {
+            played.captured(Instant::now(), samples.len());
+        }
         if let Some(stopped_at) = self.stopped_at.take() {
             // Truncated, the count wraps as the index does after 497 days anyway.
             self.capture.skip((stopped_at.elapsed().as_micros() / FRAME_DURATION.as_micros()) as u32);
@@ -80,6 +101,9 @@ impl Microphone {
     /// [`push`](Self::push): a talkspurt gets its last frame, and this member shows as quiet.
     /// Once it resumes, the frames meanwhile count as not captured.
     pub fn stopped(&mut self) {
+        if let Some(played) = &mut self.played {
+            played.stopped();
+        }
         self.filled = 0;
         self.stopped_at = Some(Instant::now());
         let mut sent = false;
@@ -96,12 +120,20 @@ impl Microphone {
 
     fn process(&mut self) {
         self.capture.set_noise_suppression(self.settings.noise_suppression.load(Ordering::Relaxed));
+        self.capture.set_echo_cancellation(self.settings.echo_cancellation.load(Ordering::Relaxed));
         if self.settings.muted.load(Ordering::Relaxed) {
             // Muted, the microphone hears silence, and the gate ends a talkspurt as in a pause.
             self.frame.fill(0.0);
         }
+        let played = match &mut self.played {
+            Some(played) => {
+                played.read(&mut self.played_frame);
+                Some(&self.played_frame)
+            }
+            None => None,
+        };
         let mut last_sent = None;
-        let processed = self.capture.process(&self.frame, |frame| {
+        let processed = self.capture.process(&self.frame, played, |frame| {
             send(&mut self.frames, frame);
             last_sent = Some(frame.last);
         });
@@ -138,7 +170,14 @@ mod tests {
         let (frames, sent) = RingBuffer::new(1000);
         let speaking = Arc::new(Speaking::default());
         (
-            Microphone::new(Capture::new(Conditioning::Platform).unwrap(), frames, thread::current(), settings, Arc::clone(&speaking)),
+            Microphone::new(
+                Capture::new(Conditioning::Platform).unwrap(),
+                None,
+                frames,
+                thread::current(),
+                settings,
+                Arc::clone(&speaking),
+            ),
             sent,
             speaking,
         )

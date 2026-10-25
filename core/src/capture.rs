@@ -24,7 +24,7 @@ const EXPECTED_LOSS_PERCENT: i32 = 10;
 const PREROLL: usize = 5;
 
 /// RNNoise takes and returns samples scaled like 16-bit PCM.
-const PCM_SCALE: f32 = 32_768.0;
+pub(crate) const PCM_SCALE: f32 = 32_768.0;
 
 const _: () = assert!(DenoiseState::FRAME_SIZE == FRAME_SAMPLES);
 // An encoded frame's length is stored as a u16.
@@ -86,19 +86,34 @@ impl Capture {
         self.noise_suppression = on;
     }
 
-    /// Takes a captured frame and hands `send` what the gate lets through: nothing, the frame,
-    /// or, when speech starts, the pre-roll and then the frame.
-    pub fn process(&mut self, input: &[f32; FRAME_SAMPLES], mut send: impl FnMut(&Encoded)) -> Result<(), opus::Error> {
+    /// Whether the speaker's echo is cancelled (the default), where the engine conditions the
+    /// signal.
+    pub fn set_echo_cancellation(&mut self, on: bool) {
+        if let Some(conditioner) = &mut self.conditioner {
+            conditioner.set_echo_cancellation(on);
+        }
+    }
+
+    /// Takes a captured frame, with what the speaker played meanwhile if its echo is the
+    /// engine's to cancel, and hands `send` what the gate lets through: nothing, the frame, or,
+    /// when speech starts, the pre-roll and then the frame.
+    pub fn process(
+        &mut self,
+        input: &[f32; FRAME_SAMPLES],
+        played: Option<&[f32; FRAME_SAMPLES]>,
+        mut send: impl FnMut(&Encoded),
+    ) -> Result<(), opus::Error> {
         let index = self.take_index();
         // A NaN, infinite or huge sample from a faulty driver would turn RNNoise's state to NaN for
         // good, and NaN in its spectrum is undefined behavior in its FFT: clip to full scale, as an
         // integer device would, and take NaN for silence.
         self.scaled.iter_mut().zip(input).for_each(|(scaled, sample)| {
-            *scaled = if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) * PCM_SCALE };
+            *scaled = if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) };
         });
         if let Some(conditioner) = &mut self.conditioner {
-            conditioner.filter(&mut self.scaled);
+            conditioner.filter(&mut self.scaled, played);
         }
+        self.scaled.iter_mut().for_each(|sample| *sample *= PCM_SCALE);
         let voice_probability = self.denoiser.process_frame(&mut self.denoised, &self.scaled);
         // Without suppression RNNoise still tells the gate what is speech; the frame goes out as captured.
         let signal = if self.noise_suppression { &mut self.denoised } else { &mut self.scaled };
@@ -181,7 +196,7 @@ mod tests {
         capture.set_noise_suppression(noise_suppression);
         let mut sent = Vec::new();
         for frame in signal.as_chunks().0 {
-            capture.process(frame, |encoded| sent.push(*encoded)).unwrap();
+            capture.process(frame, None, |encoded| sent.push(*encoded)).unwrap();
         }
         sent
     }
@@ -267,11 +282,11 @@ mod tests {
         let signal = voice(2 * SECOND, 0.3);
         let (first, rest) = signal.as_chunks().0.split_first().unwrap();
         // RNNoise sets up its FFT on the first frame.
-        capture.process(first, |_| ()).unwrap();
+        capture.process(first, None, |_| ()).unwrap();
         let mut sent = 0;
         assert_no_alloc::assert_no_alloc(|| {
             for frame in rest {
-                capture.process(frame, |_| sent += 1).unwrap();
+                capture.process(frame, None, |_| sent += 1).unwrap();
             }
         });
         assert!(sent >= 150, "only {sent} frames of 2 s of speech sent");
@@ -282,7 +297,7 @@ mod tests {
         let mut capture = Capture::new(Conditioning::Platform).unwrap();
         let mut sent = Vec::new();
         for frame in voice(SECOND, 0.3).as_chunks().0 {
-            capture.process(frame, |encoded| sent.push(*encoded)).unwrap();
+            capture.process(frame, None, |encoded| sent.push(*encoded)).unwrap();
         }
         assert!(!sent.last().unwrap().last, "still speaking");
         capture.end(|encoded| sent.push(*encoded)).unwrap();
@@ -296,7 +311,7 @@ mod tests {
         assert!(nothing, "a closed gate has nothing to end");
         let mut resumed = Vec::new();
         for frame in voice(SECOND, 0.3).as_chunks().0 {
-            capture.process(frame, |encoded| resumed.push(*encoded)).unwrap();
+            capture.process(frame, None, |encoded| resumed.push(*encoded)).unwrap();
         }
         // The input settles anew before the gate opens again, after the frame ended on.
         let first = resumed[0].index;

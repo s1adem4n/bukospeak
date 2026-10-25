@@ -1,11 +1,13 @@
 //! The render callback's end of a call: the network task's frames in, the mix out.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use bukospeak_proto::MemberId;
 use bukospeak_proto::audio::FRAME_SAMPLES;
 use rtrb::Consumer;
 
+use crate::echo::Tap;
 use crate::jitter::Packet;
 use crate::playout::Mixer;
 use crate::speaking::Speaking;
@@ -25,16 +27,21 @@ pub struct Speaker {
     frame: [f32; FRAME_SAMPLES],
     played: usize,
     speaking: Arc<Speaking>,
+    /// Where the mix goes for the microphone, if its echo is the engine's to cancel.
+    tap: Option<Tap>,
     /// Whether the platform's audio stopped calling [`pull`](Self::pull) since it last did.
     stopped: bool,
 }
 
 impl Speaker {
-    pub(crate) fn new(mixer: Mixer, downlink: Consumer<Downlink>, speaking: Arc<Speaking>) -> Self {
-        Self { mixer, downlink, frame: [0.0; FRAME_SAMPLES], played: FRAME_SAMPLES, speaking, stopped: false }
+    pub(crate) fn new(mixer: Mixer, downlink: Consumer<Downlink>, speaking: Arc<Speaking>, tap: Option<Tap>) -> Self {
+        Self { mixer, downlink, frame: [0.0; FRAME_SAMPLES], played: FRAME_SAMPLES, speaking, tap, stopped: false }
     }
 
     pub fn pull(&mut self, mut samples: &mut [f32]) {
+        if let Some(tap) = &mut self.tap {
+            tap.played(Instant::now(), samples.len());
+        }
         if self.stopped {
             self.stopped = false;
             self.flush();
@@ -54,6 +61,9 @@ impl Speaker {
     /// For when the platform's audio stops calling [`pull`](Self::pull): nobody shows as
     /// speaking meanwhile, and what arrived by the time it resumes is too late to play.
     pub fn stopped(&mut self) {
+        if let Some(tap) = &mut self.tap {
+            tap.stopped();
+        }
         self.stopped = true;
         self.speaking.set_voices(std::iter::empty());
     }
@@ -77,6 +87,9 @@ impl Speaker {
             }
         }
         self.mixer.render(&mut self.frame);
+        if let Some(tap) = &mut self.tap {
+            tap.push(&self.frame);
+        }
         self.played = 0;
         self.speaking.set_voices(self.mixer.speaking());
     }
@@ -93,7 +106,7 @@ mod tests {
     fn a_stopped_speaker_shows_nobody_and_resumes_without_what_arrived_meanwhile() {
         let (mut downlink, delivered) = RingBuffer::new(100);
         let speaking = Arc::new(Speaking::default());
-        let mut speaker = Speaker::new(Mixer::new().unwrap(), delivered, Arc::clone(&speaking));
+        let mut speaker = Speaker::new(Mixer::new().unwrap(), delivered, Arc::clone(&speaking), None);
         let (member, you) = (MemberId(2), MemberId(1));
         let packets = talkspurt(60, 440.0, 0.5);
         let mut played = [0.0; FRAME_SAMPLES];
