@@ -17,7 +17,7 @@ use std::thread;
 use bukospeak_audio_desktop::{Audio, DeviceId, Direction};
 use bukospeak_core::proto::control::{Member, Rejection};
 use bukospeak_core::proto::{Fingerprint, MemberId};
-use bukospeak_core::{Conditioning, Engine, Error, JoinConfig, Joined, Listener, Microphone, Speaker, State, Update};
+use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Microphone, Speaker, State, Update};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use crate::known_servers::KnownServers;
@@ -160,12 +160,10 @@ pub struct Call {
     left_call: u64,
     /// The server and room key to watch while out of a call, if any.
     watched: Option<(String, String)>,
-    /// The engine's state of the call, which may join again before its join came back here.
-    engine_state: State,
+    /// The call as the engine told it last, which may join again before its join came back
+    /// here; empty out of a call.
+    channel: Channel,
     phase: Phase,
-    you: Option<MemberId>,
-    members: Vec<Member>,
-    speaking: Vec<MemberId>,
     present: Vec<Member>,
     muted: bool,
     notice: Option<Notice>,
@@ -193,11 +191,8 @@ impl Call {
             leaves: 0,
             left_call: 0,
             watched: None,
-            engine_state: State::Out,
+            channel: Channel::default(),
             phase: Phase::Idle,
-            you: None,
-            members: Vec::new(),
-            speaking: Vec::new(),
             present: Vec::new(),
             muted: false,
             notice: None,
@@ -216,17 +211,17 @@ impl Call {
 
     /// This member's id, while in the call.
     pub fn you(&self) -> Option<MemberId> {
-        self.you
+        self.channel.you()
     }
 
     /// Everyone in the call, this member included, in the order they came.
     pub fn members(&self) -> &[Member] {
-        &self.members
+        self.channel.members()
     }
 
     /// Who speaks now, this member among them.
     pub fn speaking(&self) -> &[MemberId] {
-        &self.speaking
+        self.channel.speaking()
     }
 
     /// Who is in the channel, watched from outside it.
@@ -330,7 +325,7 @@ impl Call {
         self.numbers += 1;
         let number = self.numbers;
         self.call = Some((number, join.server.clone()));
-        (self.joined, self.engine_state) = (false, State::Out);
+        (self.joined, self.channel) = (false, Channel::default());
         self.phase = Phase::Joining;
         self.notice = None;
         self.current.store(number, Ordering::Relaxed);
@@ -361,23 +356,21 @@ impl Call {
     fn update(&mut self, update: Update) {
         let Update { channel, lost, .. } = update;
         self.present = channel.present().to_vec();
-        // Out of a call, or of one left whose last updates still arrive.
-        if self.call.is_none() || self.leaves > 0 || channel.call() <= self.left_call {
+        let Some((_, server)) = &self.call else { return };
+        // Of a call left whose last updates still arrive.
+        if self.leaves > 0 || channel.call() <= self.left_call {
             return;
         }
-        self.engine_state = channel.state();
-        self.you = channel.you();
-        self.members = channel.members().to_vec();
-        self.speaking = channel.speaking().to_vec();
         if let Some(lost) = lost {
-            let failure = match (lost.rejoin, &self.call) {
-                (Error::FingerprintChanged { pinned, presented }, Some((_, server))) => {
+            let failure = match lost.rejoin {
+                Error::FingerprintChanged { pinned, presented } => {
                     Failure::CertificateChanged { server: server.clone(), pinned, presented }
                 }
                 _ => Failure::ConnectionLost,
             };
             return self.end(Some(failure));
         }
+        self.channel = channel;
         self.follow();
     }
 
@@ -387,7 +380,7 @@ impl Call {
         if !self.joined {
             return;
         }
-        match self.engine_state {
+        match self.channel.state() {
             State::Connected => self.phase = Phase::Connected,
             State::Reconnecting => self.phase = Phase::Reconnecting,
             // Not entered yet: the update that tells who is in the call is still on its way. A
@@ -403,10 +396,7 @@ impl Call {
             return;
         }
         self.current.store(0, Ordering::Relaxed);
-        self.engine_state = State::Out;
-        self.you = None;
-        self.members.clear();
-        self.speaking.clear();
+        self.channel = Channel::default();
         self.phase = failure.map_or(Phase::Idle, Phase::Failed);
         self.leaves += 1;
         self.send(Command::Leave);

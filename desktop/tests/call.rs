@@ -29,9 +29,14 @@ struct Server {
 }
 
 fn serve() -> Server {
+    serve_at("127.0.0.1:0")
+}
+
+/// A server with a new identity at `address`.
+fn serve_at(address: &str) -> Server {
     let runtime = Runtime::new().unwrap();
     let identity = Identity::generate().unwrap();
-    let endpoint = runtime.block_on(async { bukospeak_server::endpoint(&identity, "127.0.0.1:0".parse().unwrap()) }).unwrap();
+    let endpoint = runtime.block_on(async { bukospeak_server::endpoint(&identity, address.parse().unwrap()) }).unwrap();
     let address = endpoint.local_addr().unwrap().to_string();
     runtime.spawn(Room::new(ROOM_KEY.into()).serve(endpoint));
     Server { _runtime: runtime, address, fingerprint: identity.fingerprint() }
@@ -275,6 +280,24 @@ fn a_dropout_shows_reconnecting_and_a_lost_connection_ends_the_call_and_its_audi
     app.until("the loss", |call| *call.phase() == Phase::Failed(Failure::ConnectionLost));
     app.settle();
     assert_eq!(app.devices.playing.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_server_set_up_anew_during_the_call_asks_to_trust_its_certificate() {
+    let server = serve();
+    let mut app = App::new("anew");
+    app.join(&server, "first", ROOM_KEY);
+    app.until("the call", connected);
+    let (address, pinned) = (server.address.clone(), server.fingerprint);
+    drop(server);
+    let server = serve_at(&address);
+    let changed = Failure::CertificateChanged { server: address, pinned, presented: server.fingerprint };
+    app.until("the changed certificate", |call| *call.phase() == Phase::Failed(changed.clone()));
+    app.settle();
+    assert_eq!(app.devices.playing.load(Ordering::Relaxed), 0);
+
+    app.call.trust(join(&server, "first", ROOM_KEY));
+    app.until("the call", connected);
 }
 
 #[test]
