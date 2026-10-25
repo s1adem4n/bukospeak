@@ -188,21 +188,16 @@ impl JitterBuffer {
             return Playout::Fec(self.slots[slot(following)].as_ref().expect("the following frame is held").opus());
         }
 
-        match self.oldest_pending().map(|oldest| distance(next, oldest)) {
+        match self.oldest_pending() {
             // Nothing ahead: the frame is late, or the talkspurt's last one was lost. Waiting
             // for it inserts a frame.
-            None => {
-                self.stats.inserted += 1;
-                self.conceal(next, concealed)
-            }
-            Some(gap) if gap > i64::from(MAX_GAP) => {
-                self.state = State::Idle { over: Some(next.wrapping_sub(1)), waited: 0 };
+            None => self.conceal(next, concealed, true),
+            // Starting over at the frames ahead: those in the gap are too late to play.
+            Some(oldest) if distance(next, oldest) > i64::from(MAX_GAP) => {
+                self.state = State::Idle { over: Some(oldest.wrapping_sub(1)), waited: 0 };
                 Playout::Silent
             }
-            Some(_) => {
-                self.stats.concealed += 1;
-                self.conceal(following, concealed)
-            }
+            Some(_) => self.conceal(following, concealed, false),
         }
     }
 
@@ -248,10 +243,17 @@ impl JitterBuffer {
         Playout::Frame(self.slots[slot(index)].as_ref().expect("the frame is held").opus())
     }
 
-    fn conceal(&mut self, next: u32, concealed: u32) -> Playout<'static> {
-        if concealed + 1 >= GIVE_UP_AFTER {
-            self.state = State::Idle { over: Some(next.wrapping_sub(1)), waited: 0 };
+    /// Conceals a frame, inserted or lost, with `next` to play after it; or gives up on the
+    /// talkspurt, `next` included.
+    fn conceal(&mut self, next: u32, concealed: u32, inserted: bool) -> Playout<'static> {
+        if concealed >= GIVE_UP_AFTER {
+            self.state = State::Idle { over: Some(next), waited: 0 };
             return Playout::Silent;
+        }
+        if inserted {
+            self.stats.inserted += 1;
+        } else {
+            self.stats.concealed += 1;
         }
         self.state = State::Playing { next, concealed: concealed + 1 };
         Playout::Conceal
@@ -482,7 +484,8 @@ mod tests {
         let (played, buffer) = simulation.run(0..50, SECOND_US);
         let end = played.iter().position(|played| *played == Played::Frame(48)).unwrap();
         let concealed = played[end + 1..].iter().take_while(|played| **played == Played::Conceal).count();
-        assert_eq!(concealed as u32, GIVE_UP_AFTER - 1);
+        assert_eq!(concealed as u32, GIVE_UP_AFTER);
+        assert_eq!(buffer.stats().inserted, u64::from(GIVE_UP_AFTER));
         assert!(played[end + 1 + concealed..].iter().all(|played| *played == Played::Silent));
         assert!(!buffer.is_playing());
     }
@@ -544,6 +547,30 @@ mod tests {
         assert_eq!(buffer.target(), 6);
         assert!(draining.contains(&Played::Frame(60)));
         assert!(!draining.contains(&Played::Conceal), "concealed while draining: {draining:?}");
+    }
+
+    #[test]
+    fn a_frame_given_up_on_is_discarded_when_it_comes() {
+        let mut buffer = JitterBuffer::default();
+        buffer.insert(packet(0, false, 0));
+        while buffer.pop() != Playout::Silent || buffer.stats().played == 0 {}
+        buffer.insert(packet(1, false, SECOND_US));
+        assert!((0..5).all(|_| buffer.pop() == Playout::Silent));
+        assert_eq!(buffer.stats().discarded, 1);
+    }
+
+    #[test]
+    fn frames_in_a_gap_started_over_from_are_discarded() {
+        let mut buffer = JitterBuffer::default();
+        buffer.insert(packet(0, false, 0));
+        buffer.insert(packet(1, false, FRAME_US));
+        buffer.insert(packet(20, false, 2 * FRAME_US));
+        buffer.insert(packet(21, true, 3 * FRAME_US));
+        let played: Vec<Played> = (0..3).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, [Played::Frame(0), Played::Frame(1), Played::Silent]);
+        buffer.insert(packet(2, false, 4 * FRAME_US));
+        let played: Vec<Played> = (0..2).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, [Played::Frame(20), Played::Frame(21)]);
     }
 
     #[test]
