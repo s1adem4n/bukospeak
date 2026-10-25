@@ -48,6 +48,7 @@ pub struct Capture {
     denoiser: Box<DenoiseState<'static>>,
     encoder: Encoder,
     gate: Gate,
+    noise_suppression: bool,
     next_index: u32,
     /// The latest frames the gate kept back, oldest first.
     preroll: [Option<Encoded>; PREROLL],
@@ -66,11 +67,18 @@ impl Capture {
             denoiser: DenoiseState::new(),
             encoder,
             gate: Gate::default(),
+            noise_suppression: true,
             next_index: 0,
             preroll: [None; PREROLL],
             scaled: [0.0; FRAME_SAMPLES],
             denoised: [0.0; FRAME_SAMPLES],
         })
+    }
+
+    /// Whether the frames sent are RNNoise's output (the default) or the input as captured, for
+    /// a microphone whose noise is suppressed already, by the system or the device.
+    pub fn set_noise_suppression(&mut self, on: bool) {
+        self.noise_suppression = on;
     }
 
     /// Takes a captured frame and hands `send` what the gate lets through: nothing, the frame,
@@ -83,13 +91,17 @@ impl Capture {
             *scaled = if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) * PCM_SCALE };
         });
         let voice_probability = self.denoiser.process_frame(&mut self.denoised, &self.scaled);
-        self.denoised.iter_mut().for_each(|sample| *sample /= PCM_SCALE);
+        // Without suppression RNNoise still tells the gate what is speech; the frame goes out as captured.
+        let signal = if self.noise_suppression { &mut self.denoised } else { &mut self.scaled };
+        signal.iter_mut().for_each(|sample| *sample /= PCM_SCALE);
 
-        let level = Level::of(&self.denoised);
+        let level = Level::of(signal);
         let decision = self.gate.decide(voice_probability, level);
-        let mut frame = Encoded { index: self.next_index, last: decision == Decision::Closes, level, len: 0, opus: [0; MAX_OPUS_LEN] };
-        frame.len = self.encoder.encode_float(&self.denoised, &mut frame.opus)? as u16;
+        let index = self.next_index;
+        // The index counts a frame the encoder failed on too, so the timeline stays true.
         self.next_index = self.next_index.wrapping_add(1);
+        let mut frame = Encoded { index, last: decision == Decision::Closes, level, len: 0, opus: [0; MAX_OPUS_LEN] };
+        frame.len = self.encoder.encode_float(signal, &mut frame.opus)? as u16;
 
         match decision {
             Decision::Quiet => {
@@ -114,9 +126,14 @@ mod tests {
 
     const SECOND: usize = SAMPLE_RATE as usize;
 
-    /// Captures a signal and returns the frames sent.
+    /// Captures a signal with noise suppression and returns the frames sent.
     fn capture(signal: &[f32]) -> Vec<Encoded> {
+        capture_with(signal, true)
+    }
+
+    fn capture_with(signal: &[f32], noise_suppression: bool) -> Vec<Encoded> {
         let mut capture = Capture::new().unwrap();
+        capture.set_noise_suppression(noise_suppression);
         let mut sent = Vec::new();
         for frame in signal.as_chunks().0 {
             capture.process(frame, |encoded| sent.push(*encoded)).unwrap();
@@ -170,5 +187,18 @@ mod tests {
         let sent = capture(&voice(SECOND, 0.3));
         let loudest = sent.iter().map(|frame| frame.level).min().unwrap();
         assert!((10..30).contains(&loudest.minus_dbov()), "loudest frame at -{} dBov", loudest.minus_dbov());
+    }
+
+    #[test]
+    fn without_suppression_noise_still_sends_nothing_and_speech_goes_out_as_captured() {
+        assert!(capture_with(&noise(3 * SECOND, 0.05), false).is_empty());
+
+        let signal = voice(2 * SECOND, 0.3);
+        let frames = signal.as_chunks::<FRAME_SAMPLES>().0;
+        let sent = capture_with(&signal, false);
+        assert!(sent.len() >= 150, "only {} frames of 2 s of speech sent", sent.len());
+        for frame in sent {
+            assert_eq!(frame.level, Level::of(&frames[frame.index as usize]), "frame {}", frame.index);
+        }
     }
 }
