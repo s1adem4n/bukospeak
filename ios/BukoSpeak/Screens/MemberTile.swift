@@ -1,55 +1,45 @@
 import SwiftUI
 
-/// A member: their initial in a ring that lights up while they speak, and their name.
+/// A member: their initial, as Contacts shows it, in a ring that lights up while they speak, and
+/// their name; faded while they reconnect.
 struct MemberTile: View {
     let member: Member
     let speaks: Bool
-    /// Whether to mark them muted, as this member when muted.
     let isMuted: Bool
 
     var body: some View {
-        VStack(spacing: 10) {
-            Text(member.name.prefix(1).uppercased())
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Palette.text)
-                .frame(width: Metrics.avatar, height: Metrics.avatar)
-                .background(Palette.raised, in: .circle)
-                .padding(3)
+        VStack(spacing: 8) {
+            Avatar(name: member.name, size: 72)
+                .padding(4)
                 .overlay {
                     Circle()
-                        .strokeBorder(Palette.live, lineWidth: 2.5)
-                        .shadow(color: Palette.live.opacity(0.5), radius: 8)
+                        .strokeBorder(.green, lineWidth: 3)
                         .opacity(speaks ? 1 : 0)
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if isMuted {
                         Image(systemName: "mic.slash.fill")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.caption2.bold())
                             .foregroundStyle(.white)
-                            .frame(width: 22, height: 22)
-                            .background(Palette.danger, in: .circle)
-                            .overlay { Circle().strokeBorder(Palette.surface, lineWidth: 2.5) }
+                            .frame(width: 24, height: 24)
+                            .background(.red, in: .circle)
+                            .overlay { Circle().strokeBorder(Color(.systemBackground), lineWidth: 2.5) }
                             .transition(.scale.combined(with: .opacity))
                     }
                 }
                 .animation(Motion.speaking, value: speaks)
                 .animation(Motion.spring, value: isMuted)
             Text(member.name)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(Palette.text)
+                .font(.subheadline)
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 16)
-        .padding(.horizontal, 8)
-        .background(Palette.surface, in: .rect(cornerRadius: Metrics.tileRadius))
-        .overlay {
-            RoundedRectangle(cornerRadius: Metrics.tileRadius).strokeBorder(Palette.line)
-        }
+        .opacity(member.reconnecting ? 0.4 : 1)
+        .animation(Motion.spring, value: member.reconnecting)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(member.name)
         .accessibilityValue(
-            [speaks ? "spricht" : nil, isMuted ? "stumm" : nil].compactMap(\.self).joined(separator: ", ")
+            [speaks ? "spricht" : nil, isMuted ? "stumm" : nil, member.reconnecting ? "verbindet neu" : nil]
+                .compactMap(\.self).joined(separator: ", ")
         )
     }
 }

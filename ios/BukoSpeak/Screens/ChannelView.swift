@@ -1,28 +1,45 @@
 import SwiftUI
 
 /// The channel: before a call the logo and Beitreten; in a call who is in it and who speaks, and
-/// the microphone, the output and hanging up.
+/// the output, the microphone and hanging up.
 struct ChannelView: View {
     @Environment(Call.self) private var call
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showsSettings = false
+    /// Where the logo on the start screen becomes the microphone button of the call.
+    @Namespace private var stage
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            if isInCall {
-                channel
-            } else {
-                lobby
+        NavigationStack {
+            Group {
+                if isInCall {
+                    channel
+                } else {
+                    lobby
+                }
+            }
+            .navigationTitle(isInCall ? "BukoSpeak" : "")
+            .navigationSubtitle(status)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Einstellungen", systemImage: "gearshape") { showsSettings = true }
+                }
             }
         }
-        .padding([.horizontal, .bottom], Metrics.margin)
-        .background(Palette.background)
         .animation(Motion.spring, value: call.phase)
         .animation(Motion.spring, value: call.members)
+        .animation(Motion.spring, value: call.present)
+        .onChange(of: watched, initial: true) { _, watched in call.watch(watched != nil) }
         .sensoryFeedback(.impact(weight: .medium), trigger: call.isMuted)
         .sensoryFeedback(.success, trigger: call.phase) { _, phase in phase == .connected }
         .sheet(isPresented: $showsSettings) {
             SettingsView()
+        }
+        .alert(failure ?? "", isPresented: showsFailure) {
+            if let server = call.changedServer {
+                Button("Abbrechen", role: .cancel) {}
+                Button("Vertrauen") { call.trustAnew(server) }
+            }
         }
     }
 
@@ -33,50 +50,78 @@ struct ChannelView: View {
         }
     }
 
-    private var header: some View {
-        HStack {
-            if isInCall {
-                Text("BukoSpeak")
-                    .font(.title.bold())
-                    .foregroundStyle(Palette.text)
-            }
-            Spacer()
-            Button {
-                showsSettings = true
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Palette.text)
-                    .frame(width: 36, height: 36)
-                    .background(Palette.raised, in: .circle)
-            }
-            .accessibilityLabel("Einstellungen")
+    /// What isn't as it should be in the call; empty if nothing.
+    private var status: String {
+        if call.phase == .reconnecting {
+            "Verbinde neu…"
+        } else if call.isHeld {
+            "Gehalten"
+        } else {
+            ""
         }
-        .frame(height: 52)
+    }
+
+    /// The server and room key the start screen watches while it shows in the foreground.
+    private var watched: String? {
+        guard scenePhase == .active, call.phase == .idle || failure != nil else { return nil }
+        return "\(call.settings.server)\n\(call.settings.roomKey)"
+    }
+
+    private var failure: String? {
+        guard case .failed(let message) = call.phase else { return nil }
+        return call.changedServer == nil ? message : "Zertifikat geändert"
+    }
+
+    private var showsFailure: Binding<Bool> {
+        Binding(get: { failure != nil }, set: { if !$0 { call.dismissFailure() } })
     }
 
     private var lobby: some View {
-        VStack(spacing: 0) {
-            if case .failed(let message) = call.phase {
-                notice(message)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
+        VStack(spacing: 20) {
             Spacer()
             BrandMark()
+                .matchedGeometryEffect(id: "microphone", in: stage)
             Text("BukoSpeak")
                 .font(.largeTitle.bold())
-                .foregroundStyle(Palette.text)
-                .padding(.top, 20)
+            present
             Spacer()
             Button(action: join) {
-                if call.phase == .joining {
-                    ProgressView().tint(Palette.onPrimary)
-                } else {
-                    Text("Beitreten")
-                }
+                // The text keeps the button's height while the spinner shows.
+                Text("Beitreten")
+                    .opacity(call.phase == .joining ? 0 : 1)
+                    .overlay {
+                        if call.phase == .joining {
+                            ProgressView()
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(PrimaryButtonStyle())
+            .buttonStyle(.glassProminent)
+            .controlSize(.extraLarge)
             .disabled(call.phase == .joining)
+        }
+        .padding()
+        .background { Spotlight(isJoining: call.phase == .joining) }
+    }
+
+    /// Who is in the channel, before joining it.
+    @ViewBuilder private var present: some View {
+        if !call.present.isEmpty {
+            VStack(spacing: 10) {
+                HStack(spacing: -10) {
+                    ForEach(call.present.prefix(5)) { member in
+                        Avatar(name: member.name, size: 36)
+                            .overlay { Circle().strokeBorder(Color(.systemBackground), lineWidth: 2) }
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                Text(ListFormatter.localizedString(byJoining: call.present.map(\.name)))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .accessibilityElement(children: .combine)
+            .transition(.opacity)
         }
     }
 
@@ -89,100 +134,70 @@ struct ChannelView: View {
         }
     }
 
-    private func notice(_ message: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: call.changedServer == nil ? "exclamationmark.triangle.fill" : "lock.fill")
-                .foregroundStyle(Palette.warning)
-            Text(call.changedServer == nil ? message : "Zertifikat geändert")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Palette.text)
-                .lineLimit(2)
-            Spacer(minLength: 0)
-            if let server = call.changedServer {
-                Button("Vertrauen") { call.trustAnew(server) }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Palette.onPrimary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Palette.text, in: .capsule)
-            }
-        }
-        .padding(.leading, 16)
-        .padding([.trailing, .vertical], 12)
-        .background(Palette.surface, in: .rect(cornerRadius: Metrics.tileRadius))
-        .overlay {
-            RoundedRectangle(cornerRadius: Metrics.tileRadius).strokeBorder(Palette.line)
-        }
-    }
-
     private var channel: some View {
-        VStack(spacing: 0) {
-            if let status {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Palette.warning)
-                        .frame(width: 7, height: 7)
-                    Text(status)
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 16)], spacing: 24) {
+                ForEach(Array(call.members.enumerated()), id: \.element.id) { index, member in
+                    MemberTile(
+                        member: member,
+                        speaks: call.speaking.contains(member.id),
+                        // Your own as you set it, before the server tells it back.
+                        isMuted: member.id == call.you ? call.isMuted : member.muted
+                    )
+                    // One after the other on entering, as the logo lands.
+                    .transition(
+                        .scale(scale: 0.6).combined(with: .opacity)
+                            .animation(Motion.spring.delay(0.1 + Double(index) * 0.05))
+                    )
                 }
-                .font(.footnote)
-                .foregroundStyle(Palette.secondaryText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(.opacity)
             }
-            ScrollView {
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(spacing: Metrics.spacing), count: 2),
-                    spacing: Metrics.spacing
-                ) {
-                    ForEach(call.members) { member in
-                        MemberTile(
-                            member: member,
-                            speaks: call.speaking.contains(member.id),
-                            isMuted: member.id == call.you && call.isMuted
-                        )
-                        .transition(.scale(scale: 0.9).combined(with: .opacity))
-                    }
-                }
-                .padding(.vertical, Metrics.margin)
-            }
-            .scrollIndicators(.hidden)
-            .opacity(call.phase == .reconnecting ? 0.4 : 1)
+            .padding()
+        }
+        .opacity(call.phase == .reconnecting ? 0.4 : 1)
+        .safeAreaInset(edge: .bottom) {
             controls
         }
     }
 
-    /// What isn't as it should be in the call, if anything.
-    private var status: String? {
-        if call.phase == .reconnecting {
-            "Verbinde neu…"
-        } else if call.isHeld {
-            "Gehalten"
-        } else {
-            nil
+    private var controls: some View {
+        GlassEffectContainer(spacing: 20) {
+            HStack(spacing: 20) {
+                RoutePicker()
+                    .frame(width: 64, height: 64)
+                    .glassEffect(in: .circle)
+                muteButton
+                    .matchedGeometryEffect(id: "microphone", in: stage)
+                Button(role: .destructive) {
+                    Task { await call.leave() }
+                } label: {
+                    Image(systemName: "phone.down.fill")
+                        .font(.title2)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.glassProminent)
+                .tint(.red)
+                .accessibilityLabel("Verlassen")
+            }
+            .buttonBorderShape(.circle)
         }
+        .padding(.bottom, 8)
     }
 
-    private var controls: some View {
-        HStack(spacing: 20) {
-            RoutePicker()
-                .frame(width: Metrics.roundButton, height: Metrics.roundButton)
-                .background(Palette.raised, in: .circle)
-            Button {
-                Task { await call.toggleMute() }
-            } label: {
-                Image(systemName: call.isMuted ? "mic.slash.fill" : "mic.fill")
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .buttonStyle(RoundButtonStyle(kind: .main, isOff: call.isMuted))
-            .accessibilityLabel(call.isMuted ? "Stummschaltung aufheben" : "Stummschalten")
-            Button {
-                Task { await call.leave() }
-            } label: {
-                Image(systemName: "phone.down.fill")
-            }
-            .buttonStyle(RoundButtonStyle(kind: .destructive))
-            .accessibilityLabel("Verlassen")
+    /// The microphone: plain glass while it is on, red while muted.
+    @ViewBuilder private var muteButton: some View {
+        let button = Button {
+            Task { await call.toggleMute() }
+        } label: {
+            Image(systemName: call.isMuted ? "mic.slash.fill" : "mic.fill")
+                .font(.title)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 56, height: 56)
         }
-        .padding(.top, 8)
+        .accessibilityLabel(call.isMuted ? "Stummschaltung aufheben" : "Stummschalten")
+        if call.isMuted {
+            button.buttonStyle(.glassProminent).tint(.red)
+        } else {
+            button.buttonStyle(.glass)
+        }
     }
 }

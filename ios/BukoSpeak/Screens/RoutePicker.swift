@@ -6,8 +6,8 @@ struct RoutePicker: UIViewRepresentable {
     func makeUIView(context: Context) -> AVRoutePickerView {
         let picker = AVRoutePickerView()
         picker.prioritizesVideoDevices = false
-        picker.tintColor = UIColor(Palette.text)
-        picker.activeTintColor = UIColor(Palette.live)
+        picker.tintColor = .label
+        picker.activeTintColor = .systemGreen
         return picker
     }
 

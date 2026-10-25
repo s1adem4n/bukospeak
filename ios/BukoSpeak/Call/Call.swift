@@ -27,6 +27,8 @@ final class Call: NSObject {
     private(set) var isHeld = false
     /// The server whose certificate changed since it was pinned, for the user to trust anew.
     private(set) var changedServer: String?
+    /// Who is in the channel, watched from the start screen.
+    private(set) var present: [Member] = []
 
     @ObservationIgnored let settings: Settings
     @ObservationIgnored private let engine: Engine
@@ -50,6 +52,8 @@ final class Call: NSObject {
     @ObservationIgnored private var isEntered = false
     /// The engine's state of the call, which may join again before its join came back here.
     @ObservationIgnored private var engineState = ChannelUpdate.State.out
+    /// The leave of the call before, which a join waits for.
+    @ObservationIgnored private var leaving: Task<Void, Never>?
 
     private static let log = Logger(subsystem: "digital.buko.BukoSpeak", category: "call")
 
@@ -84,6 +88,7 @@ final class Call: NSObject {
         guard id == nil, phase != .joining else { return }
         phase = .joining
         changedServer = nil
+        await leaving?.value
         guard await AudioSession.microphoneAllowed() else {
             phase = .failed("Mikrofon nicht erlaubt")
             return
@@ -104,15 +109,27 @@ final class Call: NSObject {
         }
     }
 
-    /// Ends the call.
+    /// Ends the call: over on the screen at once, while CallKit takes a moment to hear of it.
     func leave() async {
         guard let id else { return }
+        end(failure: nil)
         await request(CXEndCallAction(call: id))
     }
 
     func toggleMute() async {
         guard let id else { return }
         await request(CXSetMutedCallAction(call: id, muted: !isMuted))
+    }
+
+    /// Watches who is in the channel while `on`, for the start screen: only out of a call, and
+    /// only a server pinned by a join before.
+    func watch(_ on: Bool) {
+        let server = settings.server.trimmingCharacters(in: .whitespaces)
+        if on, id == nil, settings.isComplete, let pin = settings.pin(for: server) {
+            engine.watch(server: server, roomKey: settings.roomKey, pin: pin)
+        } else {
+            engine.unwatch()
+        }
     }
 
     /// Applies the noise suppression setting to the call.
@@ -123,6 +140,13 @@ final class Call: NSObject {
     /// Trusts the server's new certificate on the next join, as after it was set up anew.
     func trustAnew(_ server: String) {
         settings.forgetPin(for: server)
+        changedServer = nil
+        phase = .idle
+    }
+
+    /// Forgets the failure the user has seen.
+    func dismissFailure() {
+        guard case .failed = phase else { return }
         changedServer = nil
         phase = .idle
     }
@@ -185,6 +209,8 @@ final class Call: NSObject {
     }
 
     private func update(_ update: ChannelUpdate) {
+        // Watched out of a call, so before the guard for one.
+        if present != update.present { present = update.present }
         guard id != nil else { return }
         if update.state != .out {
             isEntered = true
@@ -193,9 +219,10 @@ final class Call: NSObject {
         guard isEntered else { return }
         let changed = update.state != engineState
         engineState = update.state
-        you = update.you
-        members = update.members
-        speaking = update.speaking
+        // Set only when changed: each set redraws the screen, and a redraw during a tap loses it.
+        if you != update.you { you = update.you }
+        if members != update.members { members = update.members }
+        if speaking != update.speaking { speaking = update.speaking }
         if let lost = update.lost {
             Self.log.error("the connection was lost: \(lost)")
             return fail("Verbindung verloren")
@@ -230,15 +257,17 @@ final class Call: NSObject {
     private func fail(_ reason: String) {
         guard let id else { return }
         provider.reportCall(with: id, endedAt: nil, reason: .failed)
-        Task { await end(failure: reason) }
+        end(failure: reason)
     }
 
-    /// Leaves the channel and forgets the call, with why if it failed.
-    private func end(failure: String?) async {
+    /// Forgets the call, with why if it failed, and leaves the channel: the app shows the call
+    /// over at once, while the leave stops the audio, waits for the server, and a join waits for
+    /// the leave.
+    private func end(failure: String?) {
         // First, so a join under way sees the call is over.
         id = nil
-        // Leaving stops the call's audio.
-        await engine.leave()
+        // The leave stops the audio off the main thread: disposing the voice unit takes long
+        // enough to freeze the screen.
         isPlaying = false
         isEntered = false
         engineState = .out
@@ -249,6 +278,7 @@ final class Call: NSObject {
         engine.setMuted(false)
         isHeld = false
         phase = failure.map(Phase.failed) ?? .idle
+        leaving = Task { [engine] in await engine.leave() }
     }
 
     private func interrupted(_ notification: Notification) {
@@ -306,7 +336,7 @@ extension Call: @MainActor CXProviderDelegate {
     func providerDidReset(_ provider: CXProvider) {
         // CallKit ended every call.
         isSessionActive = false
-        Task { await end(failure: nil) }
+        end(failure: nil)
     }
 
     func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
@@ -332,16 +362,17 @@ extension Call: @MainActor CXProviderDelegate {
                 action.fail()
                 guard id == action.callUUID else { return }
                 Self.log.error("the join failed: \(error.message)")
-                await end(failure: "Beitritt fehlgeschlagen")
+                end(failure: "Beitritt fehlgeschlagen")
             }
         }
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-        Task {
-            await end(failure: nil)
-            action.fulfill()
+        // Ended here already if the app asked; otherwise the system did, say from the lock screen.
+        if id == action.callUUID {
+            end(failure: nil)
         }
+        action.fulfill()
     }
 
     func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {

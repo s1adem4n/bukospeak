@@ -15,7 +15,6 @@ struct SettingsView: View {
                             .textContentType(.nickname)
                     }
                 }
-                .listRowBackground(Palette.surface)
                 Section {
                     LabeledContent("Server") {
                         TextField("Server", text: $settings.server, prompt: Text("host:port"))
@@ -27,26 +26,16 @@ struct SettingsView: View {
                         SecureField("Raumschlüssel", text: $settings.roomKey)
                     }
                 }
-                .listRowBackground(Palette.surface)
                 Section {
                     Toggle("Rauschfilter", isOn: $settings.noiseSuppression)
-                        .tint(Palette.live)
-                    LabeledContent("Ausgabe") {
-                        RoutePicker()
-                            .frame(width: 44, height: 44)
-                    }
                 }
-                .listRowBackground(Palette.surface)
             }
             .multilineTextAlignment(.trailing)
-            .foregroundStyle(Palette.text)
-            .scrollContentBackground(.hidden)
-            .background(Palette.background)
             .navigationTitle("Einstellungen")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Fertig") { dismiss() }
+                    Button(role: .confirm) { dismiss() }
                 }
             }
             .onChange(of: settings.noiseSuppression) { call.noiseSuppressionChanged() }
