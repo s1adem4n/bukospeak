@@ -36,6 +36,9 @@ const MAX_GAP: u32 = 5;
 
 const FRAME_US: u64 = FRAME_DURATION.as_micros() as u64;
 
+// A packet's length is stored as a u16.
+const _: () = assert!(MAX_OPUS_LEN <= u16::MAX as usize);
+
 /// A frame as the buffer holds it: fixed size, so storing it never allocates.
 #[derive(Clone, Copy, Debug)]
 pub struct Packet {
@@ -51,9 +54,9 @@ pub struct Packet {
 impl Packet {
     /// None if the Opus packet is longer than [`MAX_OPUS_LEN`].
     pub fn new(index: u32, last: bool, level: Level, arrival_us: u64, opus: &[u8]) -> Option<Self> {
-        let mut packet = Self { index, last, level, arrival_us, len: u16::try_from(opus.len()).ok()?, opus: [0; MAX_OPUS_LEN] };
-        packet.opus.get_mut(..opus.len())?.copy_from_slice(opus);
-        Some(packet)
+        let mut bytes = [0; MAX_OPUS_LEN];
+        bytes.get_mut(..opus.len())?.copy_from_slice(opus);
+        Some(Self { index, last, level, arrival_us, len: opus.len() as u16, opus: bytes })
     }
 
     pub fn opus(&self) -> &[u8] {
@@ -311,13 +314,14 @@ fn slot(index: u32) -> usize {
     index as usize % SLOTS
 }
 
-/// The spread of the arrival delay over the last two seconds, in buckets of 200 ms.
+/// The spread of the arrival delay over the last two seconds, in [`Jitter::BUCKETS`] buckets of
+/// 200 ms.
 ///
 /// A frame's relative delay is its arrival time minus its place on the sender's timeline. The
 /// clocks' offset cancels out of the spread, and their drift barely shows in two seconds.
 #[derive(Default)]
 struct Jitter {
-    buckets: [Option<Bucket>; 10],
+    buckets: [Option<Bucket>; Jitter::BUCKETS],
     newest: u64,
 }
 
@@ -329,12 +333,13 @@ struct Bucket {
 }
 
 impl Jitter {
+    const BUCKETS: usize = 10;
     const BUCKET_US: u64 = 200_000;
 
     fn observe(&mut self, index: u32, arrival_us: u64) {
         let delay = arrival_us as i64 - i64::from(index) * FRAME_US as i64;
         let id = arrival_us / Self::BUCKET_US;
-        let bucket = &mut self.buckets[id as usize % 10];
+        let bucket = &mut self.buckets[id as usize % Self::BUCKETS];
         match bucket {
             Some(bucket) if bucket.id == id => {
                 bucket.min = bucket.min.min(delay);
@@ -346,7 +351,7 @@ impl Jitter {
     }
 
     fn target(&self) -> u32 {
-        let recent = self.buckets.iter().flatten().filter(|bucket| bucket.id + 10 > self.newest);
+        let recent = self.buckets.iter().flatten().filter(|bucket| bucket.id + Self::BUCKETS as u64 > self.newest);
         let (min, max) = recent.fold((i64::MAX, i64::MIN), |(min, max), bucket| (min.min(bucket.min), max.max(bucket.max)));
         if min > max {
             return MIN_TARGET;
