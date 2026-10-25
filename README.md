@@ -46,8 +46,8 @@ The workspace's `version` raised, committed, and tagged with it (`v0.2.0`): push
 `release.yml`, which makes a GitHub Release of
 - `BukoSpeak-win-Setup.exe`, an installer whose app downloads newer releases in the background
   and applies them on its next start; it is unsigned, so SmartScreen warns on the first install,
-- and archives of the app and `bukospeak` for macOS (Apple Silicon) and Linux (x86_64). The
-  macOS binaries are unsigned: `xattr -d com.apple.quarantine` lets them start.
+- and archives of the app and `bukospeak` for Windows (x86_64), macOS (Apple Silicon) and Linux
+  (x86_64). The macOS binaries are unsigned: `xattr -d com.apple.quarantine` lets them start.
 
 ## Running the server
 

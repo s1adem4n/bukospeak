@@ -1,7 +1,8 @@
 name: Release
 
 # A tag `v` and the workspace's version releases the desktop app: on Windows an installer that
-# updates itself from these releases, on macOS and Linux an archive of the app and the CLI.
+# updates itself from these releases, and for Windows, macOS and Linux an archive of the app and
+# the CLI.
 on:
   push:
     tags: ["v*"]
@@ -44,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
-      - run: mise exec -- cargo build --release --locked -p bukospeak-desktop --bin bukospeak-desktop
+      - run: mise exec -- cargo build --release --locked -p bukospeak-desktop
       # vpk's version is the velopack crate's, pinned in the workspace.
       - uses: actions/setup-dotnet@v6
         with:
@@ -60,6 +61,15 @@ jobs:
       - run: >-
           vpk upload github --repoUrl "$REPOSITORY" --token "$GH_TOKEN" --publish --merge
           --tag "$GITHUB_REF_NAME" --releaseName "BukoSpeak $VERSION"
+      - run: |
+          folder="bukospeak-$VERSION-windows-x86_64"
+          mkdir "$folder"
+          cp target/release/bukospeak-desktop.exe target/release/bukospeak.exe "$folder/"
+          7z a "$folder.zip" "$folder"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64
+          path: bukospeak-${{ needs.version.outputs.version }}-windows-x86_64.zip
 
   archive:
     needs: version
@@ -94,7 +104,7 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ env.FOLDER }}.tar.gz
 
-  # The archives go to the release the Windows job made.
+  # The archives go to the release the Windows job made, the Windows one among them.
   attach:
     needs: [windows, archive]
     runs-on: ubuntu-latest
@@ -105,4 +115,4 @@ jobs:
         with:
           path: archives
           merge-multiple: true
-      - run: gh release upload "$GITHUB_REF_NAME" archives/*.tar.gz --repo "$GITHUB_REPOSITORY"
+      - run: gh release upload "$GITHUB_REF_NAME" archives/* --repo "$GITHUB_REPOSITORY"
