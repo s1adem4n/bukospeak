@@ -53,10 +53,11 @@ jobs:
       - run: dotnet tool install --global vpk --version 1.3.39-g8d2844f
       # Only what is installed: the app.
       - run: mkdir staging && cp target/release/bukospeak-desktop.exe staging/
-      # The tag's message, which the release and the installed app show as what it brings.
+      # The tag's message, without the signature a signed tag carries: the release and the
+      # installed app show it as what the release brings.
       - run: |
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$GITHUB_REF_NAME" > notes.md
       # The last release, if there is one, from which the update is packed as a delta too.
       - run: vpk download github --repoUrl "$REPOSITORY" --token "$GH_TOKEN"
       - run: >-
@@ -125,7 +126,7 @@ jobs:
       - run: gh release upload "$GITHUB_REF_NAME" archives/*
       - run: |
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$GITHUB_REF_NAME" > notes.md
           gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
       - run: |
           gh release download "$GITHUB_REF_NAME" --dir release
