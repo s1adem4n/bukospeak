@@ -133,6 +133,12 @@ impl JitterBuffer {
             let over = over.filter(|&over| distance(over, anchor) < 0).unwrap_or(anchor);
             self.state = State::Idle { over: Some(over), waited };
         }
+        if let State::Idle { over: Some(over), waited } = self.state
+            && distance(over, packet.index) > SLOTS as i64
+        {
+            // A frame beyond the window moves it on: the frames it pushes out are too old to wait for.
+            self.state = State::Idle { over: Some(packet.index.wrapping_sub(SLOTS as u32)), waited };
+        }
         if !self.is_pending(packet.index) {
             self.stats.discarded += 1;
             return;
@@ -491,6 +497,16 @@ mod tests {
         buffer.insert(packet(1, false, 30_000));
         assert_eq!(buffer.pop(), Playout::Silent);
         assert_eq!(buffer.stats().discarded, 1);
+    }
+
+    #[test]
+    fn a_burst_longer_than_the_window_keeps_its_newest_frames() {
+        let mut buffer = JitterBuffer::default();
+        for index in 0..100 {
+            buffer.insert(packet(index, index == 99, u64::from(index) * FRAME_US));
+        }
+        assert_eq!(Played::from(buffer.pop()), Played::Frame(100 - SLOTS as u32));
+        assert_eq!(buffer.stats().discarded, 0);
     }
 
     #[test]
