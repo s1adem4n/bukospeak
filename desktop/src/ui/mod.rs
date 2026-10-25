@@ -370,15 +370,19 @@ impl Main {
             self.dismiss(cx);
             return;
         }
-        match &mut self.screen {
+        match &self.screen {
             Screen::Settings(_) => self.close_settings(window, cx),
-            Screen::Welcome(form, step @ Step::Place) => {
-                *step = Step::Name;
-                form.focus_empty(Step::Name.fields(), window, cx);
-                cx.notify();
-            }
+            Screen::Welcome(_, Step::Place) => self.previous(window, cx),
             Screen::Welcome(_, Step::Name) | Screen::Channel => cx.propagate(),
         }
+    }
+
+    /// From the place back to the name.
+    fn previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Screen::Welcome(form, step @ Step::Place) = &mut self.screen else { return };
+        *step = Step::Name;
+        form.focus_empty(Step::Name.fields(), window, cx);
+        cx.notify();
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> TitleBar {

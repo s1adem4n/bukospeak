@@ -1,23 +1,22 @@
 //! The welcome, the first time: the name the others see, then the server and its room key, and
 //! in.
 
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    Animation, AnimationExt, Context, Entity, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement, SharedString, Styled, StyledImage,
-    div, img, px,
+    Animation, AnimationExt, Context, Entity, FontWeight, Hsla, InteractiveElement, IntoElement, ObjectFit, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, StyledImage, div, img, px,
 };
 
 use crate::ui::member::Avatar;
-use crate::ui::{Back, Field, Form, Main, Step, edit_menu, primary, theme};
+use crate::ui::{Field, Form, Main, Step, edit_menu, primary, theme};
 
 impl Main {
     pub(super) fn render_welcome(&self, form: &Form, step: Step, cx: &mut Context<Self>) -> impl IntoElement {
         let name = form.value(Field::Name, cx);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
-        let quiet = ButtonCustomVariant::new(cx).foreground(muted).hover(theme.secondary_hover).active(theme.secondary_active);
         let content = match step {
             Step::Name => v_flex()
                 .w_full()
@@ -42,29 +41,14 @@ impl Main {
                     .child(headline(format!("Hallo, {name}")))
                     .child(subline("Wo trefft ihr euch?", muted))
                     .child(
-                        v_flex()
-                            .w_full()
-                            .mt_6()
-                            .gap_2()
-                            .child(field(&form.server))
-                            .child(field(&form.room_key))
-                            .child(
-                                div().mt_1().child(
-                                    primary("finish", "Beitreten")
-                                        .w_full()
-                                        .disabled(!complete)
-                                        .on_click(cx.listener(|main, _, window, cx| main.finish(window, cx))),
-                                ),
-                            )
-                            .child(
-                                Button::new("back")
-                                    .custom(quiet)
-                                    .large()
+                        v_flex().w_full().mt_6().gap_2().child(field(&form.server)).child(field(&form.room_key)).child(
+                            div().mt_1().child(
+                                primary("finish", "Beitreten")
                                     .w_full()
-                                    .h(theme::FIELD)
-                                    .label("Zurück")
-                                    .on_click(cx.listener(|main, _, window, cx| main.back(&Back, window, cx))),
+                                    .disabled(!complete)
+                                    .on_click(cx.listener(|main, _, window, cx| main.finish(window, cx))),
                             ),
+                        ),
                     )
             }
         };
@@ -88,14 +72,33 @@ impl Main {
             .child(self.render_steps(step, cx))
     }
 
-    /// Where in the welcome one is: a dot for each step.
+    /// Where in the welcome one is, a dot for each step; a click on one goes there, to the
+    /// place once there is a name.
     fn render_steps(&self, step: Step, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let dot = |shown: Step| {
-            let (width, color) = if shown == step { (px(16.), theme.foreground) } else { (px(6.), theme.border) };
-            div().h_1p5().w(width).rounded_full().bg(color)
+        let (current, other, hovered) = (theme.foreground, theme.border, theme.muted_foreground);
+        let dot = |shown: Step, cx: &mut Context<Self>| {
+            let (width, color) = if shown == step { (px(16.), current) } else { (px(6.), other) };
+            // The dot is small; the space around it takes the click too.
+            div()
+                .id(("step-dot", shown as usize))
+                .group("step-dot")
+                .p_1()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .h_1p5()
+                        .w(width)
+                        .rounded_full()
+                        .bg(color)
+                        .when(shown != step, |dot| dot.group_hover("step-dot", |dot| dot.bg(hovered))),
+                )
+                .on_click(cx.listener(move |main, _, window, cx| match shown {
+                    Step::Name => main.previous(window, cx),
+                    Step::Place => main.next(window, cx),
+                }))
         };
-        h_flex().absolute().bottom_6().gap_1p5().child(dot(Step::Name)).child(dot(Step::Place))
+        h_flex().absolute().bottom_5().gap_0p5().child(dot(Step::Name, cx)).child(dot(Step::Place, cx))
     }
 }
 
