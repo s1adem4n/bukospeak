@@ -23,9 +23,11 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 cpal = "0.18.2"
 ctrlc = "3.5.2"
 dirs = "7.0.0"
+futures = "0.3.34"
 # GPUI and its components; gpui-pre is a weekly snapshot of Zed's main whose API changes, so
 # the version is exact and an upgrade is a step of its own.
 gpui-kit = "=0.8.0"
+keyring = "4.2.0"
 nnnoiseless = { version = "0.5.2", default-features = false }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -48,6 +50,7 @@ sha2 = "0.11.1"
 sonora = "0.2.0"
 sonora-agc2 = "0.2.0"
 thiserror = "2.0.21"
+toml = "1.1.8"
 tokio = "1.54.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

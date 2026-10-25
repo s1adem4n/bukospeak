@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::process;
 
 use bukospeak_core::proto::{Fingerprint, ParseFingerprintError};
 
@@ -49,7 +48,7 @@ impl KnownServers {
         let mut fingerprints = self.read()?;
         fingerprints.insert(server.to_owned(), fingerprint);
         let text: String = fingerprints.iter().map(|(server, fingerprint)| format!("{server} {fingerprint}\n")).collect();
-        self.replace(&text).map_err(|source| Error::Write { path: self.path.clone(), source })
+        crate::replace(&self.path, &text).map_err(|source| Error::Write { path: self.path.clone(), source })
     }
 
     fn read(&self) -> Result<BTreeMap<String, Fingerprint>, Error> {
@@ -71,24 +70,12 @@ impl KnownServers {
             })
             .collect()
     }
-
-    /// Writes a file of its own beside the old one and renames it over it, so a reader never
-    /// sees half of it.
-    fn replace(&self, text: &str) -> io::Result<()> {
-        let folder = self.path.parent().expect("the file is inside a folder");
-        let name = self.path.file_name().expect("the path names a file").to_string_lossy();
-        let written = folder.join(format!(".{name}.{}", process::id()));
-        fs::create_dir_all(folder)?;
-        fs::write(&written, text)?;
-        fs::rename(&written, &self.path).inspect_err(|_| {
-            // The rename's error is the one to tell; the stray file only takes space.
-            let _ = fs::remove_file(&written);
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process;
+
     use super::*;
 
     /// A fresh folder of its own under the system's temporary one.
