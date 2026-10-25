@@ -54,6 +54,10 @@ final class Call: NSObject {
     @ObservationIgnored private var engineState = ChannelUpdate.State.out
     /// The leave of the call before, which a join waits for.
     @ObservationIgnored private var leaving: Task<Void, Never>?
+    /// The call's join, under way from the tap while CallKit starts the call.
+    @ObservationIgnored private var joining: Task<Result<Void, JoinError>, Never>?
+    /// When the user tapped to join, for the log to tell how long each step of the join took.
+    @ObservationIgnored private var tapped = ContinuousClock.now
 
     private static let log = Logger(subsystem: "digital.buko.BukoSpeak", category: "call")
 
@@ -86,15 +90,21 @@ final class Call: NSObject {
     /// Starts a call that joins the channel.
     func join() async {
         guard id == nil, phase != .joining else { return }
+        tapped = .now
         phase = .joining
+        // Who the start screen showed, until the server tells who is in the channel.
+        members = present
         changedServer = nil
         await leaving?.value
         guard await AudioSession.microphoneAllowed() else {
+            members = []
             phase = .failed("Mikrofon nicht erlaubt")
             return
         }
         let id = UUID()
         self.id = id
+        // Under way while CallKit starts the call, which takes about as long as the join.
+        joining = Task { await joinChannel() }
         let start = CXStartCallAction(call: id, handle: CXHandle(type: .generic, value: "BukoSpeak"))
         // Configured again before every call: iOS can otherwise hold on to a stale audio session
         // for the provider and never activate the new call's
@@ -103,9 +113,8 @@ final class Call: NSObject {
         do {
             try await controller.request(CXTransaction(action: start))
         } catch {
-            self.id = nil
             Self.log.error("the call didn't start: \(error)")
-            phase = .failed("Anruf nicht gestartet")
+            end(failure: "Anruf nicht gestartet")
         }
     }
 
@@ -181,7 +190,7 @@ final class Call: NSObject {
     }
 
     /// Joins the channel with the settings, pinning the server on the first join.
-    private func joinChannel() async throws(JoinError) {
+    private func joinChannel() async -> Result<Void, JoinError> {
         let server = settings.server.trimmingCharacters(in: .whitespaces)
         engine.setNoiseSuppression(settings.noiseSuppression)
         engine.setMuted(isMuted)
@@ -193,12 +202,20 @@ final class Call: NSObject {
                 pin: settings.pin(for: server)
             )
             settings.pin(joined.fingerprint, for: server)
+            logStep("the server welcomed the join")
+            return .success(())
         } catch {
             if case .fingerprintChanged = error {
                 changedServer = server
             }
-            throw error
+            return .failure(error)
         }
+    }
+
+    /// Logs a step of the join, with how long after the tap it came.
+    private func logStep(_ step: String) {
+        let milliseconds = Int((ContinuousClock.now - tapped) / .milliseconds(1))
+        Self.log.info("\(step, privacy: .public): \(milliseconds) ms after the tap")
     }
 
     /// Follows the engine's state once the join came back.
@@ -236,18 +253,25 @@ final class Call: NSObject {
         let plays = isUp && !isHeld && isSessionActive && !isInterrupted
         guard plays != isPlaying else { return }
         if plays {
-            do throws(AudioError) {
-                try engine.startAudio()
-            } catch {
-                Self.log.error("the microphone and speaker didn't start: \(error.message)")
-                return fail("Audio nicht gestartet")
+            let call = id
+            engine.startAudio { [weak self] failure in
+                self?.audioStarted(failure, for: call)
             }
-            Self.log.info("the call's audio plays")
         } else {
             engine.stopAudio()
             Self.log.info("the call's audio stopped")
         }
         isPlaying = plays
+    }
+
+    /// Ends the call the audio was started for if it didn't start, unless that call is over.
+    private func audioStarted(_ failure: AudioError?, for call: UUID?) {
+        guard id == call else { return }
+        if let failure {
+            Self.log.error("the microphone and speaker didn't start: \(failure.message)")
+            return fail("Audio nicht gestartet")
+        }
+        logStep("the call's audio plays")
     }
 
     /// Ends a call that is up, after telling CallKit it failed.
@@ -263,6 +287,8 @@ final class Call: NSObject {
     private func end(failure: String?) {
         // First, so a join under way sees the call is over.
         id = nil
+        // Not cancelled: the leave below waits for it, then leaves the call it joined.
+        joining = nil
         // The leave stops the audio off the main thread: disposing the voice unit takes long
         // enough to freeze the screen.
         isPlaying = false
@@ -339,27 +365,27 @@ extension Call: @MainActor CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
+        logStep("CallKit started the call")
+        guard let joining, id == action.callUUID else { return action.fail() }
         do {
             try AudioSession.configure()
         } catch {
             action.fail()
-            id = nil
             Self.log.error("the audio couldn't be set up: \(error)")
-            phase = .failed("Audio nicht gestartet")
-            return
+            return end(failure: "Audio nicht gestartet")
         }
         provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: nil)
         Task {
-            do throws(JoinError) {
-                try await joinChannel()
-                guard id == action.callUUID else { return action.fail() }
+            let joined = await joining.value
+            guard id == action.callUUID else { return action.fail() }
+            switch joined {
+            case .success:
                 connected()
                 action.fulfill()
                 provider.reportOutgoingCall(with: action.callUUID, connectedAt: nil)
                 provider.reportCall(with: action.callUUID, updated: Self.capabilities)
-            } catch {
+            case .failure(let error):
                 action.fail()
-                guard id == action.callUUID else { return }
                 Self.log.error("the join failed: \(error.message)")
                 end(failure: "Beitritt fehlgeschlagen")
             }
@@ -387,7 +413,7 @@ extension Call: @MainActor CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        Self.log.info("CallKit activated the audio session")
+        logStep("CallKit activated the audio session")
         isSessionActive = true
         isInterrupted = false
         updateAudio()

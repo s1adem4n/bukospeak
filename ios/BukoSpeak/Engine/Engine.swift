@@ -163,22 +163,26 @@ nonisolated final class Engine: @unchecked Sendable {
     }
 
     /// Plays the call on the voice processing unit, once the audio session is active; without
-    /// a call, or playing already, nothing.
-    func startAudio() throws(AudioError) {
-        var message = ""
-        let started = withUnsafeMutablePointer(to: &message) { message in
-            bukospeak_engine_start_audio(engine, message) { context, text in
-                context!.assumingMemoryBound(to: String.self).pointee = String(text)
+    /// a call, or playing already, nothing. It starts on the engine's queue, after what waits
+    /// there already, since creating the unit takes long enough to freeze the screen; `started`
+    /// then gets why it didn't, or nil.
+    func startAudio(started: @escaping @MainActor @Sendable (AudioError?) -> Void) {
+        queue.async {
+            var message = ""
+            let isPlaying = withUnsafeMutablePointer(to: &message) { message in
+                bukospeak_engine_start_audio(self.engine, message) { context, text in
+                    context!.assumingMemoryBound(to: String.self).pointee = String(text)
+                }
             }
-        }
-        if !started {
-            throw AudioError(message: message)
+            let failure = isPlaying ? nil : AudioError(message: message)
+            Task { @MainActor in started(failure) }
         }
     }
 
-    /// Stops playing the call, for an audio session that is no longer active.
+    /// Stops playing the call, for an audio session that is no longer active: on the engine's
+    /// queue, after what waits there already, so it follows a start asked for before.
     func stopAudio() {
-        bukospeak_engine_stop_audio(engine)
+        queue.async { bukospeak_engine_stop_audio(self.engine) }
     }
 
     private func join(

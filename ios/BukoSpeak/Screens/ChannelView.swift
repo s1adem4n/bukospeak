@@ -19,7 +19,9 @@ struct ChannelView: View {
                 }
             }
             .navigationTitle(isInCall ? "BukoSpeak" : "")
-            .navigationSubtitle(status)
+            // Inline in both, so the bar keeps its height: a large title coming or going changes
+            // it after the logo has landed, and the start screen jumps.
+            .toolbarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Einstellungen", systemImage: "gearshape") { showsSettings = true }
@@ -27,6 +29,7 @@ struct ChannelView: View {
             }
         }
         .animation(Motion.spring, value: call.phase)
+        .animation(Motion.spring, value: call.isHeld)
         .animation(Motion.spring, value: call.members)
         .animation(Motion.spring, value: call.present)
         .onChange(of: watched, initial: true) { _, watched in call.watch(watched != nil) }
@@ -45,20 +48,32 @@ struct ChannelView: View {
 
     private var isInCall: Bool {
         switch call.phase {
-        case .connected, .reconnecting: true
-        case .idle, .joining, .failed: false
+        // Joining shows the channel at once, with who the start screen showed.
+        case .joining, .connected, .reconnecting: true
+        case .idle, .failed: false
         }
     }
 
-    /// What isn't as it should be in the call; empty if nothing.
-    private var status: String {
-        if call.phase == .reconnecting {
-            "Verbinde neu…"
-        } else if call.isHeld {
-            "Gehalten"
-        } else {
-            ""
+    /// Why the call isn't live, shown in the middle of the channel.
+    private enum Pause {
+        case connecting(String)
+        /// Another call holds it.
+        case held
+    }
+
+    /// Nil while the call is live.
+    private var pause: Pause? {
+        switch call.phase {
+        case .joining: .connecting("Verbinde…")
+        case .reconnecting: .connecting("Verbinde neu…")
+        case .connected: call.isHeld ? .held : nil
+        case .idle, .failed: nil
         }
+    }
+
+    /// The channel recedes while nobody hears it; joining shows who is there in full.
+    private var isDimmed: Bool {
+        call.phase == .reconnecting || call.isHeld
     }
 
     /// The server and room key the start screen watches while it shows in the foreground.
@@ -86,22 +101,14 @@ struct ChannelView: View {
             present
             Spacer()
             Button(action: join) {
-                // The text keeps the button's height while the spinner shows.
                 Text("Beitreten")
-                    .opacity(call.phase == .joining ? 0 : 1)
-                    .overlay {
-                        if call.phase == .joining {
-                            ProgressView()
-                        }
-                    }
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             .controlSize(.extraLarge)
-            .disabled(call.phase == .joining)
         }
         .padding()
-        .background { Spotlight(isJoining: call.phase == .joining) }
+        .background { Spotlight() }
     }
 
     /// Who is in the channel, before joining it.
@@ -153,7 +160,26 @@ struct ChannelView: View {
             }
             .padding()
         }
-        .opacity(call.phase == .reconnecting ? 0.4 : 1)
+        .opacity(isDimmed ? 0.4 : 1)
+        .overlay {
+            switch pause {
+            case .connecting(let label):
+                ProgressView(label)
+                    .controlSize(.large)
+                    .transition(.opacity)
+            case .held:
+                VStack(spacing: 8) {
+                    Image(systemName: "pause.fill")
+                        .font(.largeTitle)
+                    Text("Gehalten")
+                }
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+                .transition(.opacity)
+            case nil:
+                EmptyView()
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             controls
         }
@@ -167,6 +193,8 @@ struct ChannelView: View {
                     .glassEffect(in: .circle)
                 muteButton
                     .matchedGeometryEffect(id: "microphone", in: stage)
+                    // The microphone is off while another call holds this one.
+                    .disabled(call.isHeld)
                 Button(role: .destructive) {
                     Task { await call.leave() }
                 } label: {
