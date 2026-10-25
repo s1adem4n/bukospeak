@@ -9,42 +9,44 @@ struct SettingsView: View {
         @Bindable var settings = call.settings
         NavigationStack {
             Form {
-                Section("You") {
-                    TextField("Name", text: $settings.name)
-                        .textContentType(.nickname)
-                }
                 Section {
-                    TextField("host:port", text: $settings.server)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("Room key", text: $settings.roomKey)
-                } header: {
-                    Text("Server")
-                } footer: {
-                    Text("Changes apply from the next join.")
+                    LabeledContent("Name") {
+                        TextField("Name", text: $settings.name, prompt: Text(""))
+                            .textContentType(.nickname)
+                    }
                 }
+                .listRowBackground(Palette.surface)
                 Section {
-                    Toggle("Noise suppression", isOn: $settings.noiseSuppression)
-                    HStack {
-                        Text("Output")
-                        Spacer()
+                    LabeledContent("Server") {
+                        TextField("Server", text: $settings.server, prompt: Text("host:port"))
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    LabeledContent("Raumschlüssel") {
+                        SecureField("Raumschlüssel", text: $settings.roomKey)
+                    }
+                }
+                .listRowBackground(Palette.surface)
+                Section {
+                    Toggle("Rauschfilter", isOn: $settings.noiseSuppression)
+                        .tint(Palette.live)
+                    LabeledContent("Ausgabe") {
                         RoutePicker()
                             .frame(width: 44, height: 44)
                     }
-                } header: {
-                    Text("Audio")
-                } footer: {
-                    Text(
-                        "Noise suppression keeps game sound and the room out of what you send. The microphone follows the output."
-                    )
                 }
+                .listRowBackground(Palette.surface)
             }
-            .navigationTitle("Settings")
+            .multilineTextAlignment(.trailing)
+            .foregroundStyle(Palette.text)
+            .scrollContentBackground(.hidden)
+            .background(Palette.background)
+            .navigationTitle("Einstellungen")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Fertig") { dismiss() }
                 }
             }
             .onChange(of: settings.noiseSuppression) { call.noiseSuppressionChanged() }

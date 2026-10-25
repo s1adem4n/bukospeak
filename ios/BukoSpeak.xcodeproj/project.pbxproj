@@ -92,10 +92,10 @@
 				LastUpgradeCheck = 2620;
 			};
 			buildConfigurationList = B50000000000000000000010 /* Build configuration list for PBXProject "BukoSpeak" */;
-			developmentRegion = en;
+			developmentRegion = de;
 			hasScannedForEncodings = 0;
 			knownRegions = (
-				en,
+				de,
 				Base,
 			);
 			mainGroup = B5000000000000000000000D;
@@ -168,13 +168,14 @@
 		B50000000000000000000014 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4A83KX55G4;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BukoSpeak/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = BukoSpeak;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "BukoSpeak sends your voice to the channel you join.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Damit die anderen dich im Kanal hören.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../target/aarch64-apple-ios/release";
@@ -195,13 +196,14 @@
 		B50000000000000000000015 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4A83KX55G4;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BukoSpeak/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = BukoSpeak;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "BukoSpeak sends your voice to the channel you join.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Damit die anderen dich im Kanal hören.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../target/aarch64-apple-ios/release";

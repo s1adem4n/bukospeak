@@ -85,7 +85,7 @@ final class Call: NSObject {
         phase = .joining
         changedServer = nil
         guard await AudioSession.microphoneAllowed() else {
-            phase = .failed("BukoSpeak may not use the microphone. Allow it in the Settings app.")
+            phase = .failed("Mikrofon nicht erlaubt")
             return
         }
         let id = UUID()
@@ -99,7 +99,8 @@ final class Call: NSObject {
             try await controller.request(CXTransaction(action: start))
         } catch {
             self.id = nil
-            phase = .failed("The call didn't start: \(error.localizedDescription)")
+            Self.log.error("the call didn't start: \(error)")
+            phase = .failed("Anruf nicht gestartet")
         }
     }
 
@@ -196,7 +197,8 @@ final class Call: NSObject {
         members = update.members
         speaking = update.speaking
         if let lost = update.lost {
-            return fail("The connection was lost: \(lost)")
+            Self.log.error("the connection was lost: \(lost)")
+            return fail("Verbindung verloren")
         }
         // Only on a change: an update of who speaks shouldn't start audio that failed again.
         if changed && phase != .joining {
@@ -213,7 +215,8 @@ final class Call: NSObject {
             do throws(AudioError) {
                 try engine.startAudio()
             } catch {
-                return fail("The microphone and speaker didn't start: \(error.message)")
+                Self.log.error("the microphone and speaker didn't start: \(error.message)")
+                return fail("Audio nicht gestartet")
             }
             Self.log.info("the call's audio plays")
         } else {
@@ -278,9 +281,8 @@ final class Call: NSObject {
         do {
             try AudioSession.configure()
         } catch {
-            return fail(
-                "The audio system restarted, and the call's audio couldn't be set up again: \(error.localizedDescription)"
-            )
+            Self.log.error("the audio couldn't be set up again after media services were reset: \(error)")
+            return fail("Audio nicht gestartet")
         }
         if isSessionActive {
             reactivateSession()
@@ -313,7 +315,8 @@ extension Call: @MainActor CXProviderDelegate {
         } catch {
             action.fail()
             id = nil
-            phase = .failed("The audio couldn't be set up: \(error.localizedDescription)")
+            Self.log.error("the audio couldn't be set up: \(error)")
+            phase = .failed("Audio nicht gestartet")
             return
         }
         provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: nil)
@@ -328,7 +331,8 @@ extension Call: @MainActor CXProviderDelegate {
             } catch {
                 action.fail()
                 guard id == action.callUUID else { return }
-                await end(failure: error.message)
+                Self.log.error("the join failed: \(error.message)")
+                await end(failure: "Beitritt fehlgeschlagen")
             }
         }
     }
@@ -376,7 +380,7 @@ extension Call: @MainActor CXCallObserverDelegate {
 }
 
 extension JoinError {
-    /// What went wrong, for the user.
+    /// What went wrong, for the log.
     var message: String {
         switch self {
         case .fingerprintChanged(_, _, let message), .failed(let message): message
