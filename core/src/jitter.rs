@@ -163,9 +163,9 @@ impl JitterBuffer {
             },
         };
 
-        if let Some(packet) = self.pending(next) {
-            let level = packet.level;
-            if self.should_drop(next, level) {
+        if let Some(&Packet { level, last, .. }) = self.pending(next) {
+            // Dropping the last frame would lose the talkspurt's end.
+            if !last && self.should_drop(next, level) {
                 self.since_adjustment = 0;
                 self.stats.dropped += 1;
                 self.state = State::Playing { next: next.wrapping_add(1), concealed: 0 };
@@ -271,8 +271,12 @@ impl JitterBuffer {
         (1..DROP_WINDOW).filter_map(|offset| self.pending(next.wrapping_add(offset))).all(|packet| packet.level <= level)
     }
 
+    /// Not once the talkspurt's last frame is held: then the buffer runs dry on purpose.
     fn should_insert(&self, next: u32, level: Level) -> bool {
-        self.ahead(next) + 1 < self.target() && level >= QUIET && self.since_adjustment >= ADJUST_EVERY
+        self.ahead(next) + 1 < self.target()
+            && level >= QUIET
+            && self.since_adjustment >= ADJUST_EVERY
+            && !self.pending_frames().any(|packet| packet.last)
     }
 
     /// Whether a frame with this index is still to play: it lies in the window of [`SLOTS`]
@@ -504,6 +508,42 @@ mod tests {
         buffer.insert(packet(1, false, 30_000));
         assert_eq!(buffer.pop(), Playout::Silent);
         assert_eq!(buffer.stats().discarded, 1);
+    }
+
+    #[test]
+    fn a_talkspurt_s_last_frame_is_never_dropped() {
+        let mut buffer = JitterBuffer::default();
+        // The quietest frame in reach, with the next talkspurt held far enough ahead to drop.
+        for index in (0..12).chain([20]) {
+            let level = Level::new(if index == 11 { 90 } else { 20 });
+            buffer.insert(Packet::new(index, index == 11, level, u64::from(index) * FRAME_US, &index.to_be_bytes()).unwrap());
+        }
+        let played: Vec<Played> = (0..12).map(|_| buffer.pop().into()).collect();
+        assert_eq!(played, (0..12).map(Played::Frame).collect::<Vec<_>>());
+        assert!(!buffer.is_playing());
+    }
+
+    #[test]
+    fn a_talkspurt_drains_its_end_without_inserting() {
+        let mut buffer = JitterBuffer::default();
+        // Early frames come 50 ms late now and then, which raises the target to 6.
+        let arrival_us = |index: u32| u64::from(index) * FRAME_US + if index < 20 && index % 4 == 3 { 50_000 } else { 0 };
+        let mut arrivals: Vec<u32> = (0..=60).collect();
+        arrivals.sort_by_key(|&index| arrival_us(index));
+        let mut arrivals = arrivals.into_iter().peekable();
+        let mut draining = Vec::new();
+        for tick in 0..100 {
+            while let Some(index) = arrivals.next_if(|&index| arrival_us(index) <= tick * FRAME_US) {
+                buffer.insert(Packet::new(index, index == 60, Level::new(60), arrival_us(index), &index.to_be_bytes()).unwrap());
+            }
+            let played = Played::from(buffer.pop());
+            if arrivals.peek().is_none() {
+                draining.push(played);
+            }
+        }
+        assert_eq!(buffer.target(), 6);
+        assert!(draining.contains(&Played::Frame(60)));
+        assert!(!draining.contains(&Played::Conceal), "concealed while draining: {draining:?}");
     }
 
     #[test]
