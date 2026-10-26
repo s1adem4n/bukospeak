@@ -14,6 +14,10 @@ use crate::limiter::limit;
 /// The voices a mixer holds: the server admits 16 members, and one of them is this one.
 pub const VOICES: usize = 15;
 
+/// From 5 on libopus conceals lost frames with its neural model, which keeps the voice instead
+/// of fading into noise; more buys only its enhancers, which leave 10 ms frames as they are.
+const DECODER_COMPLEXITY: i32 = 5;
+
 pub struct Mixer {
     voices: Box<[Voice]>,
     decoded: [f32; FRAME_SAMPLES],
@@ -41,12 +45,9 @@ impl Mixer {
     pub fn new() -> Result<Self, opus::Error> {
         let voices = (0..VOICES)
             .map(|_| {
-                Ok(Voice {
-                    member: None,
-                    buffer: JitterBuffer::default(),
-                    decoder: Decoder::new(SAMPLE_RATE, Channels::Mono)?,
-                    undecodable: 0,
-                })
+                let mut decoder = Decoder::new(SAMPLE_RATE, Channels::Mono)?;
+                decoder.set_complexity(DECODER_COMPLEXITY)?;
+                Ok(Voice { member: None, buffer: JitterBuffer::default(), decoder, undecodable: 0 })
             })
             .collect::<Result<_, opus::Error>>()?;
         Ok(Self { voices, decoded: [0.0; FRAME_SAMPLES] })

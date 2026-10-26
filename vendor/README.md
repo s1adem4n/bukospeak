@@ -23,3 +23,16 @@ none, and keep upstream's tests passing:
   blockers directly, instead of collecting views of them per sub-frame.
 - `sonora/src/audio_buffer.rs`: `copy_to_buffer` resamples into the destination channel,
   instead of into a temporary vector.
+
+## opus 0.4.0
+
+From <https://github.com/SpaceManiac/opus-rs>, MIT or Apache-2.0 (`LICENSE-MIT`,
+`LICENSE-APACHE`).
+
+The mixer conceals lost frames with libopus's neural model, which wants a decoder complexity of
+5 or more and libopus built with it; as published the decoder can't take a complexity and the
+build leaves the model out.
+
+- `src/lib.rs`: `set_complexity` and `get_complexity` for decoders.
+- `Cargo.toml`: the feature `dred`, passed on to `opusic-sys`, whose build of libopus brings the
+  neural concealment along with DRED.
