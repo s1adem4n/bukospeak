@@ -29,6 +29,9 @@ pub enum Error {
     Resampler(#[from] rubato::ResamplerConstructionError),
 }
 
+/// How much of a channel's level the last 10 ms make: it follows over about a second.
+const LEVEL_SMOOTHING: f32 = 0.01;
+
 /// From the input device's samples to the call's.
 pub struct Input {
     channels: usize,
@@ -37,7 +40,19 @@ pub struct Input {
     chunk: Box<[f32]>,
     captured: Instant,
     filled: usize,
+    mixdown: Mixdown,
     resampling: Option<Resampling>,
+}
+
+/// Mixes channels down weighted by their levels, so a microphone on one input of an interface
+/// keeps its level beside the silent others, which an average would halve and add their noise
+/// to, while channels alike are averaged.
+struct Mixdown {
+    weights: Box<[f32]>,
+    /// The channels' mean squares, following over about a second.
+    levels: Box<[f32]>,
+    /// The channels' sums of squares in the chunk filled.
+    energies: Box<[f32]>,
 }
 
 /// From the call's samples to the output device's.
@@ -65,7 +80,8 @@ impl Input {
         let (channels, rate) = (device.channels, device.rate);
         // Told anew with the first sample of each chunk.
         let captured = Instant::now();
-        Ok(Self { channels, rate, chunk: vec![0.0; chunk].into(), captured, filled: 0, resampling })
+        let mixdown = Mixdown::new(channels);
+        Ok(Self { channels, rate, chunk: vec![0.0; chunk].into(), captured, filled: 0, mixdown, resampling })
     }
 
     /// Takes the device's interleaved samples, the first of them captured at `captured`, and
@@ -75,10 +91,11 @@ impl Input {
             if self.filled == 0 {
                 self.captured = captured + duration_of(n, self.rate);
             }
-            self.chunk[self.filled] = frame.iter().sum::<f32>() / self.channels as f32;
+            self.chunk[self.filled] = self.mixdown.mix(frame);
             self.filled += 1;
             if self.filled == self.chunk.len() {
                 self.filled = 0;
+                self.mixdown.weigh(self.chunk.len());
                 match &mut self.resampling {
                     Some(resampling) => {
                         process(&mut resampling.fft, &self.chunk, &mut resampling.frame);
@@ -87,6 +104,38 @@ impl Input {
                     None => call(&self.chunk, self.captured),
                 }
             }
+        }
+    }
+}
+
+impl Mixdown {
+    fn new(channels: usize) -> Self {
+        Self {
+            weights: vec![1.0 / channels as f32; channels].into(),
+            levels: vec![0.0; channels].into(),
+            energies: vec![0.0; channels].into(),
+        }
+    }
+
+    fn mix(&mut self, frame: &[f32]) -> f32 {
+        // A faulty driver's NaN, infinite or huge sample would turn a level, and with it every
+        // weight, to NaN for good: clip to full scale, as an integer device would, and take NaN
+        // for silence.
+        let clip = |sample: f32| if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) };
+        self.energies.iter_mut().zip(frame).for_each(|(energy, sample)| *energy += clip(*sample).powi(2));
+        frame.iter().zip(&self.weights).map(|(sample, weight)| clip(*sample) * weight).sum()
+    }
+
+    /// Weighs the channels anew after a chunk of `frames`, in proportion to their RMS levels.
+    fn weigh(&mut self, frames: usize) {
+        for (level, energy) in self.levels.iter_mut().zip(&mut self.energies) {
+            *level += (*energy / frames as f32 - *level) * LEVEL_SMOOTHING;
+            *energy = 0.0;
+        }
+        let total: f32 = self.levels.iter().map(|level| level.sqrt()).sum();
+        // All silent, they keep their weights.
+        if total > 0.0 {
+            self.weights.iter_mut().zip(&self.levels).for_each(|(weight, level)| *weight = level.sqrt() / total);
         }
     }
 }
@@ -215,13 +264,36 @@ mod tests {
     fn stereo_is_mixed_down_and_copied_out() {
         let mut input = Input::new(Format { channels: 2, rate: SAMPLE_RATE }).unwrap();
         let mut call = Vec::new();
-        input.push(&[0.2, 0.4].repeat(FRAME_SAMPLES), Instant::now(), |frame, _| call.extend_from_slice(frame));
+        input.push(&[0.3, 0.3].repeat(FRAME_SAMPLES), Instant::now(), |frame, _| call.extend_from_slice(frame));
         assert!(call.iter().all(|&sample| (sample - 0.3).abs() < 1e-6));
 
         let mut output = Output::new(Format { channels: 2, rate: SAMPLE_RATE }).unwrap();
         let mut played = [0.0; 6];
         output.pull(&mut played, Instant::now(), |frame, _| frame.iter_mut().enumerate().for_each(|(n, sample)| *sample = n as f32));
         assert_eq!(played, [0.0, 0.0, 1.0, 1.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn a_microphone_on_one_input_keeps_its_level_beside_a_silent_other() {
+        let mut input = Input::new(Format { channels: 2, rate: SAMPLE_RATE }).unwrap();
+        let captured: Vec<f32> = sine(SAMPLE_RATE, 1.0, 440.0).iter().flat_map(|&sample| [0.0, sample]).collect();
+        let mut call = Vec::new();
+        input.push(&captured, Instant::now(), |frame, _| call.extend_from_slice(frame));
+        // Averaged for the first 10 ms, until the levels are known.
+        let rms = rms(&call[FRAME_SAMPLES..]);
+        assert!((0.35..0.36).contains(&rms), "rms {rms}");
+    }
+
+    #[test]
+    fn a_broken_sample_leaves_the_microphone_heard() {
+        let mut input = Input::new(Format { channels: 2, rate: SAMPLE_RATE }).unwrap();
+        let mut captured: Vec<f32> = sine(SAMPLE_RATE, 1.0, 440.0).iter().flat_map(|&sample| [0.0, sample]).collect();
+        captured[1] = f32::INFINITY;
+        captured[3] = f32::NAN;
+        let mut call = Vec::new();
+        input.push(&captured, Instant::now(), |frame, _| call.extend_from_slice(frame));
+        let rms = rms(&call[FRAME_SAMPLES..]);
+        assert!((0.35..0.36).contains(&rms), "rms {rms}");
     }
 
     #[test]
