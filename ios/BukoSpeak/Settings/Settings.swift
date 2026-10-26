@@ -46,7 +46,9 @@ final class Settings {
         name = defaults.string(forKey: Key.name) ?? ""
         server = defaults.string(forKey: Key.server) ?? ""
         roomKey = Keychain.get(Key.roomKey) ?? ""
-        noiseSuppression = defaults.object(forKey: Key.noiseSuppression) as? Bool ?? true
+        // Off unless chosen: the voice processing suppresses noise already, and a second
+        // suppressor after it dulls the voice more than it removes.
+        noiseSuppression = defaults.object(forKey: Key.noiseSuppression) as? Bool ?? false
         pins = defaults.dictionary(forKey: Key.pins) as? [String: String] ?? [:]
     }
 
