@@ -6,7 +6,7 @@
 //! allocates, locks or waits; it wakes the uplink thread when there is a frame to process.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::Thread;
 use std::time::Instant;
 
@@ -17,16 +17,23 @@ use crate::capture::Captured;
 use crate::conditioner::{Conditioning, Filter};
 use crate::echo::Tap;
 
-/// The engine's settings the capture follows.
+/// The engine's settings the capture and the speaker follow.
 pub(crate) struct Settings {
     pub noise_suppression: AtomicBool,
     pub echo_cancellation: AtomicBool,
     pub muted: AtomicBool,
+    /// The gain on what the speaker plays, as an `f32`'s bits.
+    pub volume: AtomicU32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { noise_suppression: AtomicBool::new(true), echo_cancellation: AtomicBool::new(true), muted: AtomicBool::new(false) }
+        Self {
+            noise_suppression: AtomicBool::new(true),
+            echo_cancellation: AtomicBool::new(true),
+            muted: AtomicBool::new(false),
+            volume: AtomicU32::new(1.0f32.to_bits()),
+        }
     }
 }
 

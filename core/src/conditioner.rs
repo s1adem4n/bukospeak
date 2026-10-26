@@ -108,7 +108,9 @@ impl Filter {
 
 impl Default for Gain {
     fn default() -> Self {
-        let config = AdaptiveDigitalConfig::default();
+        // Speech peaks reach full scale rather than AGC2's 5 dB below it, and the limiter bends
+        // the loudest: voices come 5 dB louder, nearer what else plays on a phone at full volume.
+        let config = AdaptiveDigitalConfig { headroom_db: 0.0, ..AdaptiveDigitalConfig::default() };
         Self {
             noise: NoiseLevelEstimator::default(),
             speech: SpeechLevelEstimator::new(&config, ADJACENT_SPEECH_FRAMES_THRESHOLD),

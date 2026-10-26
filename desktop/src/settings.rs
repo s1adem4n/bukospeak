@@ -41,11 +41,21 @@ pub struct Settings {
     pub noise_suppression: bool,
     /// Whether the speakers' echo is cancelled in what the microphone hears.
     pub echo_cancellation: bool,
+    /// How loud the others play, in percent of their level, up to the engine's most.
+    pub volume: u16,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { name: String::new(), server: String::new(), input: None, output: None, noise_suppression: true, echo_cancellation: true }
+        Self {
+            name: String::new(),
+            server: String::new(),
+            input: None,
+            output: None,
+            noise_suppression: true,
+            echo_cancellation: true,
+            volume: 100,
+        }
     }
 }
 
@@ -149,6 +159,7 @@ mod tests {
             output: None,
             noise_suppression: false,
             echo_cancellation: true,
+            volume: 150,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);

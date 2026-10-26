@@ -26,6 +26,10 @@ final class Settings {
     var noiseSuppression: Bool {
         didSet { defaults.set(noiseSuppression, forKey: Key.noiseSuppression) }
     }
+    /// How loud the others play: 1 as they come, up to `Engine.maxVolume`.
+    var volume: Double {
+        didSet { defaults.set(volume, forKey: Key.volume) }
+    }
     /// The fingerprints of servers joined before, by server, as their text.
     private var pins: [String: String] {
         didSet { defaults.set(pins, forKey: Key.pins) }
@@ -38,6 +42,7 @@ final class Settings {
         static let server = "server"
         static let roomKey = "room-key"
         static let noiseSuppression = "noise-suppression"
+        static let volume = "volume"
         static let pins = "pins"
     }
 
@@ -49,6 +54,7 @@ final class Settings {
         // Off unless chosen: the voice processing suppresses noise already, and a second
         // suppressor after it dulls the voice more than it removes.
         noiseSuppression = defaults.object(forKey: Key.noiseSuppression) as? Bool ?? false
+        volume = defaults.object(forKey: Key.volume) as? Double ?? 1
         pins = defaults.dictionary(forKey: Key.pins) as? [String: String] ?? [:]
     }
 

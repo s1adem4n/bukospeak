@@ -60,7 +60,7 @@ pub fn play(recording: &[f32], options: Options) -> Result<Vec<f32>, opus::Error
                 mixer.insert(sender, packet);
             })?;
         }
-        mixer.render(&mut mix);
+        mixer.render(&mut mix, 1.0);
         played.extend_from_slice(&mix);
     }
     Ok(played)

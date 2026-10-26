@@ -162,6 +162,15 @@ nonisolated final class Engine: @unchecked Sendable {
         bukospeak_engine_set_noise_suppression(engine, on)
     }
 
+    /// How loud the others play: 1 as they come, up to `maxVolume`, in this call and the ones
+    /// after.
+    func setVolume(_ volume: Double) {
+        bukospeak_engine_set_volume(engine, Float(volume))
+    }
+
+    /// The loudest the others play: twice their level.
+    static let maxVolume = Double(bukospeak_max_volume())
+
     /// Plays the call on the voice processing unit, once the audio session is active; without
     /// a call, or playing already, nothing. It starts on the engine's queue, after what waits
     /// there already, since creating the unit takes long enough to freeze the screen; `started`

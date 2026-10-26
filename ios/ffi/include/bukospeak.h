@@ -200,6 +200,17 @@ void bukospeak_engine_set_muted(const struct BukoSpeakEngine *engine, bool muted
  */
 void bukospeak_engine_set_noise_suppression(const struct BukoSpeakEngine *engine, bool on);
 
+/**
+ * How loud the others play: 1.0 as they come, up to [`bukospeak_max_volume`]; the limiter
+ * bends the peaks a louder mix would clip. It holds across calls until set again.
+ */
+void bukospeak_engine_set_volume(const struct BukoSpeakEngine *engine, float volume);
+
+/**
+ * The loudest volume the others play at: 2.0, 6 dB above their level.
+ */
+float bukospeak_max_volume(void);
+
 #if defined(__APPLE__)
 /**
  * Plays the call on the voice processing unit, once the app's audio session is active. True

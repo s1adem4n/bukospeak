@@ -1,9 +1,11 @@
 //! The settings: groups of rows, a label and its control each. The fields are kept when the
 //! settings close; the audio's choices at once, as the call takes them at once.
 
+use bukospeak_core::MAX_VOLUME;
 use bukospeak_desktop::audio::{self, Direction};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
@@ -59,11 +61,12 @@ fn choices(devices: impl IntoIterator<Item = (String, String)>, kept: Option<&st
 
 type DeviceSelect = Entity<SelectState<Vec<Choice>>>;
 
-/// The settings' choice of devices, filled in once the system listed them.
+/// The settings' choice of devices, filled in once the system listed them, and the volume.
 pub(super) struct Audio {
     input: DeviceSelect,
     output: DeviceSelect,
-    _events: [Subscription; 2],
+    volume: Entity<SliderState>,
+    _events: [Subscription; 3],
     _listing: Task<()>,
 }
 
@@ -86,6 +89,16 @@ impl Main {
         };
         let (input, input_events) = select(Direction::Input, window, cx);
         let (output, output_events) = select(Direction::Output, window, cx);
+        let percent = self.client.read(cx).settings.volume;
+        let most = (MAX_VOLUME * 100.0) as u16;
+        let volume = cx.new(|_| SliderState::new().min(0.0).max(f32::from(most)).step(5.0).default_value(f32::from(percent.min(most))));
+        let volume_events = cx.subscribe(&volume, |main, _, event: &SliderEvent, cx| {
+            let (value, done) = match event {
+                SliderEvent::Change(value) => (value, false),
+                SliderEvent::Release(value) => (value, true),
+            };
+            main.client.update(cx, |client, cx| client.set_volume(value.end() as u16, done, cx));
+        });
         let listing = cx.spawn_in(window, async move |this, cx| {
             let list = |direction| {
                 audio::devices(direction).unwrap_or_else(|error| {
@@ -113,7 +126,7 @@ impl Main {
                 }
             });
         });
-        Audio { input, output, _events: [input_events, output_events], _listing: listing }
+        Audio { input, output, volume, _events: [input_events, output_events, volume_events], _listing: listing }
     }
 
     pub(super) fn render_settings(&self, form: &Form, audio: &Audio, cx: &mut Context<Self>) -> impl IntoElement {
@@ -150,6 +163,21 @@ impl Main {
                     vec![
                         Row::field("Mikrofon", device("input", &audio.input)),
                         Row::field("Ausgabe", device("output", &audio.output)),
+                        Row::field(
+                            "Lautstärke",
+                            h_flex()
+                                .gap_3()
+                                .pr_3()
+                                .child(div().flex_1().child(Slider::new(&audio.volume)))
+                                .child(
+                                    div()
+                                        .w(px(40.))
+                                        .text_right()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("{} %", settings.volume)),
+                                )
+                                .into_any_element(),
+                        ),
                         Row::switch("Rauschunterdrückung", switch("noise", settings.noise_suppression, Client::set_noise_suppression)),
                         Row::switch("Echounterdrückung", switch("echo", settings.echo_cancellation, Client::set_echo_cancellation)),
                     ],

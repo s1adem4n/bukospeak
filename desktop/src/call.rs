@@ -286,6 +286,11 @@ impl Call {
         self.engine.set_echo_cancellation(on);
     }
 
+    /// How loud the others play, in percent of their level.
+    pub fn set_volume(&self, percent: u16) {
+        self.engine.set_volume(f32::from(percent) / 100.0);
+    }
+
     /// Plays the call on another device from now on; the next join is told its devices anew.
     pub fn set_device(&self, direction: Direction, device: Option<DeviceId>) {
         self.send(Command::SetDevice(direction, device));

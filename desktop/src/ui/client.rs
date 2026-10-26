@@ -41,6 +41,7 @@ impl Client {
     ) -> Self {
         call.set_noise_suppression(settings.noise_suppression);
         call.set_echo_cancellation(settings.echo_cancellation);
+        call.set_volume(settings.volume);
         let happenings = cx.spawn(async move |this, cx| {
             while let Some(happening) = happenings.next().await {
                 let applied = this.update(cx, |client, cx| {
@@ -175,5 +176,17 @@ impl Client {
     pub fn set_echo_cancellation(&mut self, on: bool, cx: &mut Context<Self>) {
         self.change(|settings| settings.echo_cancellation = on, cx);
         self.call.set_echo_cancellation(on);
+    }
+
+    /// Plays the others at `percent` of their level, and keeps it once `done` choosing: while a
+    /// slider is dragged, it is heard at once but saved only at the end.
+    pub fn set_volume(&mut self, percent: u16, done: bool, cx: &mut Context<Self>) {
+        self.call.set_volume(percent);
+        if done {
+            self.change(|settings| settings.volume = percent, cx);
+        } else {
+            self.settings.volume = percent;
+            cx.notify();
+        }
     }
 }

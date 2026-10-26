@@ -27,6 +27,15 @@ struct SettingsView: View {
                     }
                 }
                 Section {
+                    LabeledContent("Lautstärke") {
+                        HStack(spacing: 12) {
+                            Slider(value: $settings.volume, in: 0...Engine.maxVolume, step: 0.05)
+                            Text(settings.volume, format: .percent.precision(.fractionLength(0)))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .frame(minWidth: 48, alignment: .trailing)
+                        }
+                    }
                     Toggle("Rauschfilter", isOn: $settings.noiseSuppression)
                 }
             }
@@ -39,6 +48,7 @@ struct SettingsView: View {
                 }
             }
             .onChange(of: settings.noiseSuppression) { call.noiseSuppressionChanged() }
+            .onChange(of: settings.volume) { call.volumeChanged() }
         }
     }
 }

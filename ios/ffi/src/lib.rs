@@ -303,6 +303,19 @@ pub extern "C" fn bukospeak_engine_set_noise_suppression(engine: &BukoSpeakEngin
     engine.engine.set_noise_suppression(on);
 }
 
+/// How loud the others play: 1.0 as they come, up to [`bukospeak_max_volume`]; the limiter
+/// bends the peaks a louder mix would clip. It holds across calls until set again.
+#[unsafe(no_mangle)]
+pub extern "C" fn bukospeak_engine_set_volume(engine: &BukoSpeakEngine, volume: f32) {
+    engine.engine.set_volume(volume);
+}
+
+/// The loudest volume the others play at: 2.0, 6 dB above their level.
+#[unsafe(no_mangle)]
+pub extern "C" fn bukospeak_max_volume() -> f32 {
+    bukospeak_core::MAX_VOLUME
+}
+
 /// Plays the call on the voice processing unit, once the app's audio session is active. True
 /// if it plays, or there is no call; false if the unit didn't start, after `failed` heard why.
 #[cfg(target_os = "ios")]

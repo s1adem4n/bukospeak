@@ -83,8 +83,9 @@ impl Mixer {
         self.voices.iter_mut().for_each(Voice::reset);
     }
 
-    /// Mixes the next 10 ms of every voice into `mix`.
-    pub fn render(&mut self, mix: &mut [f32; FRAME_SAMPLES]) {
+    /// Mixes the next 10 ms of every voice into `mix`, at `volume` times their level; the
+    /// limiter keeps the loud mix below full scale.
+    pub fn render(&mut self, mix: &mut [f32; FRAME_SAMPLES], volume: f32) {
         mix.fill(0.0);
         for voice in self.voices.iter_mut().filter(|voice| voice.member.is_some()) {
             let decoded = match voice.buffer.pop() {
@@ -100,7 +101,7 @@ impl Mixer {
                 voice.undecodable += 1;
             }
         }
-        mix.iter_mut().for_each(|sample| *sample = limit(*sample));
+        mix.iter_mut().for_each(|sample| *sample = limit(*sample * volume));
     }
 
     /// The members whose voice is playing.
@@ -139,6 +140,10 @@ mod tests {
     /// Plays the senders' frames as they arrive, one 10 ms frame at a time, and returns each
     /// rendered frame's RMS and who spoke during it.
     fn play(mixer: &mut Mixer, senders: &[(MemberId, Vec<Packet>)], frames: u64) -> Vec<(f32, Vec<MemberId>)> {
+        play_at(mixer, senders, frames, 1.0)
+    }
+
+    fn play_at(mixer: &mut Mixer, senders: &[(MemberId, Vec<Packet>)], frames: u64, volume: f32) -> Vec<(f32, Vec<MemberId>)> {
         let mut mix = [0.0; FRAME_SAMPLES];
         (0..frames)
             .map(|tick| {
@@ -147,7 +152,7 @@ mod tests {
                         assert!(mixer.insert(*sender, *packet));
                     }
                 }
-                mixer.render(&mut mix);
+                mixer.render(&mut mix, volume);
                 assert!(mix.iter().all(|sample| sample.abs() <= 1.0), "the mix clipped");
                 (rms(&mix), mixer.speaking().collect())
             })
@@ -180,6 +185,18 @@ mod tests {
         // below full scale (`play` checks every sample), so the mix is louder but not twice so.
         assert!((0.64..0.9).contains(rms), "rms {rms}");
         assert_eq!(speaking, &[MemberId(1), MemberId(2)]);
+    }
+
+    #[test]
+    fn the_volume_scales_the_mix_and_the_limiter_still_bends_it() {
+        // A sine of amplitude 0.2 has an RMS of 0.14.
+        let level =
+            |volume, amplitude| play_at(&mut Mixer::new().unwrap(), &[(MemberId(1), talkspurt(50, 440.0, amplitude))], 30, volume)[20].0;
+        let (half, double) = (level(0.5, 0.2), level(2.0, 0.2));
+        assert!((0.065..0.075).contains(&half), "rms {half} at half the volume");
+        assert!((0.27..0.3).contains(&double), "rms {double} at twice the volume");
+        // Twice a loud voice peaks at 1.8, which the limiter bends below full scale.
+        assert!(level(2.0, 0.9) < 1.0);
     }
 
     #[test]

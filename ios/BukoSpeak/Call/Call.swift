@@ -65,6 +65,7 @@ final class Call: NSObject {
         self.settings = settings
         self.engine = engine
         super.init()
+        engine.setVolume(settings.volume)
         controller.callObserver.setDelegate(self, queue: nil)
         Task { [weak self, updates = engine.updates] in
             for await update in updates {
@@ -144,6 +145,11 @@ final class Call: NSObject {
     /// Applies the noise suppression setting to the call.
     func noiseSuppressionChanged() {
         engine.setNoiseSuppression(settings.noiseSuppression)
+    }
+
+    /// Applies the volume setting to the call.
+    func volumeChanged() {
+        engine.setVolume(settings.volume)
     }
 
     /// Trusts the server's new certificate on the next join, as after it was set up anew.

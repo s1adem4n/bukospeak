@@ -30,6 +30,9 @@ use crate::speaker::{Downlink, Speaker};
 use crate::speaking::Speaking;
 use crate::uplink;
 
+/// The loudest [`Engine::set_volume`] plays the others: 6 dB above their level.
+pub const MAX_VOLUME: f32 = 2.0;
+
 /// Frames the uplink may fall behind the microphone: 1 s.
 const UPLINK_FRAMES: usize = 100;
 
@@ -174,7 +177,7 @@ impl Engine {
         let link = Link { call: calls.joined, session, rejoin, sender, muted };
         let task = self.runtime.spawn(run(link, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
         calls.running = Some(Running { stop, task });
-        Ok(Joined { fingerprint, microphone, speaker: Speaker::new(mixer, speaker_downlink, speaking, tap) })
+        Ok(Joined { fingerprint, microphone, speaker: Speaker::new(mixer, speaker_downlink, speaking, Arc::clone(&self.settings), tap) })
     }
 
     /// Leaves the call, if there is one, once the server knows. Returns the
@@ -213,6 +216,14 @@ impl Engine {
     /// as it is within seconds; off, it doesn't touch it at all.
     pub fn set_echo_cancellation(&self, on: bool) {
         self.settings.echo_cancellation.store(on, Ordering::Relaxed);
+    }
+
+    /// How loud the others play: 1.0 as they come, up to [`MAX_VOLUME`]; the limiter bends the
+    /// peaks a louder mix would clip. It holds across calls until set again.
+    pub fn set_volume(&self, volume: f32) {
+        // A NaN would silence the mix for good.
+        let volume = if volume.is_nan() { 1.0 } else { volume.clamp(0.0, MAX_VOLUME) };
+        self.settings.volume.store(volume.to_bits(), Ordering::Relaxed);
     }
 
     /// Whether this member is muted: the microphone sends silence, so a talkspurt ends as in a
