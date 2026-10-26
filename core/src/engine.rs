@@ -146,8 +146,10 @@ impl Engine {
         let mut calls = self.calls.lock().expect("the calls lock is never poisoned");
         self.end(calls.running.take());
         self.unwatch();
+        let conditioning = self.conditioning;
+        // Built while the session joins, which hides most of the time DeepFilterNet3 takes.
+        let capture = thread::Builder::new().name("bukospeak-capture".into()).spawn(move || capture(conditioning))?;
         // libopus creates codecs without fail for the fixed formats asked for.
-        let (capture, tap) = Capture::new(self.conditioning).expect("the encoder can be created");
         let mixer = Mixer::new().expect("the decoders can be created");
 
         let mut muted = self.muted.subscribe();
@@ -157,10 +159,12 @@ impl Engine {
         let fingerprint = session.fingerprint();
         // Joining again trusts only the server joined now.
         let rejoin = JoinConfig { pin: Some(fingerprint), ..config };
+        let capture = capture.join().expect("building the capture doesn't panic");
         let speaking = Arc::new(Speaking::default());
         let (frames, uplink_frames) = RingBuffer::new(UPLINK_FRAMES);
         let sender = session.audio_sender();
-        let uplink = uplink::spawn(uplink_frames, sender.clone())?;
+        let uplink = uplink::spawn(uplink_frames, capture, sender.clone(), Arc::clone(&self.settings), Arc::clone(&speaking))?;
+        let (microphone, tap) = Microphone::new(self.conditioning, frames, uplink, Arc::clone(&self.settings));
         let (downlink, speaker_downlink) = RingBuffer::new(DOWNLINK_FRAMES);
 
         // Sent before the call's own events, so they apply to the channel it enters. A failed
@@ -170,11 +174,7 @@ impl Engine {
         let link = Link { call: calls.joined, session, rejoin, sender, muted };
         let task = self.runtime.spawn(run(link, Deliveries::new(downlink), Arc::clone(&speaking), self.events.clone(), stopped));
         calls.running = Some(Running { stop, task });
-        Ok(Joined {
-            fingerprint,
-            microphone: Microphone::new(capture, frames, uplink, Arc::clone(&self.settings), Arc::clone(&speaking)),
-            speaker: Speaker::new(mixer, speaker_downlink, speaking, tap),
-        })
+        Ok(Joined { fingerprint, microphone, speaker: Speaker::new(mixer, speaker_downlink, speaking, tap) })
     }
 
     /// Leaves the call, if there is one, once the server knows. Returns the
@@ -389,6 +389,19 @@ async fn watch_present(server: String, room_key: String, pin: Fingerprint, event
     tell(Event::Present(Vec::new()));
 }
 
+/// A call's capture, suppressing noise with DeepFilterNet3 where it is built in.
+fn capture(conditioning: Conditioning) -> Capture {
+    // libopus creates codecs without fail for the fixed formats asked for.
+    let capture = Capture::new(conditioning).expect("the encoder can be created");
+    // The model is built in, so it fails to build only on a bug; RNNoise suppresses the noise then.
+    #[cfg(feature = "deepfilter")]
+    let capture = match crate::deep_filter::DeepFilter::new() {
+        Ok(deep_filter) => capture.with_deep_filter(deep_filter),
+        Err(_) => capture,
+    };
+    capture
+}
+
 /// Everyone in the session's channel but this member.
 fn others(session: &Session) -> BTreeSet<MemberId> {
     session.members().iter().map(|member| member.id).filter(|&id| id != session.you()).collect()
@@ -433,7 +446,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
-    use bukospeak_proto::audio::{Level, SAMPLE_RATE};
+    use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES, Level, SAMPLE_RATE};
     use bukospeak_server::{Identity, Room};
     use rtrb::Consumer;
     use tokio::net::UdpSocket;
@@ -646,7 +659,12 @@ mod tests {
 
         // The microphone of the first join sends over the second.
         let mut listener = server.block_on(Session::join(config(new, &identity, "listener"), Entry::default())).unwrap();
-        joined.microphone.push(&voice(SAMPLE_RATE as usize, 0.3), Instant::now());
+        // Paced as a device captures it: a second at once would be too late to be heard.
+        let start = Instant::now();
+        for (frame, samples) in voice(SAMPLE_RATE as usize, 0.3).as_chunks::<FRAME_SAMPLES>().0.iter().enumerate() {
+            joined.microphone.push(samples, Instant::now());
+            thread::sleep((start + FRAME_DURATION * (frame as u32 + 1)).saturating_duration_since(Instant::now()));
+        }
         let from = server.block_on(async {
             loop {
                 match tokio::time::timeout(Duration::from_secs(5), listener.next_event()).await.expect("audio within 5 s").unwrap() {

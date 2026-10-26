@@ -13,7 +13,7 @@ const SLOTS: usize = 64;
 
 /// The fewest frames a talkspurt starts with: one to play and one to recover a loss from by FEC.
 const MIN_TARGET: u32 = 2;
-const MAX_TARGET: u32 = 20;
+pub(crate) const MAX_TARGET: u32 = 20;
 
 /// Frames beyond the target the buffer tolerates before it drops one.
 const HEADROOM: u32 = 2;

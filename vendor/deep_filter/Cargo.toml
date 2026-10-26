@@ -1,0 +1,33 @@
+[package]
+name = "deep_filter"
+version = "0.5.7-pre"
+authors = ["Hendrik Schröter"]
+edition = "2021"
+description = "Noise suppression using deep filtering: DeepFilterNet's real-time inference, trimmed"
+repository = "https://github.com/ismailivanov/DeepFilterNetPlus"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "df"
+
+[dependencies]
+bytemuck = "1.25"
+flate2 = "1.0.24"
+num-complex = { version = "0.4", features = ["bytemuck"] }
+realfft = "3.1.0"
+rust-ini = "0.21"
+# Only reads archives from memory; xattr is for unpacking onto a file system.
+tar = { version = "0.4.38", default-features = false }
+thiserror = "2.0.21"
+tract-core = "0.23.9"
+tract-nnef = "0.23.9"
+tract-pulse-opl = "0.23.9"
+
+# For examples/convert.rs, which makes the model archive from the fork's.
+[dev-dependencies]
+tract-onnx = "0.23.9"
+tract-pulse = "0.23.9"
+
+[lints.rust]
+unsafe_code = "forbid"

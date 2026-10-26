@@ -20,6 +20,8 @@ bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 cpal = "0.18.2"
 ctrlc = "3.5.2"
+# DeepFilterNet's inference, trimmed; vendor/README.md says from where and how.
+deep_filter = { path = "vendor/deep_filter" }
 dirs = "7.0.0"
 embed-resource = "3.0.12"
 futures = "0.3.34"
@@ -27,6 +29,7 @@ global-hotkey = "0.9.0"
 # GPUI and its components; gpui-pre is a weekly snapshot of Zed's main whose API changes, so
 # the version is exact and an upgrade is a step of its own.
 gpui-kit = "=0.8.0"
+hound = "3.5.1"
 interprocess = "2.4.7"
 keyring = "4.2.0"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
@@ -77,6 +80,17 @@ sonora-aec3 = { path = "vendor/sonora-aec3" }
 [profile.dev.package.sonora]
 opt-level = 3
 [profile.dev.package.sonora-aec3]
+opt-level = 3
+# Nor can DeepFilterNet3 keep up with the audio in a debug build.
+[profile.dev.package.deep_filter]
+opt-level = 3
+[profile.dev.package.tract-core]
+opt-level = 3
+[profile.dev.package.tract-linalg]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
+[profile.dev.package.ndarray]
 opt-level = 3
 
 # Downloads stay small: no symbols, and the linker sees across crates to drop what is unused.

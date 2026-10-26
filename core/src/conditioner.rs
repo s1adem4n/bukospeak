@@ -32,7 +32,9 @@ pub enum Conditioning {
     Engine,
 }
 
-pub struct Conditioner {
+/// The filters, which the capture callback runs, since AEC3 aligns what the speaker played with
+/// the times the platform tells for the samples captured.
+pub struct Filter {
     /// The high-pass filter, for while the speaker's echo isn't cancelled, and the frame it
     /// works on, in the form it takes.
     high_pass: HighPassFilter,
@@ -43,6 +45,10 @@ pub struct Conditioner {
     reference: Reference,
     played: [f32; FRAME_SAMPLES],
     echo_cancellation: bool,
+}
+
+/// AGC2, which follows the denoiser.
+pub struct Gain {
     noise: NoiseLevelEstimator,
     speech: SpeechLevelEstimator,
     saturation: SaturationProtector,
@@ -52,25 +58,19 @@ pub struct Conditioner {
     envelope: FixedDigitalLevelEstimator,
 }
 
-impl Conditioner {
-    /// Makes the conditioner, and the speaker's end of what it played, whose echo it cancels.
+impl Filter {
+    /// Makes the filters, and the speaker's end of what it played, whose echo they cancel.
     pub fn new() -> (Self, Tap) {
-        let config = AdaptiveDigitalConfig::default();
         let (tap, reference) = echo::reference();
-        let conditioner = Self {
+        let filter = Self {
             high_pass: HighPassFilter::new(SAMPLE_RATE as i32, 1),
             filtered: [vec![0.0; FRAME_SAMPLES]],
             echo: EchoCanceller::new(),
             reference,
             played: [0.0; FRAME_SAMPLES],
             echo_cancellation: true,
-            noise: NoiseLevelEstimator::default(),
-            speech: SpeechLevelEstimator::new(&config, ADJACENT_SPEECH_FRAMES_THRESHOLD),
-            saturation: SaturationProtector::new(SATURATION_PROTECTOR_INITIAL_HEADROOM_DB, ADJACENT_SPEECH_FRAMES_THRESHOLD),
-            gain: AdaptiveDigitalGainController::new(config, ADJACENT_SPEECH_FRAMES_THRESHOLD),
-            envelope: FixedDigitalLevelEstimator::new(FRAME_SAMPLES),
         };
-        (conditioner, tap)
+        (filter, tap)
     }
 
     /// Whether the speaker's echo is cancelled (the default) or left, for a headset whose own
@@ -104,10 +104,25 @@ impl Conditioner {
         self.high_pass.process_channels(&mut self.filtered);
         frame.copy_from_slice(&self.filtered[0]);
     }
+}
 
+impl Default for Gain {
+    fn default() -> Self {
+        let config = AdaptiveDigitalConfig::default();
+        Self {
+            noise: NoiseLevelEstimator::default(),
+            speech: SpeechLevelEstimator::new(&config, ADJACENT_SPEECH_FRAMES_THRESHOLD),
+            saturation: SaturationProtector::new(SATURATION_PROTECTOR_INITIAL_HEADROOM_DB, ADJACENT_SPEECH_FRAMES_THRESHOLD),
+            gain: AdaptiveDigitalGainController::new(config, ADJACENT_SPEECH_FRAMES_THRESHOLD),
+            envelope: FixedDigitalLevelEstimator::new(FRAME_SAMPLES),
+        }
+    }
+}
+
+impl Gain {
     /// Applies the gain to a filtered and denoised frame, of samples scaled like 16-bit PCM, by
     /// the probability that it is speech. Its peaks may exceed full scale, for a limiter to bend.
-    pub fn gain(&mut self, frame: &mut [f32; FRAME_SAMPLES], speech_probability: f32) {
+    pub fn apply(&mut self, frame: &mut [f32; FRAME_SAMPLES], speech_probability: f32) {
         let (peak, energy) =
             frame.iter().fold((0.0f32, 0.0f32), |(peak, energy), sample| (peak.max(sample.abs()), energy + sample * sample));
         let rms_dbfs = float_s16_to_dbfs((energy / FRAME_SAMPLES as f32).sqrt());
@@ -145,16 +160,17 @@ mod tests {
     /// Conditions a signal, speech throughout, and returns its frames' levels after the gain.
     fn levels(signal: &[f32], speech_probability: f32) -> Vec<Level> {
         // Nothing plays, which AEC3 hears as silence.
-        let (mut conditioner, _tap) = Conditioner::new();
+        let (mut filter, _tap) = Filter::new();
+        let mut gain = Gain::default();
         signal
             .as_chunks()
             .0
             .iter()
             .map(|frame| {
                 let mut frame = *frame;
-                conditioner.filter(&mut frame);
+                filter.filter(&mut frame);
                 let mut frame = frame.map(|sample| sample * PCM_SCALE);
-                conditioner.gain(&mut frame, speech_probability);
+                gain.apply(&mut frame, speech_probability);
                 Level::of(&frame.map(|sample| sample / PCM_SCALE))
             })
             .collect()
@@ -189,15 +205,15 @@ mod tests {
     fn the_filter_takes_out_hum_with_echo_cancellation_and_without() {
         let hum: Vec<f32> = (0..SECOND).map(|n| 0.5 * (std::f32::consts::TAU * 50.0 * n as f32 / SAMPLE_RATE as f32).sin()).collect();
         for echo_cancellation in [true, false] {
-            let (mut conditioner, _tap) = Conditioner::new();
-            conditioner.set_echo_cancellation(echo_cancellation);
+            let (mut filter, _tap) = Filter::new();
+            filter.set_echo_cancellation(echo_cancellation);
             let filtered: Vec<f32> = hum
                 .as_chunks()
                 .0
                 .iter()
                 .flat_map(|frame| {
                     let mut frame = *frame;
-                    conditioner.filter(&mut frame);
+                    filter.filter(&mut frame);
                     frame
                 })
                 .collect();
@@ -209,7 +225,7 @@ mod tests {
 
     #[test]
     fn echo_cancellation_turned_on_again_cancels_within_seconds() {
-        let (mut conditioner, mut tap) = Conditioner::new();
+        let (mut filter, mut tap) = Filter::new();
         let far = voice(40 * SECOND, 0.3);
         let frames = far.as_chunks::<FRAME_SAMPLES>().0;
         let start = Instant::now();
@@ -220,10 +236,10 @@ mod tests {
             tap.plays(FRAME_SAMPLES, now + Duration::from_millis(30));
             tap.push(played);
             let echo = index.checked_sub(3).map_or([0.0; FRAME_SAMPLES], |played| frames[played].map(|sample| 0.5 * sample));
-            conditioner.set_echo_cancellation(!(10..20).contains(&(index / 100)));
-            conditioner.captured(FRAME_SAMPLES, now);
+            filter.set_echo_cancellation(!(10..20).contains(&(index / 100)));
+            filter.captured(FRAME_SAMPLES, now);
             let mut frame = echo;
-            conditioner.filter(&mut frame);
+            filter.filter(&mut frame);
             captured.extend_from_slice(&echo);
             cancelled.extend_from_slice(&frame);
         }

@@ -3,9 +3,13 @@
 mod capture;
 mod channel;
 mod conditioner;
+#[cfg(feature = "deepfilter")]
+mod deep_filter;
 mod echo;
 mod engine;
 mod gate;
+#[cfg(any(test, feature = "harness"))]
+pub mod harness;
 mod jitter;
 mod limiter;
 mod microphone;

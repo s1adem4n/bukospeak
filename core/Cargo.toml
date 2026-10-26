@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 bukospeak-proto.workspace = true
+deep_filter = { workspace = true, optional = true }
 nnnoiseless.workspace = true
 opus.workspace = true
 bytes.workspace = true
@@ -19,9 +20,21 @@ sonora-agc2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
+[features]
+# Noise suppressed by DeepFilterNet3 rather than RNNoise; the desktop's. The iPhone's voice
+# processing suppresses noise already.
+deepfilter = ["dep:deep_filter"]
+# `harness`, and the example `chain` that runs a recording through it.
+harness = []
+
 [dev-dependencies]
 assert_no_alloc.workspace = true
 bukospeak-server.workspace = true
+hound.workspace = true
+
+[[example]]
+name = "chain"
+required-features = ["harness"]
 
 [lints]
 workspace = true
