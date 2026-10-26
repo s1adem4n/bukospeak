@@ -20,6 +20,7 @@ PORT = 8767
 
 def ota(target: Target, configuration: str) -> None:
     """`configuration` is Debug, quick to build incrementally, or Release, optimized and slower to build."""
+    _forget_team_profile(target)
     xcode.build(target, configuration)
     app = f"build/Build/Products/{configuration}-iphoneos/BukoSpeak.app"
     mac.shell(
@@ -51,6 +52,23 @@ cp build-ota/BukoSpeak.ipa "$HOME/bukospeak-ota/BukoSpeak.ipa"
             mac.copy(str(Path(folder) / template), f"{target.host}:bukospeak-ota/{template}")
     _serve(target)
     print(f"{values['base']}/")
+
+
+def _forget_team_profile(target: Target) -> None:
+    """Drops the team's wildcard profile Xcode keeps, which BukoSpeak is signed with, having no
+    App ID of its own. Xcode keeps it while it is valid, so it lacks the devices registered
+    since; without it the build gets one made anew, with every device the team has."""
+    mac.shell(
+        target,
+        """cd "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" 2>/dev/null || exit 0
+for profile in *.mobileprovision; do
+  [ -e "$profile" ] || continue
+  if security cms -D -i "$profile" 2>/dev/null | plutil -extract Entitlements.application-identifier raw - | grep -q '[.][*]$'; then
+    rm "$profile"
+  fi
+done
+""",
+    )
 
 
 def _serve(target: Target) -> None:
