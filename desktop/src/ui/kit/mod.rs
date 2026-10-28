@@ -14,7 +14,7 @@ use std::sync::{Arc, LazyLock};
 
 use gpui_kit::{
     AnyElement, App, BoxShadow, Div, FontWeight, Hsla, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, Pixels, SharedString,
-    Styled, StyledImage, div, img, px,
+    Styled, StyledImage, div, img, px, relative,
 };
 
 use crate::ui::glyph::Glyph;
@@ -98,6 +98,19 @@ pub fn dot(color: Hsla) -> impl IntoElement {
         .rounded_full()
         .bg(color)
         .shadow(vec![BoxShadow::new(px(0.), px(0.), color.opacity(0.16)).spread_radius(px(3.))])
+}
+
+/// How far something is along, `done` of it from 0 to 1, in a bar set into what it is on.
+pub fn progress(done: f32, cx: &App) -> impl IntoElement {
+    let tokens = cx.tokens();
+    div()
+        .w_full()
+        .h(theme::PROGRESS)
+        .rounded_full()
+        .bg(tokens.inset)
+        .border_1()
+        .border_color(tokens.hairline)
+        .child(div().h_full().w(relative(done)).rounded_full().bg(tokens.primary[0]))
 }
 
 /// The app's mark, the microphone of its icon cut out, as the iOS app shows it.

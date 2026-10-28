@@ -251,6 +251,9 @@ pub const MARK_SM: Pixels = px(20.);
 pub const MARK: Pixels = px(96.);
 pub const AVATAR_LG: Pixels = px(40.);
 pub const AVATAR_XL: Pixels = px(56.);
+/// The update window's column, and the bar of how far its download is.
+pub const UPDATE: Pixels = px(220.);
+pub const PROGRESS: Pixels = px(6.);
 
 /// The speaking ring, quick enough to follow speech.
 pub const SPEAKING_FADE: Duration = Duration::from_millis(120);

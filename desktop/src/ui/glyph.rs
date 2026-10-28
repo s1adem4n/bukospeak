@@ -20,6 +20,7 @@ pub enum Glyph {
     Edit,
     /// A value chosen from a menu.
     Choose,
+    Download,
 }
 
 impl From<Glyph> for Icon {
@@ -35,11 +36,12 @@ impl From<Glyph> for Icon {
             Glyph::Reconnecting => IconName::WifiOff,
             Glyph::Edit => IconName::Pencil,
             Glyph::Choose => IconName::ChevronsUpDown,
+            Glyph::Download => IconName::Download,
         })
     }
 }
 
-icon_assets!(Glyphs, [Mic, MicOff, PhoneOff, Settings, ChevronLeft, TriangleAlert, Users, WifiOff, Pencil, ChevronsUpDown]);
+icon_assets!(Glyphs, [Mic, MicOff, PhoneOff, Settings, ChevronLeft, TriangleAlert, Users, WifiOff, Pencil, ChevronsUpDown, Download]);
 
 /// The glyphs above and the icons gpui-kit's components draw themselves.
 pub struct Assets;

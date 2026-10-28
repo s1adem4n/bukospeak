@@ -1,5 +1,6 @@
 //! The window: a welcome the first time, then the channel with who is in it and the dock to
-//! join, mute and leave; the settings; and the dialog for a changed certificate.
+//! join, mute and leave; the settings; and the dialog for a changed certificate. Before it, at
+//! the start, the update window, while a newer release is looked for.
 
 mod client;
 mod glyph;
@@ -20,8 +21,9 @@ use crate::ui::client::{Missing, RoomKeyRead};
 pub use crate::ui::glyph::Assets;
 use crate::ui::glyph::Glyph;
 use crate::ui::kit::{Button, Size, Variant};
-use crate::ui::screens::{Channel, ChannelEvent, Settings, Welcome, WelcomeEvent, certificate};
+use crate::ui::screens::{Channel, ChannelEvent, Settings, Update, Welcome, WelcomeEvent, certificate};
 use crate::ui::theme::ActiveTokens;
+use crate::update::Updater;
 
 actions!(
     bukospeak,
@@ -41,8 +43,29 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Back, Some(CONTEXT))]);
 }
 
-/// Opens the window, which shows the client.
-pub fn open(client: Entity<Client>, cx: &mut App) {
+/// Opens the window at the start: with an updater, the update window first, which opens it.
+pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut App) {
+    let Some(updater) = updater else {
+        return open(client, None, cx);
+    };
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(300.), px(320.)), cx))),
+        is_resizable: false,
+        is_minimizable: false,
+        app_id: Some("bukospeak".into()),
+        // No title bar: the window is moved by any of it.
+        ..TitleBar::window_options()
+    };
+    gpui_kit::open_window(options, cx, |window, cx| {
+        Theme::sync_system_appearance(Some(window), cx);
+        cx.new(|cx| Update::new(client, updater, window, cx))
+    })
+    .expect("the window opens");
+    cx.activate(true);
+}
+
+/// Opens the window, which shows the client and a release the updater waits to install.
+pub fn open(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(380.), px(560.)), cx))),
         window_min_size: Some(size(px(320.), px(440.))),
@@ -52,7 +75,7 @@ pub fn open(client: Entity<Client>, cx: &mut App) {
     };
     gpui_kit::open_window(options, cx, |window, cx| {
         Theme::sync_system_appearance(Some(window), cx);
-        cx.new(|cx| Main::new(client, window, cx))
+        cx.new(|cx| Main::new(client, updater, window, cx))
     })
     .expect("the window opens");
     cx.activate(true);
@@ -78,6 +101,7 @@ enum Screen {
 
 pub struct Main {
     client: Entity<Client>,
+    updater: Option<Entity<Updater>>,
     screen: Screen,
     /// Where the focus rests between fields, so the window's keys reach it.
     focus: FocusHandle,
@@ -87,7 +111,7 @@ pub struct Main {
 }
 
 impl Main {
-    fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(client: Entity<Client>, updater: Option<Entity<Updater>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&client, |_, _, cx| cx.notify());
         let read = cx.subscribe_in(&client, window, |main, _, _: &RoomKeyRead, window, cx| main.read_room_key(window, cx));
         let appearance = cx.observe_window_appearance(window, |_, window, cx| Theme::sync_system_appearance(Some(window), cx));
@@ -97,15 +121,20 @@ impl Main {
         window.focus(&focus, cx);
         let (screen, subscription) = match client.read(cx).missing() {
             Some(missing) => Self::welcome(&client, missing, window, cx),
-            None => Self::channel(&client, window, cx),
+            None => Self::channel(&client, updater.as_ref(), window, cx),
         };
-        let main = Self { client, screen, focus, _screen: Some(subscription), _subscriptions: [observed, read, appearance] };
+        let main = Self { client, updater, screen, focus, _screen: Some(subscription), _subscriptions: [observed, read, appearance] };
         main.watch(cx);
         main
     }
 
-    fn channel(client: &Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> (Screen, Subscription) {
-        let channel = cx.new(|cx| Channel::new(client.clone(), cx));
+    fn channel(
+        client: &Entity<Client>,
+        updater: Option<&Entity<Updater>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Screen, Subscription) {
+        let channel = cx.new(|cx| Channel::new(client.clone(), updater.cloned(), cx));
         let subscription = cx.subscribe_in(&channel, window, |main, _, event: &ChannelEvent, window, cx| match event {
             ChannelEvent::Settings => main.show_settings(window, cx),
             ChannelEvent::Setup(missing) => main.show_welcome(*missing, window, cx),
@@ -133,7 +162,7 @@ impl Main {
     }
 
     fn show_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (screen, subscription) = Self::channel(&self.client, window, cx);
+        let (screen, subscription) = Self::channel(&self.client, self.updater.as_ref(), window, cx);
         self.show(screen, Some(subscription), window, cx);
     }
 

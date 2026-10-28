@@ -1,5 +1,6 @@
 //! The channel: a panel of who is in it, from outside or in the call, and beneath it the dock,
 //! which tells how the call is and holds the button to join or, in the call, to mute and leave.
+//! Between them a release waiting for the call to end, which can be installed at once.
 
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use crate::ui::glyph::Glyph;
 use crate::ui::kit::{self, Avatar, Button, Variant};
 use crate::ui::text;
 use crate::ui::theme::{self, ActiveTokens};
+use crate::update::{State, Updater};
 
 /// Where the channel sends the window.
 pub enum ChannelEvent {
@@ -26,20 +28,23 @@ pub enum ChannelEvent {
 
 pub struct Channel {
     client: Entity<Client>,
+    updater: Option<Entity<Updater>>,
     /// Shows the call's time anew each second, while a call is up.
     clock: Option<Task<()>>,
     _client: Subscription,
+    _updater: Option<Subscription>,
 }
 
 impl EventEmitter<ChannelEvent> for Channel {}
 
 impl Channel {
-    pub fn new(client: Entity<Client>, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&client, |channel, _, cx| {
             channel.follow_clock(cx);
             cx.notify();
         });
-        let mut channel = Self { client, clock: None, _client: observed };
+        let updated = updater.as_ref().map(|updater| cx.observe(updater, |_, _, cx| cx.notify()));
+        let mut channel = Self { client, updater, clock: None, _client: observed, _updater: updated };
         channel.follow_clock(cx);
         channel
     }
@@ -171,6 +176,37 @@ impl Channel {
         )
     }
 
+    /// A release downloaded, which waits for the call to end, unless installed at once.
+    fn render_update(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let updater = self.updater.clone()?;
+        let State::Ready { version } = updater.read(cx).state() else {
+            return None;
+        };
+        let tokens = cx.tokens();
+        Some(
+            kit::panel(cx)
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_3()
+                .p(theme::PANEL_PAD)
+                .pl(theme::PANEL_INSET)
+                .child(Icon::from(Glyph::Download).size(theme::ICON).text_color(tokens.speaking))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().truncate().font_weight(FontWeight::MEDIUM).child(format!("Update {version} bereit")))
+                        .child(div().truncate().text_size(theme::TEXT_SM).text_color(tokens.text_muted).child("Nach dem Verlassen")),
+                )
+                .child(
+                    Button::new("update", Variant::Raised)
+                        .label("Jetzt updaten")
+                        .on_click(move |_, _, cx| updater.update(cx, |updater, cx| updater.install(cx))),
+                ),
+        )
+    }
+
     /// How the call is, and what to do with it.
     fn render_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let client = self.client.read(cx);
@@ -253,6 +289,7 @@ impl Render for Channel {
             .gap(theme::GAP)
             .child(self.render_members(cx))
             .children(self.render_notice(cx))
+            .children(self.render_update(cx))
             .child(self.render_dock(cx))
     }
 }
