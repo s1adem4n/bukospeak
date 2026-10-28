@@ -1,16 +1,14 @@
 //! The welcome, the first time and whenever something is missing to join: the name the others
 //! see, then the server and its room key, and in.
 
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::{h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder;
-use gpui_kit::{
+use gpui::prelude::FluentBuilder;
+use gpui::{
     Animation, AnimationExt, App, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, ease_out_quint,
 };
 
 use crate::ui::client::{Client, Missing};
-use crate::ui::kit::{self, Avatar, Button, Variant};
+use crate::ui::kit::{self, Avatar, Button, Field, TextField, TextFieldEvent, Variant, h_flex, v_flex};
 use crate::ui::theme::{self, ActiveTokens};
 
 /// The welcome is through: what it asked for is kept, and the window may join.
@@ -19,9 +17,9 @@ pub struct WelcomeEvent;
 pub struct Welcome {
     client: Entity<Client>,
     step: Missing,
-    name: Entity<InputState>,
-    server: Entity<InputState>,
-    room_key: Entity<InputState>,
+    name: Entity<TextField>,
+    server: Entity<TextField>,
+    room_key: Entity<TextField>,
     _events: [Subscription; 3],
 }
 
@@ -32,17 +30,20 @@ impl Welcome {
         let read = client.read(cx);
         let values = [read.settings.name.clone(), read.settings.server.clone(), read.room_key().to_owned()];
         let [name, server, room_key] = values;
-        let mut input = |value: String, placeholder: &'static str, masked: bool| {
-            cx.new(|cx| InputState::new(window, cx).default_value(value).placeholder(placeholder).masked(masked))
+        let mut input = |value: String, placeholder: &'static str, secret: bool| {
+            cx.new(|cx| {
+                let field = TextField::new(value, placeholder, window, cx);
+                if secret { field.secret() } else { field }
+            })
         };
         let (name, server, room_key) =
             (input(name, "Name", false), input(server, "server.example:9988", false), input(room_key, "Raumschlüssel", true));
-        let enter = |input: &Entity<InputState>, then: fn(&mut Self, &mut Window, &mut Context<Self>), cx: &mut Context<Self>| {
-            cx.subscribe_in(input, window, move |welcome, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => then(welcome, window, cx),
+        let enter = |input: &Entity<TextField>, then: fn(&mut Self, &mut Window, &mut Context<Self>), cx: &mut Context<Self>| {
+            cx.subscribe_in(input, window, move |welcome, _, event: &TextFieldEvent, window, cx| match event {
+                TextFieldEvent::Confirmed => then(welcome, window, cx),
                 // The buttons and the avatar follow what is typed.
-                InputEvent::Change => cx.notify(),
-                _ => {}
+                TextFieldEvent::Changed => cx.notify(),
+                TextFieldEvent::Left => {}
             })
         };
         let events = [enter(&name, Self::next, cx), enter(&server, Self::after_server, cx), enter(&room_key, Self::finish, cx)];
@@ -56,15 +57,15 @@ impl Welcome {
     }
 
     /// Takes the room key the keyring kept into its field while that is empty.
-    pub fn read_room_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn read_room_key(&mut self, cx: &mut Context<Self>) {
         if value(&self.room_key, cx).is_empty() {
             let key = self.client.read(cx).room_key().to_owned();
-            self.room_key.update(cx, |input, cx| input.set_value(key, window, cx));
+            self.room_key.update(cx, |input, cx| input.set_value(key, cx));
         }
     }
 
     /// The fields of the step, in order.
-    fn fields(&self) -> Vec<&Entity<InputState>> {
+    fn fields(&self) -> Vec<&Entity<TextField>> {
         match self.step {
             Missing::Name => vec![&self.name],
             Missing::Place => vec![&self.server, &self.room_key],
@@ -157,7 +158,7 @@ impl Welcome {
 }
 
 impl Render for Welcome {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let name = value(&self.name, cx);
         let content = match self.step {
             Missing::Name => v_flex()
@@ -167,7 +168,7 @@ impl Render for Welcome {
                 .child(headline("Willkommen bei BukoSpeak"))
                 .child(subline("Wie sollen dich die anderen nennen?", cx))
                 .child(
-                    v_flex().w_full().mt_6().gap_2().child(kit::field(&self.name, theme::FIELD, window, cx)).child(
+                    v_flex().w_full().mt_6().gap_2().child(Field::new(&self.name, theme::FIELD)).child(
                         Button::new("next", Variant::Primary)
                             .w_full()
                             .h(theme::FIELD)
@@ -189,8 +190,8 @@ impl Render for Welcome {
                             .w_full()
                             .mt_6()
                             .gap_2()
-                            .child(kit::field(&self.server, theme::FIELD, window, cx).font_family(theme::MONO).text_size(theme::TEXT_SM))
-                            .child(kit::field(&self.room_key, theme::FIELD, window, cx))
+                            .child(Field::new(&self.server, theme::FIELD).font_family(theme::MONO).text_size(theme::TEXT_SM))
+                            .child(Field::new(&self.room_key, theme::FIELD))
                             .child(
                                 Button::new("finish", Variant::Primary)
                                     .w_full()
@@ -219,14 +220,14 @@ impl Render for Welcome {
             .pb(theme::TITLE_BAR)
             .child(div().w_full().max_w(theme::WELCOME).relative().child(content).with_animation(
                 ("step", self.step as usize),
-                Animation::new(theme::APPEAR).with_easing(gpui_kit::ease_out_quint()),
+                Animation::new(theme::APPEAR).with_easing(ease_out_quint()),
                 move |content, delta| content.left(theme::SLIDE * from * (1. - delta)).opacity(delta),
             ))
             .child(self.render_steps(cx))
     }
 }
 
-fn value(input: &Entity<InputState>, cx: &App) -> String {
+fn value(input: &Entity<TextField>, cx: &App) -> String {
     input.read(cx).value().trim().to_owned()
 }
 

@@ -3,19 +3,18 @@
 
 use bukospeak_core::MAX_VOLUME;
 use bukospeak_desktop::audio::{self, Direction};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Icon, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder;
-use gpui_kit::{
-    Anchor, AnyElement, App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
+use gpui::prelude::FluentBuilder;
+use gpui::{
+    AnyElement, App, AppContext, Context, DismissEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
 };
 
 use crate::ui::client::Client;
 use crate::ui::glyph::Glyph;
-use crate::ui::kit::{self, Avatar, Button, InlineField, InlineFieldEvent, InputLevel, Look, Variant};
+use crate::ui::kit::menu::{Item, Menu, Place, Popover};
+use crate::ui::kit::{
+    self, Avatar, Button, Icon, InlineField, InlineFieldEvent, InputLevel, Look, Slider, SliderEvent, Switch, Variant, h_flex, v_flex,
+};
 use crate::ui::theme::{self, ActiveTokens};
 
 /// A device to choose: the system's default for None.
@@ -50,8 +49,10 @@ pub struct Settings {
     /// the one kept.
     inputs: Vec<Choice>,
     outputs: Vec<Choice>,
-    volume: Entity<SliderState>,
+    volume: Entity<Slider>,
     level: Entity<InputLevel>,
+    /// The menu of devices open, for the direction it chooses.
+    menu: Option<(Direction, Entity<Menu>, Subscription)>,
     _subscriptions: Vec<Subscription>,
     _listing: Task<()>,
 }
@@ -70,18 +71,14 @@ impl Settings {
         let server = cx.new(|cx| InlineField::new(server, "server.example:9988", Look::Mono, window, cx));
         let room_key = cx.new(|cx| InlineField::new(room_key, "Nicht gesetzt", Look::Secret, window, cx));
         let level = cx.new(|cx| InputLevel::new(meter, cx));
-        let volume = cx.new(|_| SliderState::new().min(0.0).max(f32::from(most)).step(5.0).default_value(f32::from(percent)));
+        let volume = cx.new(|cx| Slider::new("Lautstärke", f32::from(percent), 0., f32::from(most), 5., cx));
         let subscriptions = vec![
             cx.observe(&client, |_, _, cx| cx.notify()),
             keep(&name, &client, Client::set_name, cx),
             keep(&server, &client, Client::set_server, cx),
             keep(&room_key, &client, Client::set_room_key, cx),
             cx.subscribe(&volume, |settings, _, event: &SliderEvent, cx| {
-                let (value, done) = match event {
-                    SliderEvent::Change(value) => (value, false),
-                    SliderEvent::Release(value) => (value, true),
-                };
-                settings.client.update(cx, |client, cx| client.set_volume(value.end() as u16, done, cx));
+                settings.client.update(cx, |client, cx| client.set_volume(event.value as u16, event.done, cx));
             }),
         ];
         let listing = cx.spawn(async move |settings, cx| {
@@ -111,6 +108,7 @@ impl Settings {
             room_key,
             volume,
             level,
+            menu: None,
             _subscriptions: subscriptions,
             _listing: listing,
         }
@@ -146,45 +144,69 @@ impl Settings {
     /// A row that chooses a device from a menu: the row opens it, below its end.
     fn render_device(&self, direction: Direction, cx: &mut Context<Self>) -> AnyElement {
         let (id, label, choices) = match direction {
-            Direction::Input => ("input", "Mikrofon", self.inputs.clone()),
-            Direction::Output => ("output", "Ausgabe", self.outputs.clone()),
+            Direction::Input => ("input", "Mikrofon", &self.inputs),
+            Direction::Output => ("output", "Ausgabe", &self.outputs),
+        };
+        let kept = self.client.read(cx).settings.device_id(direction);
+        let chosen =
+            choices.iter().find(|choice| choice.id.as_deref() == kept).map_or_else(|| "Standard".into(), |choice| choice.title.clone());
+        let tokens = cx.tokens();
+        let open = self.menu.as_ref().filter(|(shown, ..)| *shown == direction).map(|(_, menu, _)| menu);
+        div()
+            .relative()
+            .child(
+                Button::new(id, Variant::Ghost)
+                    .w_full()
+                    .h(theme::ROW)
+                    .px(theme::PANEL_INSET - theme::PANEL_PAD)
+                    .justify_between()
+                    .gap_3()
+                    .font_weight(FontWeight::NORMAL)
+                    .selected(open.is_some())
+                    .child(div().flex_none().text_color(tokens.text).child(label))
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_1p5()
+                            .when(direction == Direction::Input, |value| value.child(div().mr_1().child(self.level.clone())))
+                            .child(div().min_w_0().truncate().child(chosen))
+                            .child(Icon::new(Glyph::Choose).size(theme::ICON_SM).color(tokens.text_faint)),
+                    )
+                    .on_click(cx.listener(move |settings, _, window, cx| settings.open_devices(direction, window, cx))),
+            )
+            .children(open.map(|menu| Popover::new(menu, Place::BelowEnd)))
+            .into_any_element()
+    }
+
+    /// Opens the menu of `direction`'s devices, the one kept checked.
+    fn open_devices(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
+        let choices = match direction {
+            Direction::Input => self.inputs.clone(),
+            Direction::Output => self.outputs.clone(),
         };
         let kept = self.client.read(cx).settings.device_id(direction).map(str::to_owned);
-        let chosen = choices.iter().find(|choice| choice.id == kept).map_or_else(|| "Standard".into(), |choice| choice.title.clone());
-        let tokens = cx.tokens();
-        let client = self.client.clone();
-        Button::new(id, Variant::Ghost)
-            .w_full()
-            .h(theme::ROW)
-            .px(theme::PANEL_INSET - theme::PANEL_PAD)
-            .justify_between()
-            .gap_3()
-            .font_weight(FontWeight::NORMAL)
-            .child(div().flex_none().text_color(tokens.text).child(label))
-            .child(
-                h_flex()
-                    .min_w_0()
-                    .gap_1p5()
-                    .when(direction == Direction::Input, |value| value.child(div().mr_1().child(self.level.clone())))
-                    .child(div().min_w_0().truncate().child(chosen))
-                    .child(Icon::from(Glyph::Choose).size(theme::ICON_SM).text_color(tokens.text_faint)),
-            )
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let item = |choice: &Choice| {
-                    let client = client.clone();
-                    let id = choice.id.clone();
-                    PopupMenuItem::new(choice.title.clone()).checked(choice.id == kept).disabled(choice.missing).on_click(
-                        move |_, _, cx| {
-                            client.update(cx, |client, cx| client.set_device(direction, id.clone(), cx));
-                        },
-                    )
-                };
-                let (standard, devices) = choices.split_first().expect("the default is a choice");
-                let menu = menu.min_w(theme::MENU).item(item(standard));
-                let menu = if devices.is_empty() { menu } else { menu.separator() };
-                devices.iter().fold(menu, |menu, choice| menu.item(item(choice)))
-            })
-            .into_any_element()
+        let client = self.client.downgrade();
+        let menu = Menu::open(window, cx, |menu| {
+            let item = |choice: &Choice| {
+                let (client, id) = (client.clone(), choice.id.clone());
+                Item::new(choice.title.clone(), move |_, cx| {
+                    // The window may be gone with the choice.
+                    let _ = client.update(cx, |client, cx| client.set_device(direction, id.clone(), cx));
+                })
+                .checked(choice.id == kept)
+                .disabled(choice.missing)
+            };
+            let (standard, devices) = choices.split_first().expect("the default is a choice");
+            let menu = menu.item(item(standard));
+            let menu = if devices.is_empty() { menu } else { menu.separator() };
+            devices.iter().fold(menu, |menu, choice| menu.item(item(choice)))
+        });
+        let closed = cx.subscribe(&menu, |settings, _, _: &DismissEvent, cx| {
+            settings.menu = None;
+            cx.notify();
+        });
+        self.menu = Some((direction, menu, closed));
+        cx.notify();
     }
 
     fn render_audio(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -192,7 +214,7 @@ impl Settings {
         let tokens = cx.tokens();
         let (percent, noise, echo) = (settings.volume, settings.noise_suppression, settings.echo_cancellation);
         let volume = kit::row("Lautstärke", cx).child(
-            h_flex().flex_none().w(theme::VOLUME).gap_3().child(div().flex_1().child(Slider::new(&self.volume))).child(
+            h_flex().flex_none().w(theme::VOLUME).gap_3().child(div().flex_1().child(self.volume.clone())).child(
                 div()
                     .w(theme::VOLUME_VALUE)
                     .text_right()
@@ -224,9 +246,9 @@ impl Settings {
     ) -> AnyElement {
         let client = self.client.downgrade();
         kit::row(label, cx)
-            .child(Switch::new(id).checked(on).on_change(move |on, _, cx| {
+            .child(Switch::new(id, label, on).on_change(move |on, _, cx| {
                 // The window may be gone with the click.
-                let _ = client.update(cx, |client, cx| set(client, *on, cx));
+                let _ = client.update(cx, |client, cx| set(client, on, cx));
             }))
             .into_any_element()
     }

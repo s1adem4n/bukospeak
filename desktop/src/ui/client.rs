@@ -8,7 +8,7 @@ use bukospeak_desktop::call::{Call, Happening, Phase};
 use bukospeak_desktop::settings::{self as stored, Settings};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
-use gpui_kit::{AppContext, Context, EventEmitter, Task};
+use gpui::{AppContext, Context, EventEmitter, Task};
 
 use crate::ui::Trouble;
 

@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use gpui_kit::App;
+use gpui::App;
 
 /// The family of all text, and of what is read character by character: servers, fingerprints,
 /// times and keys.

@@ -2,6 +2,7 @@
 //! join, mute and leave; the settings; and the dialog for a changed certificate. Before it, at
 //! the start, the update window, while a newer release is looked for.
 
+mod chrome;
 mod client;
 mod glyph;
 mod kit;
@@ -10,17 +11,17 @@ mod text;
 mod theme;
 
 use bukospeak_desktop::call::{Failure, Phase};
-use gpui_kit::component::{Theme, TitleBar, h_flex};
-use gpui_kit::{
-    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement, Render, Styled, Subscription, Window, WindowBounds, WindowOptions, actions, div, px, size,
+use gpui::{
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyBinding, ParentElement,
+    Render, Styled, Subscription, Window, WindowOptions, actions, div, px, size,
 };
 
+use crate::ui::chrome::TitleBar;
 pub use crate::ui::client::Client;
 use crate::ui::client::{Missing, RoomKeyRead};
 pub use crate::ui::glyph::Assets;
 use crate::ui::glyph::Glyph;
-use crate::ui::kit::{Button, Size, Variant};
+use crate::ui::kit::{Button, Size, Variant, h_flex};
 use crate::ui::screens::{Channel, ChannelEvent, Settings, Update, Welcome, WelcomeEvent, certificate};
 use crate::ui::theme::ActiveTokens;
 use crate::update::Updater;
@@ -29,7 +30,11 @@ actions!(
     bukospeak,
     [
         /// Escape: closes the dialog or the settings, or goes a step back.
-        Back
+        Back,
+        /// Tab: the focus on to the next control.
+        FocusNext,
+        /// Shift-Tab: back to the one before.
+        FocusPrevious
     ]
 );
 
@@ -40,7 +45,11 @@ const CONTEXT: &str = "Main";
 pub fn init(cx: &mut App) {
     theme::install(cx);
     kit::init(cx);
-    cx.bind_keys([KeyBinding::new("escape", Back, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("escape", Back, Some(CONTEXT)),
+        KeyBinding::new("tab", FocusNext, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", FocusPrevious, Some(CONTEXT)),
+    ]);
 }
 
 /// Opens the window at the start: with an updater, the update window first, which opens it.
@@ -48,16 +57,10 @@ pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut 
     let Some(updater) = updater else {
         return open(client, None, cx);
     };
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(300.), px(320.)), cx))),
-        is_resizable: false,
-        is_minimizable: false,
-        app_id: Some("bukospeak".into()),
-        // No title bar: the window is moved by any of it.
-        ..TitleBar::window_options()
-    };
-    gpui_kit::open_window(options, cx, |window, cx| {
-        Theme::sync_system_appearance(Some(window), cx);
+    // No title bar: the window is moved by any of it.
+    let options = WindowOptions { is_resizable: false, is_minimizable: false, ..chrome::options(size(px(300.), px(320.)), cx) };
+    cx.open_window(options, |window, cx| {
+        theme::follow(window, cx);
         cx.new(|cx| Update::new(client, updater, window, cx))
     })
     .expect("the window opens");
@@ -66,15 +69,9 @@ pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut 
 
 /// Opens the window, which shows the client and a release the updater waits to install.
 pub fn open(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut App) {
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(380.), px(560.)), cx))),
-        window_min_size: Some(size(px(320.), px(440.))),
-        app_id: Some("bukospeak".into()),
-        // The content draws the title bar, so it reaches up to the window's edge.
-        ..TitleBar::window_options()
-    };
-    gpui_kit::open_window(options, cx, |window, cx| {
-        Theme::sync_system_appearance(Some(window), cx);
+    let options = WindowOptions { window_min_size: Some(size(px(320.), px(440.))), ..chrome::options(size(px(380.), px(560.)), cx) };
+    cx.open_window(options, |window, cx| {
+        theme::follow(window, cx);
         cx.new(|cx| Main::new(client, updater, window, cx))
     })
     .expect("the window opens");
@@ -114,7 +111,7 @@ impl Main {
     fn new(client: Entity<Client>, updater: Option<Entity<Updater>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&client, |_, _, cx| cx.notify());
         let read = cx.subscribe_in(&client, window, |main, _, _: &RoomKeyRead, window, cx| main.read_room_key(window, cx));
-        let appearance = cx.observe_window_appearance(window, |_, window, cx| Theme::sync_system_appearance(Some(window), cx));
+        let appearance = cx.observe_window_appearance(window, |_, window, cx| theme::follow(window, cx));
         // A closed window no longer shows who is in the channel, nor the microphone's level.
         cx.on_release(|main, cx| {
             main.client.update(cx, |client, _| {
@@ -197,7 +194,7 @@ impl Main {
     /// there is none.
     fn read_room_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.screen {
-            Screen::Welcome(welcome) => welcome.update(cx, |welcome, cx| welcome.read_room_key(window, cx)),
+            Screen::Welcome(welcome) => welcome.update(cx, |welcome, cx| welcome.read_room_key(cx)),
             Screen::Settings(settings) => settings.update(cx, |settings, cx| settings.read_room_key(cx)),
             Screen::Channel(_) => {
                 if let Some(missing) = self.client.read(cx).missing() {
@@ -221,6 +218,14 @@ impl Main {
             }
             Screen::Channel(_) => cx.propagate(),
         }
+    }
+
+    fn focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus_next(cx);
+    }
+
+    fn focus_previous(&mut self, _: &FocusPrevious, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus_prev(cx);
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> TitleBar {
@@ -275,18 +280,13 @@ impl Main {
                     .into_any_element()
             }),
         };
-        // The bar keeps its content off its left edge itself; a button's icon lines up on that
-        // edge and as far off the right one, the button's surface reaching past it.
-        TitleBar::new()
-            .h(theme::TITLE_BAR)
-            .bg(tokens.base)
-            .border_0()
-            .child(h_flex().w_full().h_full().pr(theme::TITLE_INSET - inset).children(content))
+        // A button's icon lines up on the bar's inset, the button's surface reaching past it.
+        TitleBar::new(content.map(|content| h_flex().w_full().h_full().mr(-inset).child(content).into_any_element()))
     }
 }
 
 impl Render for Main {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match &self.screen {
             Screen::Channel(channel) => channel.clone().into_any_element(),
             Screen::Welcome(welcome) => welcome.clone().into_any_element(),
@@ -294,24 +294,28 @@ impl Render for Main {
         };
         let dialog = match *self.client.read(cx).call.phase() {
             Phase::Failed(Failure::CertificateChanged { pinned, presented, .. }) => {
-                Some(certificate::dialog(&self.client, pinned, presented, cx))
+                Some(certificate::dialog(&self.client, pinned, presented, window, cx))
             }
             _ => None,
         };
         let tokens = cx.tokens();
-        div()
+        let main = div()
             .size_full()
             .relative()
             .flex()
             .flex_col()
             .bg(tokens.base)
+            .font_family(theme::SANS)
             .text_color(tokens.text)
             .text_size(theme::TEXT)
             .track_focus(&self.focus)
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::back))
+            .on_action(cx.listener(Self::focus_next))
+            .on_action(cx.listener(Self::focus_previous))
             .child(self.render_title_bar(cx))
             .child(div().flex_1().min_h_0().flex().flex_col().child(content))
-            .children(dialog)
+            .children(dialog);
+        chrome::frame(chrome::rounded(main, window), window, cx)
     }
 }

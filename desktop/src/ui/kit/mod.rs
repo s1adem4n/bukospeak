@@ -4,23 +4,51 @@
 mod avatar;
 mod button;
 mod field;
+mod icon;
 mod level;
+pub mod menu;
+mod slider;
+mod switch;
+mod text_field;
+mod tooltip;
+
+use std::sync::{Arc, LazyLock};
 
 pub use avatar::Avatar;
 pub use button::{Button, Size, Variant, icon_inset};
-pub use field::{InlineField, InlineFieldEvent, Look, field, init};
-use gpui_kit::component::{Icon, h_flex};
-use gpui_kit::prelude::FluentBuilder;
-pub use level::InputLevel;
-use std::sync::{Arc, LazyLock};
-
-use gpui_kit::{
+pub use field::{Field, InlineField, InlineFieldEvent, Look};
+use gpui::prelude::FluentBuilder;
+use gpui::{
     AnyElement, App, BoxShadow, Div, FontWeight, Hsla, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, Pixels, SharedString,
     Styled, StyledImage, div, img, px, relative,
 };
+pub use icon::{Icon, Spinner};
+pub use level::InputLevel;
+pub use slider::{Slider, SliderEvent};
+pub use switch::Switch;
+pub use text_field::{TextField, TextFieldEvent};
+pub use tooltip::Tooltip;
 
 use crate::ui::glyph::Glyph;
 use crate::ui::theme::{self, ActiveTokens};
+
+/// Binds the keys of the pieces that take them.
+pub fn init(cx: &mut App) {
+    field::init(cx);
+    menu::init(cx);
+    slider::init(cx);
+    text_field::init(cx);
+}
+
+/// A row: its children side by side, centered across it.
+pub fn h_flex() -> Div {
+    div().flex().flex_row().items_center()
+}
+
+/// A column: its children one under the other.
+pub fn v_flex() -> Div {
+    div().flex().flex_col()
+}
 
 /// A panel: raised off the window, inside a hairline.
 pub fn panel(cx: &App) -> Div {
@@ -89,7 +117,7 @@ pub fn tile(glyph: Glyph, cx: &App) -> impl IntoElement {
         .border_1()
         .border_color(tokens.hairline)
         .text_color(tokens.text_muted)
-        .child(Icon::from(glyph).size(theme::ICON_LG))
+        .child(Icon::new(glyph).size(theme::ICON_LG))
 }
 
 /// A status's dot, in a halo of its color.

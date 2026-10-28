@@ -5,16 +5,15 @@
 use std::time::Duration;
 
 use bukospeak_desktop::call::Phase;
-use gpui_kit::component::{Icon, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder;
-use gpui_kit::{
+use gpui::prelude::FluentBuilder;
+use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
 };
 
 use crate::ui::client::{Client, Missing};
 use crate::ui::glyph::Glyph;
-use crate::ui::kit::{self, Avatar, Button, Variant};
+use crate::ui::kit::{self, Avatar, Button, Icon, Variant, h_flex, v_flex};
 use crate::ui::text;
 use crate::ui::theme::{self, ActiveTokens};
 use crate::update::{State, Updater};
@@ -168,7 +167,7 @@ impl Channel {
                 .gap_2p5()
                 .h(theme::ROW)
                 .px(theme::PANEL_INSET)
-                .child(Icon::from(Glyph::Warning).size(theme::ICON_SM).text_color(tokens.warning))
+                .child(Icon::new(Glyph::Warning).size(theme::ICON_SM).color(tokens.warning))
                 .child(div().min_w_0().truncate().child(message)),
         )
     }
@@ -188,7 +187,7 @@ impl Channel {
                 .gap_3()
                 .p(theme::PANEL_PAD)
                 .pl(theme::PANEL_INSET)
-                .child(Icon::from(Glyph::Download).size(theme::ICON).text_color(tokens.speaking))
+                .child(Icon::new(Glyph::Download).color(tokens.speaking))
                 .child(
                     v_flex()
                         .flex_1()
@@ -317,7 +316,7 @@ impl Member {
             .when(self.reconnecting, |row| row.opacity(theme::RECONNECTING_OPACITY))
             .child(Avatar::new(self.name.clone(), theme::MEMBER_AVATAR).ring(u64::from(self.id), self.speaks))
             .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(self.name))
-            .children(mark.map(|(mark, color)| Icon::from(mark).size(theme::ICON_SM).text_color(color)))
+            .children(mark.map(|(mark, color)| Icon::new(mark).size(theme::ICON_SM).color(color)))
     }
 }
 

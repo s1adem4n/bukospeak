@@ -16,7 +16,7 @@ use bukospeak_desktop::known_servers::KnownServers;
 use bukospeak_desktop::settings::Settings;
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use gpui_kit::{App, AppContext, Entity, QuitMode};
+use gpui::{App, AppContext, Entity, QuitMode};
 use tracing_subscriber::EnvFilter;
 
 use crate::hotkey::{self as keys, Hotkey};
@@ -61,12 +61,11 @@ fn main() {
     };
     let (call, happenings) = Call::new(KnownServers::at(folder.join("known_servers")), DesktopPlayer).expect("the engine's threads start");
 
-    let app = gpui_kit::application().with_assets(ui::Assets);
+    let app = gpui_platform::application().with_assets(ui::Assets);
     // The dock's icon, clicked while the window is closed.
     let reopen = actions.clone();
     app.on_reopen(move |_| send(&reopen, Action::Open));
     app.run(move |cx| {
-        gpui_kit::init(cx);
         ui::init(cx);
         // Wayland has no keys for every app; GPUI on X11 or another system says something else.
         let hotkey = (cx.compositor_name() != "Wayland").then(|| Hotkey::new(actions.clone())).flatten();

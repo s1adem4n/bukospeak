@@ -2,17 +2,18 @@
 //! fingerprints to compare, and the choice to trust the new one.
 
 use bukospeak_core::proto::Fingerprint;
-use gpui_kit::component::{Icon, h_flex, v_flex};
-use gpui_kit::{
-    Animation, AnimationExt, AnyElement, App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, div,
+use gpui::{
+    Animation, AnimationExt, AnyElement, App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString, Styled,
+    Window, div, ease_out_quint,
 };
 
+use crate::ui::chrome;
 use crate::ui::client::Client;
 use crate::ui::glyph::Glyph;
-use crate::ui::kit::{Button, Variant};
+use crate::ui::kit::{Button, Icon, Variant, h_flex, v_flex};
 use crate::ui::theme::{self, ActiveTokens};
 
-pub fn dialog(client: &Entity<Client>, pinned: Fingerprint, presented: Fingerprint, cx: &App) -> AnyElement {
+pub fn dialog(client: &Entity<Client>, pinned: Fingerprint, presented: Fingerprint, window: &Window, cx: &App) -> AnyElement {
     let tokens = cx.tokens();
     let fingerprint = |label: &'static str, fingerprint: Fingerprint| {
         v_flex()
@@ -38,7 +39,7 @@ pub fn dialog(client: &Entity<Client>, pinned: Fingerprint, presented: Fingerpri
             })))
     };
     let (dismiss, trust) = (client.clone(), client.clone());
-    div()
+    chrome::rounded(div(), window)
         .absolute()
         .inset_0()
         .flex()
@@ -79,7 +80,7 @@ pub fn dialog(client: &Entity<Client>, pinned: Fingerprint, presented: Fingerpri
                                 .border_1()
                                 .border_color(tokens.warning.opacity(0.25))
                                 .text_color(tokens.warning)
-                                .child(Icon::from(Glyph::Warning).size(theme::ICON_SM)),
+                                .child(Icon::new(Glyph::Warning).size(theme::ICON_SM)),
                         )
                         .child("Zertifikat geändert"),
                 )
@@ -101,7 +102,7 @@ pub fn dialog(client: &Entity<Client>, pinned: Fingerprint, presented: Fingerpri
                                 .on_click(move |_, _, cx| trust.update(cx, |client, cx| client.trust(cx))),
                         ),
                 )
-                .with_animation("certificate", Animation::new(theme::APPEAR).with_easing(gpui_kit::ease_out_quint()), |card, delta| {
+                .with_animation("certificate", Animation::new(theme::APPEAR).with_easing(ease_out_quint()), |card, delta| {
                     card.opacity(delta).top(theme::SLIDE * (1. - delta))
                 }),
         )

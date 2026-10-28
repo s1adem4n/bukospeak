@@ -1,9 +1,9 @@
 //! A member's avatar: their initial on the color their name gives, and in the channel the ring
 //! that lights up while they speak.
 
-use gpui_kit::{
+use gpui::{
     Animation, AnimationExt, App, BoxShadow, ElementId, FontWeight, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled,
-    Window, div, px,
+    Window, div, ease_out_quint, px,
 };
 
 use crate::ui::theme::{self, ActiveTokens};
@@ -39,7 +39,7 @@ impl RenderOnce for Avatar {
             let id = ElementId::from(("ring", member << 1 | u64::from(speaks)));
             div().absolute().inset(-theme::RING * 2.).rounded_full().border(theme::RING).border_color(speaking).with_animation(
                 id,
-                Animation::new(theme::SPEAKING_FADE).with_easing(gpui_kit::ease_out_quint()),
+                Animation::new(theme::SPEAKING_FADE).with_easing(ease_out_quint()),
                 move |ring, delta| ring.opacity(if speaks { delta } else { 1. - delta }),
             )
         });

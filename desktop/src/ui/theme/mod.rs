@@ -1,41 +1,46 @@
 //! The app's look: Geist on every system, the colors of [`Tokens`] for light and dark, and the
-//! sizes, type and motion kept here by hand. gpui-component's theme is made from the tokens, so
-//! its fields, menus, switches and sliders look like the rest.
+//! sizes, type and motion kept here by hand.
 
-mod component;
 mod fonts;
 
-pub use fonts::MONO;
+pub use fonts::{MONO, SANS};
 
 use std::time::Duration;
 
-use gpui_kit::component::{ActiveTheme, Theme};
-use gpui_kit::{App, Global, Hsla, Pixels, hsla, px, rgb, rgba};
+use gpui::{App, Global, Hsla, Pixels, Window, WindowAppearance, hsla, px, rgb, rgba};
 
-/// Adds the fonts, keeps the tokens of both appearances and makes gpui-component's light and
-/// dark themes of them; the window's appearance then picks one.
+/// Adds the fonts and keeps the tokens of both appearances, the system's one active.
 pub fn install(cx: &mut App) {
     fonts::install(cx);
-    let palette = Palette { light: Tokens::light(), dark: Tokens::dark() };
-    let (light, dark) = (component::theme(&palette.light), component::theme(&palette.dark));
-    cx.set_global(palette);
-    Theme::update(cx, |theme| {
-        // A focused field shows by its border; a ring around it is one line too many.
-        theme.focus_ring = false;
-        theme.light_theme = light;
-        theme.dark_theme = dark;
-    });
+    let dark = is_dark(cx.window_appearance());
+    cx.set_global(Palette { light: Tokens::light(), dark: Tokens::dark(), is_dark: dark });
 }
 
-/// The tokens of both appearances.
+/// Takes on the window's appearance, which follows the system's light or dark mode; every
+/// window is drawn anew once it changes.
+pub fn follow(window: &Window, cx: &mut App) {
+    let dark = is_dark(window.appearance());
+    let palette = cx.global_mut::<Palette>();
+    if palette.is_dark != dark {
+        palette.is_dark = dark;
+        cx.refresh_windows();
+    }
+}
+
+fn is_dark(appearance: WindowAppearance) -> bool {
+    matches!(appearance, WindowAppearance::Dark | WindowAppearance::VibrantDark)
+}
+
+/// The tokens of both appearances, and which is active.
 struct Palette {
     light: Tokens,
     dark: Tokens,
+    is_dark: bool,
 }
 
 impl Global for Palette {}
 
-/// The tokens of the appearance the window has now.
+/// The tokens of the active appearance.
 pub trait ActiveTokens {
     fn tokens(&self) -> &Tokens;
 }
@@ -43,7 +48,7 @@ pub trait ActiveTokens {
 impl ActiveTokens for App {
     fn tokens(&self) -> &Tokens {
         let palette = self.global::<Palette>();
-        if self.theme().is_dark() { &palette.dark } else { &palette.light }
+        if palette.is_dark { &palette.dark } else { &palette.light }
     }
 }
 
@@ -94,7 +99,6 @@ pub struct Tokens {
     pub speaking: Hsla,
     /// What ends something, and what is off and wants attention.
     pub danger: Hsla,
-    pub danger_hover: Hsla,
     /// What is filled red, top to bottom, and on hover, and its edge.
     pub danger_fill: [Hsla; 2],
     pub danger_fill_hover: [Hsla; 2],
@@ -131,7 +135,6 @@ impl Tokens {
             on_primary: rgb(0x0b0b0d).into(),
             speaking: rgb(0x3dd68c).into(),
             danger: rgb(0xe5484d).into(),
-            danger_hover: rgb(0xec5d5e).into(),
             danger_fill: [rgb(0xee5f63).into(), rgb(0xdb3d42).into()],
             danger_fill_hover: [rgb(0xf3706f).into(), rgb(0xe24a4e).into()],
             danger_edge: rgb(0xa8292e).into(),
@@ -166,7 +169,6 @@ impl Tokens {
             on_primary: rgb(0xfafafa).into(),
             speaking: rgb(0x18a058).into(),
             danger: rgb(0xe5484d).into(),
-            danger_hover: rgb(0xdc3e42).into(),
             danger_fill: [rgb(0xee5f63).into(), rgb(0xdb3d42).into()],
             danger_fill_hover: [rgb(0xf26c6f).into(), rgb(0xe0464b).into()],
             danger_edge: rgb(0xc2272c).into(),
@@ -208,10 +210,20 @@ pub const PANEL_INSET: Pixels = px(14.);
 /// The space inside a panel around the controls and rows set into it.
 pub const PANEL_PAD: Pixels = px(4.);
 
-/// The window's own title bar, drawn with the content, and how far gpui-component's keeps its
-/// content off its left edge.
+/// The window's own title bar, drawn with the content, and how far its content lies off its edges.
 pub const TITLE_BAR: Pixels = px(40.);
 pub const TITLE_INSET: Pixels = px(12.);
+/// On macOS: the window's buttons, `TRAFFIC_LIGHT` high, centered in the title bar as far from
+/// its left edge as from its top, and the room they take with the space after them.
+pub const TRAFFIC_LIGHT: Pixels = px(14.);
+pub const TRAFFIC_LIGHTS: Pixels = px(80.);
+/// On Windows: the width of each of the window's buttons, as the system draws its own.
+pub const CAPTION_BUTTON: Pixels = px(46.);
+/// On Linux, where the app draws the window's edge: its corners' radius, its border, and the
+/// margin around it its shadow falls into, which also takes the drags that resize the window.
+pub const FRAME_RADIUS: Pixels = px(10.);
+pub const FRAME_BORDER: Pixels = px(1.);
+pub const FRAME_SHADOW: Pixels = px(10.);
 /// A panel's head, and a row of a list.
 pub const HEAD: Pixels = px(44.);
 pub const ROW: Pixels = px(42.);
@@ -225,6 +237,17 @@ pub const CONTROL: Pixels = px(36.);
 pub const CONTROL_SM: Pixels = px(28.);
 pub const FIELD: Pixels = px(38.);
 pub const FIELD_SM: Pixels = px(30.);
+/// How far a field's text lies inside its edge, and the width of its cursor.
+pub const FIELD_INSET: Pixels = px(12.);
+pub const CURSOR: Pixels = px(1.5);
+/// A switch's track and the knob in it.
+pub const SWITCH_WIDTH: Pixels = px(34.);
+pub const SWITCH_HEIGHT: Pixels = px(20.);
+pub const SWITCH_KNOB: Pixels = px(16.);
+/// A slider: the height that takes its clicks, its rail and its knob.
+pub const SLIDER: Pixels = px(20.);
+pub const SLIDER_RAIL: Pixels = px(4.);
+pub const SLIDER_KNOB: Pixels = px(14.);
 pub const ICON_LG: Pixels = px(18.);
 pub const ICON: Pixels = px(16.);
 pub const ICON_SM: Pixels = px(14.);
@@ -237,8 +260,12 @@ pub const STATUS: Pixels = px(30.);
 pub const DIALOG: Pixels = px(340.);
 pub const DIALOG_PAD: Pixels = px(6.);
 pub const RADIUS_DIALOG: Pixels = px(16.);
-/// A menu that chooses a device.
+/// A menu: the least width of one that chooses a device, its items, the space inside it and
+/// its distance from what opened it.
 pub const MENU: Pixels = px(220.);
+pub const MENU_ITEM: Pixels = px(30.);
+pub const MENU_PAD: Pixels = px(4.);
+pub const MENU_GAP: Pixels = px(4.);
 /// The volume's slider, and its value after it.
 pub const VOLUME: Pixels = px(170.);
 pub const VOLUME_VALUE: Pixels = px(40.);
@@ -260,6 +287,10 @@ pub const LEVEL_GAP: Pixels = px(2.);
 pub const UPDATE: Pixels = px(220.);
 pub const PROGRESS: Pixels = px(6.);
 
+/// How long a field's cursor shows and hides while it blinks.
+pub const BLINK: Duration = Duration::from_millis(530);
+/// One turn of a spinner.
+pub const SPIN: Duration = Duration::from_millis(800);
 /// The speaking ring, quick enough to follow speech.
 pub const SPEAKING_FADE: Duration = Duration::from_millis(120);
 /// Something coming onto the screen.

@@ -1,18 +1,15 @@
-//! The app's button: gpui-base's, which knows clicks, keys and focus, in the app's looks.
+//! The app's button: a surface in the looks of what it is for, which is clicked, or pressed with
+//! Enter or Space once Tab gave it the focus.
 
-use gpui_kit::base::{Button as BaseButton, Selectable, StyledExt};
-use gpui_kit::component::menu::DropdownMenu;
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Icon, Sizable};
-use gpui_kit::prelude::FluentBuilder;
-use gpui_kit::{
-    AnyElement, App, Background, BoxShadow, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, Interactivity,
-    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    linear_color_stop, linear_gradient, px,
+use gpui::prelude::FluentBuilder;
+use gpui::{
+    AnyElement, App, Background, BoxShadow, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Refineable, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
+    Window, div, linear_color_stop, linear_gradient, px,
 };
 
 use crate::ui::glyph::Glyph;
+use crate::ui::kit::{Icon, Spinner, Tooltip};
 use crate::ui::theme::{self, ActiveTokens, Tokens};
 
 /// What a button is for, which its looks tell.
@@ -38,12 +35,14 @@ pub enum Size {
     Small,
 }
 
+type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
 #[derive(IntoElement)]
 pub struct Button {
-    base: BaseButton,
-    /// What the caller styled and put in, over the button's own looks and after its icon and
-    /// label.
+    id: ElementId,
+    /// What the caller styled, over the button's own looks.
     style: StyleRefinement,
+    /// What the caller put in, after the icon and the label.
     children: Vec<AnyElement>,
     variant: Variant,
     size: Size,
@@ -54,12 +53,18 @@ pub struct Button {
     tooltip: Option<SharedString>,
     loading: bool,
     disabled: bool,
+    selected: bool,
+    /// The focus it takes, if not one of its own.
+    focus: Option<FocusHandle>,
+    /// Whether Tab and a click give it the focus.
+    focusable: bool,
+    on_click: Option<ClickHandler>,
 }
 
 impl Button {
     pub fn new(id: impl Into<ElementId>, variant: Variant) -> Self {
         Self {
-            base: BaseButton::new(id),
+            id: id.into(),
             style: StyleRefinement::default(),
             children: Vec::new(),
             variant,
@@ -71,6 +76,10 @@ impl Button {
             tooltip: None,
             loading: false,
             disabled: false,
+            selected: false,
+            focus: None,
+            focusable: true,
+            on_click: None,
         }
     }
 
@@ -117,14 +126,27 @@ impl Button {
         self
     }
 
+    /// Shows what it opened as open: a ghost button keeps its hovered surface.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
     /// Takes the focus by `focus`, so it can be given the focus.
     pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
-        self.base = self.base.track_focus(focus);
+        self.focus = Some(focus.clone());
+        self
+    }
+
+    /// Leaves the focus where it is when clicked, and is passed over by Tab: a control inside a
+    /// field, which keeps the focus.
+    pub fn unfocusable(mut self) -> Self {
+        self.focusable = false;
         self
     }
 
     pub fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
-        self.base = self.base.on_click(handler);
+        self.on_click = Some(Box::new(handler));
         self
     }
 }
@@ -135,33 +157,11 @@ impl Styled for Button {
     }
 }
 
-impl InteractiveElement for Button {
-    fn interactivity(&mut self) -> &mut Interactivity {
-        self.base.interactivity()
-    }
-}
-
-impl StatefulInteractiveElement for Button {}
-
 impl ParentElement for Button {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children.extend(elements);
     }
 }
-
-impl Selectable for Button {
-    fn selected(mut self, selected: bool) -> Self {
-        self.base = self.base.selected(selected);
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.base.is_selected()
-    }
-}
-
-/// A button opens a menu as gpui-component's does.
-impl DropdownMenu for Button {}
 
 /// A fill from its top color to its bottom one.
 fn gradient([top, bottom]: [Hsla; 2]) -> Background {
@@ -189,14 +189,15 @@ impl RenderOnce for Button {
             Variant::Ghost | Variant::Bare => tokens.text_muted,
         };
         let glyph = match (self.loading, self.icon) {
-            (true, _) => Some(Spinner::new().color(text).with_size(icon).into_any_element()),
-            (false, Some(glyph)) => Some(Icon::from(glyph).size(icon).into_any_element()),
+            (true, _) => Some(Spinner::new(icon).color(text).into_any_element()),
+            (false, Some(glyph)) => Some(Icon::new(glyph).size(icon).into_any_element()),
             (false, None) => None,
         };
-        let tooltip = self.tooltip;
-        let button = self
-            .base
-            .disabled(inert)
+        let name = self.label.clone().or_else(|| self.tooltip.clone());
+        let mut button = div()
+            .id(self.id)
+            .role(Role::Button)
+            .when_some(name, |button, name| button.aria_label(name))
             .h(height)
             .flex()
             .items_center()
@@ -213,49 +214,51 @@ impl RenderOnce for Button {
                 (false, Variant::Bare) => button,
                 (false, _) => button.px(padding),
             })
-            .focus_visible(|style| style.border_color(tokens.focus))
-            .map(|button| style(button, self.variant, tokens))
-            .styles(|styles| styles.disabled(|style| style.opacity(if self.loading { 1. } else { theme::DISABLED_OPACITY })))
-            .when(!inert, |button| button.cursor_pointer())
-            .refine_style(&self.style)
-            .children(glyph)
-            .children(self.label)
-            .children(self.children)
-            .children(self.keys.map(|keys| keycap(keys, text)));
-        button.when_some(tooltip, |button, tooltip| button.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)))
+            .map(|button| surface(button, self.variant, self.selected, tokens));
+        if inert {
+            // A loading button shows its spinner in full; a disabled one fades.
+            button = button.when(self.disabled, |button| button.opacity(theme::DISABLED_OPACITY));
+        } else {
+            button = button
+                .cursor_pointer()
+                .map(|button| hovered(button, self.variant, tokens))
+                .when(self.focusable, |button| {
+                    let button = match &self.focus {
+                        Some(focus) => button.track_focus(focus),
+                        None => button.tab_index(0),
+                    };
+                    button.focus_visible(|style| style.border_color(tokens.focus))
+                })
+                .when_some(self.on_click, |button, handler| button.on_click(handler))
+                .when_some(self.tooltip, |button, tooltip| button.tooltip(Tooltip::text(tooltip)));
+        }
+        button.style().refine(&self.style);
+        button.children(glyph).children(self.label).children(self.children).children(self.keys.map(|keys| keycap(keys, text)))
     }
 }
 
-/// The surface of a variant, at rest, hovered and pressed.
-fn style(button: BaseButton, variant: Variant, tokens: &Tokens) -> BaseButton {
+/// The surface of a variant at rest, or selected.
+fn surface(button: Stateful<gpui::Div>, variant: Variant, selected: bool, tokens: &Tokens) -> Stateful<gpui::Div> {
     match variant {
-        Variant::Raised => button
-            .bg(gradient(tokens.control))
-            .border_color(tokens.edge)
-            .shadow(lifted(tokens.highlight, tokens))
-            .hover(|style| style.bg(gradient(tokens.control_hover)))
-            .active(|style| style.bg(tokens.control[1])),
-        Variant::Primary => button
-            .bg(gradient(tokens.primary))
-            .border_color(tokens.primary_edge)
-            .shadow(lifted(tokens.highlight, tokens))
-            .hover(|style| style.bg(gradient(tokens.primary_hover)))
-            .active(|style| style.bg(tokens.primary[1])),
-        Variant::Danger => button
-            .bg(gradient(tokens.danger_fill))
-            .border_color(tokens.danger_edge)
-            .shadow(lifted(tokens.sheen, tokens))
-            .hover(|style| style.bg(gradient(tokens.danger_fill_hover)))
-            .active(|style| style.bg(tokens.danger_fill[1])),
-        Variant::Off => button
-            .bg(tokens.danger.opacity(0.14))
-            .border_color(tokens.danger.opacity(0.35))
-            .hover(|style| style.bg(tokens.danger.opacity(0.2)))
-            .active(|style| style.bg(tokens.danger.opacity(0.26))),
-        Variant::Ghost => button
-            .hover(|style| style.bg(tokens.inset).text_color(tokens.text))
-            .active(|style| style.bg(tokens.hover))
-            .styles(|styles| styles.selected(|style| style.bg(tokens.inset).text_color(tokens.text))),
+        Variant::Raised => button.bg(gradient(tokens.control)).border_color(tokens.edge).shadow(lifted(tokens.highlight, tokens)),
+        Variant::Primary => button.bg(gradient(tokens.primary)).border_color(tokens.primary_edge).shadow(lifted(tokens.highlight, tokens)),
+        Variant::Danger => button.bg(gradient(tokens.danger_fill)).border_color(tokens.danger_edge).shadow(lifted(tokens.sheen, tokens)),
+        Variant::Off => button.bg(tokens.danger.opacity(0.14)).border_color(tokens.danger.opacity(0.35)),
+        Variant::Ghost => button.when(selected, |button| button.bg(tokens.inset).text_color(tokens.text)),
+        Variant::Bare => button,
+    }
+}
+
+/// How a variant answers the pointer: hovered, and pressed.
+fn hovered(button: Stateful<gpui::Div>, variant: Variant, tokens: &Tokens) -> Stateful<gpui::Div> {
+    match variant {
+        Variant::Raised => button.hover(|style| style.bg(gradient(tokens.control_hover))).active(|style| style.bg(tokens.control[1])),
+        Variant::Primary => button.hover(|style| style.bg(gradient(tokens.primary_hover))).active(|style| style.bg(tokens.primary[1])),
+        Variant::Danger => {
+            button.hover(|style| style.bg(gradient(tokens.danger_fill_hover))).active(|style| style.bg(tokens.danger_fill[1]))
+        }
+        Variant::Off => button.hover(|style| style.bg(tokens.danger.opacity(0.2))).active(|style| style.bg(tokens.danger.opacity(0.26))),
+        Variant::Ghost => button.hover(|style| style.bg(tokens.inset).text_color(tokens.text)).active(|style| style.bg(tokens.hover)),
         Variant::Bare => button.hover(|style| style.text_color(tokens.text)),
     }
 }

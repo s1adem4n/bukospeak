@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bukospeak_desktop::call::Phase;
 use futures::StreamExt;
-use gpui_kit::{App, AppContext, AsyncApp, Context, Entity, Subscription, Task, WeakEntity};
+use gpui::{App, AppContext, AsyncApp, Context, Entity, Subscription, Task, WeakEntity};
 use velopack::sources::GithubSource;
 use velopack::{UpdateCheck, UpdateInfo, UpdateManager, VelopackApp};
 

@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use bukospeak_core::Meter;
-use gpui_kit::component::h_flex;
-use gpui_kit::{Context, IntoElement, ParentElement, Render, Styled, Task, Window, div};
+use gpui::{Context, IntoElement, ParentElement, Render, Styled, Task, Window, div};
 
+use crate::ui::kit::h_flex;
 use crate::ui::theme::{self, ActiveTokens};
 
 /// How often the bars look at the meter: as often as a level is seen to move.
