@@ -932,7 +932,7 @@ checksum = "5c0e531d93d39c34eef561e929e8a7f86d77a5af08aac4f6d6e39976c51858e9"
 
 [[package]]
 name = "bukospeak-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assert_no_alloc",
  "bukospeak-proto",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "bukospeak-desktop"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "bukospeak-core",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "bukospeak-ffi"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "bukospeak-core",
  "bukospeak-server",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "bukospeak-proto"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "bukospeak-server"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "bukospeak-core",
