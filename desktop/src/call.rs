@@ -158,6 +158,8 @@ pub struct Call {
     /// When the join under way or the call up was asked for, for the log to tell how long each
     /// step of the join took.
     asked: Instant,
+    /// When the call came up, joining again within it included; None out of a call.
+    since: Option<Instant>,
     /// Leaves sent whose engine call hasn't come back: updates meanwhile may be of the call left.
     leaves: usize,
     /// The engine's call left last: updates of it or of one before are stale.
@@ -193,6 +195,7 @@ impl Call {
             call: None,
             joined: false,
             asked: Instant::now(),
+            since: None,
             leaves: 0,
             left_call: 0,
             watched: None,
@@ -212,6 +215,11 @@ impl Call {
     /// Whether a call is up, joining again included.
     pub fn is_in_call(&self) -> bool {
         matches!(self.phase, Phase::Connected | Phase::Reconnecting)
+    }
+
+    /// When the call came up, while it is up.
+    pub fn since(&self) -> Option<Instant> {
+        self.since
     }
 
     /// This member's id, while in the call.
@@ -395,6 +403,7 @@ impl Call {
             State::Connected => {
                 if self.phase == Phase::Joining {
                     log_step("the call shows connected", self.asked);
+                    self.since = Some(Instant::now());
                 }
                 self.phase = Phase::Connected;
             }
@@ -413,6 +422,7 @@ impl Call {
         }
         self.current.store(0, Ordering::Relaxed);
         self.channel = Channel::default();
+        self.since = None;
         self.phase = failure.map_or(Phase::Idle, Phase::Failed);
         self.leaves += 1;
         self.send(Command::Leave);

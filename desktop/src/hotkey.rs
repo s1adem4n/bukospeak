@@ -9,6 +9,9 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use crate::{Action, send};
 
+/// The key as the app shows it, beside the button that does the same.
+pub const KEYS: &str = if cfg!(target_os = "macos") { "⌃⇧M" } else { "Strg ⇧ M" };
+
 /// The registered key; it is unregistered when this drops.
 pub struct Hotkey {
     _manager: GlobalHotKeyManager,

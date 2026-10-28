@@ -149,7 +149,9 @@ fn a_call_plays_while_it_is_up_and_pins_the_server() {
     let mut app = App::new("plays");
     app.join(&server, "first", ROOM_KEY);
     assert_eq!(*app.call.phase(), Phase::Joining);
+    assert_eq!(app.call.since(), None);
     app.until("the call", connected);
+    assert!(app.call.since().is_some());
     assert_eq!(app.names(), ["first"]);
     assert_eq!(app.devices.playing.load(Ordering::Relaxed), 1);
     assert_eq!(KnownServers::at(app.known.clone()).get(&server.address).unwrap(), Some(server.fingerprint));
@@ -157,6 +159,7 @@ fn a_call_plays_while_it_is_up_and_pins_the_server() {
     app.call.leave();
     assert_eq!(*app.call.phase(), Phase::Idle);
     assert!(app.call.members().is_empty());
+    assert_eq!(app.call.since(), None);
     app.settle();
     assert_eq!(app.devices.playing.load(Ordering::Relaxed), 0);
 }
@@ -275,7 +278,10 @@ fn a_dropout_shows_reconnecting_and_a_lost_connection_ends_the_call_and_its_audi
     app.until("the call", connected);
     drop(server);
     // Nothing comes for a few seconds: the call shows it, and plays on, long before it is lost.
+    let since = app.call.since();
     app.until("reconnecting", |call| *call.phase() == Phase::Reconnecting);
+    // Joining again is still the same call.
+    assert_eq!(app.call.since(), since);
     assert_eq!(app.devices.playing.load(Ordering::Relaxed), 1);
     app.until("the loss", |call| *call.phase() == Phase::Failed(Failure::ConnectionLost));
     app.settle();

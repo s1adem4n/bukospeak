@@ -15,6 +15,15 @@ use crate::ui::Trouble;
 /// The room key came from the keyring, or didn't: [`Client::room_key`] is known from now on.
 pub struct RoomKeyRead;
 
+/// What is missing to join, in the order the welcome asks for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    /// The name the others see.
+    Name,
+    /// The server and its room key.
+    Place,
+}
+
 impl EventEmitter<RoomKeyRead> for Client {}
 
 pub struct Client {
@@ -24,6 +33,8 @@ pub struct Client {
     /// None until the keyring answered, or a key is given before.
     room_key: Option<String>,
     pub trouble: Option<Trouble>,
+    /// The keys that mute and unmute from any app, if the system took them.
+    pub mute_keys: Option<&'static str>,
     /// Whether a window shows the channel from outside, so who is in it is watched.
     lobby: bool,
     _happenings: Task<()>,
@@ -37,6 +48,7 @@ impl Client {
         settings: Settings,
         settings_path: PathBuf,
         trouble: Option<Trouble>,
+        mute_keys: Option<&'static str>,
         cx: &mut Context<Self>,
     ) -> Self {
         call.set_noise_suppression(settings.noise_suppression);
@@ -60,7 +72,17 @@ impl Client {
             // The app may be quitting before the keyring answered.
             let _ = this.update(cx, |client, cx| client.read_room_key(read, cx));
         });
-        Self { call, settings, settings_path, room_key: None, trouble, lobby: false, _happenings: happenings, _room_key: room_key }
+        Self {
+            call,
+            settings,
+            settings_path,
+            room_key: None,
+            trouble,
+            mute_keys,
+            lobby: false,
+            _happenings: happenings,
+            _room_key: room_key,
+        }
     }
 
     /// Takes in the room key the keyring kept, unless one was given meanwhile.
@@ -83,8 +105,15 @@ impl Client {
         self.room_key.as_deref().unwrap_or_default()
     }
 
-    pub fn is_room_key_read(&self) -> bool {
-        self.room_key.is_some()
+    /// What is missing to join, if anything is; the room key only once the keyring answered.
+    pub fn missing(&self) -> Option<Missing> {
+        if self.settings.name.trim().is_empty() {
+            Some(Missing::Name)
+        } else if self.settings.server.trim().is_empty() || self.room_key.is_some() && !self.settings.is_complete(self.room_key()) {
+            Some(Missing::Place)
+        } else {
+            None
+        }
     }
 
     pub fn join(&mut self, cx: &mut Context<Self>) {
@@ -129,28 +158,33 @@ impl Client {
         self.call.watch(channel);
     }
 
-    /// Keeps a name, server and room key given in the welcome or the settings.
-    pub fn keep(&mut self, name: String, server: String, room_key: String, cx: &mut Context<Self>) {
-        if (&name, &server) != (&self.settings.name, &self.settings.server) {
-            self.change(|settings| (settings.name, settings.server) = (name, server), cx);
-        }
-        if room_key != self.room_key() {
-            self.room_key = Some(room_key.clone());
-            cx.spawn(async move |this, cx| {
-                let kept = cx.background_spawn(async move { stored::set_room_key(&room_key) }).await;
-                if let Err(error) = kept {
-                    tracing::warn!("the room key isn't kept: {error}");
-                    // The app may be quitting before the keyring answered.
-                    let _ = this.update(cx, |client, cx| {
-                        client.trouble = Some(Trouble::RoomKeyNotKept);
-                        cx.notify();
-                    });
-                }
-            })
-            .detach();
-        }
+    pub fn set_name(&mut self, name: String, cx: &mut Context<Self>) {
+        self.change(|settings| settings.name = name, cx);
+    }
+
+    /// Takes another server, which the channel is watched on from now on.
+    pub fn set_server(&mut self, server: String, cx: &mut Context<Self>) {
+        self.change(|settings| settings.server = server, cx);
+        self.watch();
+    }
+
+    /// Takes another room key, kept in the keyring; the channel is watched with it from now on.
+    pub fn set_room_key(&mut self, room_key: String, cx: &mut Context<Self>) {
+        self.room_key = Some(room_key.clone());
         self.watch();
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            let kept = cx.background_spawn(async move { stored::set_room_key(&room_key) }).await;
+            if let Err(error) = kept {
+                tracing::warn!("the room key isn't kept: {error}");
+                // The app may be quitting before the keyring answered.
+                let _ = this.update(cx, |client, cx| {
+                    client.trouble = Some(Trouble::RoomKeyNotKept);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Changes the settings and keeps them.

@@ -17,12 +17,12 @@ use bukospeak_desktop::known_servers::KnownServers;
 use bukospeak_desktop::settings::Settings;
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use gpui_kit::{App, AppContext, Entity, KeyBinding, QuitMode};
+use gpui_kit::{App, AppContext, Entity, QuitMode};
 use tracing_subscriber::EnvFilter;
 
-use crate::hotkey::Hotkey;
+use crate::hotkey::{self as keys, Hotkey};
 use crate::tray::Tray;
-use crate::ui::{Back, CONTEXT, Client, Trouble};
+use crate::ui::{Client, Trouble};
 
 /// What the tray, the hotkey or a later start asks the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,15 +70,15 @@ fn main() {
     app.on_reopen(move |_| send(&reopen, Action::Open));
     app.run(move |cx| {
         gpui_kit::init(cx);
-        ui::theme::install(cx);
-        cx.bind_keys([KeyBinding::new("escape", Back, Some(CONTEXT))]);
-        let client = cx.new(|cx| Client::new(call, happenings, settings, settings_path, trouble, cx));
+        ui::init(cx);
+        // Wayland has no keys for every app; GPUI on X11 or another system says something else.
+        let hotkey = (cx.compositor_name() != "Wayland").then(|| Hotkey::new(actions.clone())).flatten();
+        let mute_keys = hotkey.as_ref().map(|_| keys::KEYS);
+        let client = cx.new(|cx| Client::new(call, happenings, settings, settings_path, trouble, mute_keys, cx));
         let tray = show_tray(&client, actions.clone(), cx);
         // Without a tray the app is its window: closing it leaves the call and quits. With one,
         // the app goes on in the tray until it is told to quit there.
         cx.set_quit_mode(if tray { QuitMode::Explicit } else { QuitMode::LastWindowClosed });
-        // Wayland has no keys for every app; GPUI on X11 or another system says something else.
-        let hotkey = (cx.compositor_name() != "Wayland").then(|| Hotkey::new(actions.clone())).flatten();
         follow(asked, client.clone(), hotkey, cx);
         ui::open(client, cx);
     });
