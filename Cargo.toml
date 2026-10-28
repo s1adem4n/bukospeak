@@ -87,13 +87,7 @@ opt-level = 3
 # Nor can DeepFilterNet3 keep up with the audio in a debug build.
 [profile.dev.package.deep_filter]
 opt-level = 3
-[profile.dev.package.tract-core]
-opt-level = 3
-[profile.dev.package.tract-linalg]
-opt-level = 3
 [profile.dev.package.rustfft]
-opt-level = 3
-[profile.dev.package.ndarray]
 opt-level = 3
 
 # Downloads stay small: no symbols, and the linker sees across crates to drop what is unused.

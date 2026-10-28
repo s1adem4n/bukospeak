@@ -196,14 +196,8 @@ impl Capture {
         #[cfg(feature = "deepfilter")]
         let samples = match &mut self.deep_filter {
             Some(deep_filter) if suppression == Suppression::DeepFilter => {
-                if deep_filter.process(samples, &mut self.enhanced).is_ok() {
-                    &self.enhanced
-                } else {
-                    // The model fails only as it never should, on a bug: the frame goes out as
-                    // captured, and RNNoise takes over from the next.
-                    self.deep_filter = None;
-                    samples
-                }
+                deep_filter.process(samples, &mut self.enhanced);
+                &self.enhanced
             }
             _ => samples,
         };
@@ -248,11 +242,8 @@ impl Capture {
     fn end(&mut self, index: u32, send: impl FnOnce(&Encoded)) -> Result<(), opus::Error> {
         self.preroll = [None; PREROLL];
         #[cfg(feature = "deepfilter")]
-        if let Some(deep_filter) = &mut self.deep_filter
-            && deep_filter.reset().is_err()
-        {
-            // As in processing, the model fails only as it never should; RNNoise takes over.
-            self.deep_filter = None;
+        if let Some(deep_filter) = &mut self.deep_filter {
+            deep_filter.reset();
         }
         if !self.gate.end() {
             return Ok(());
@@ -527,8 +518,8 @@ mod tests {
         let (mut after_stop, mut fresh) = ([0.0; FRAME_SAMPLES], [0.0; FRAME_SAMPLES]);
         // Through the model's delay, so what comes out is what went in after the stop.
         for _ in 0..4 {
-            capture.deep_filter.as_mut().unwrap().process(&frame, &mut after_stop).unwrap();
-            new.process(&frame, &mut fresh).unwrap();
+            capture.deep_filter.as_mut().unwrap().process(&frame, &mut after_stop);
+            new.process(&frame, &mut fresh);
         }
         assert_eq!(after_stop, fresh);
     }

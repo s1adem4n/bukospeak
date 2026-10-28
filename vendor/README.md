@@ -2,7 +2,8 @@
 
 Upstream crates that BukoSpeak patches, wired in by `[patch.crates-io]` in the workspace's
 `Cargo.toml`. Each is the published crate as it is, but for the changes listed here.
-`deep_filter` is the exception: no published crate but a trimmed copy, depended on by path.
+`deep_filter` is the exception: no published crate but a trimmed copy whose inference is our
+own, depended on by path.
 
 ## sonora and sonora-aec3 0.2.0
 
@@ -46,33 +47,30 @@ its crate `libDF`, MIT or Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). The fork
 algorithm and removed most of its per-hop allocations.
 
 The capture enhances the microphone's signal with DeepFilterNet3, a hop of 10 ms at a time, on
-the uplink thread. Only that is kept: one channel, a model read from memory, and inference;
-the dataset, training, LADSPA, C, WASM and command-line parts, the audio file formats, and
-logging are gone. Inference runs on tract 0.23 instead of the fork's 0.21, which pins
-`half` to 2.4.1 where the desktop's GPU stack needs 2.5. Its kernels round differently, so the
-output matches the fork's within float rounding, about 130 dB below the signal, instead of bit
-for bit (`tests/fork.rs`, against output the fork produced from the same signal, with the
-default settings and with the post filter and an attenuation limit).
-
-The fork reads the networks as ONNX and pulses them on every start; here that happens once, in
-`examples/convert.rs`, and the crate reads the pulsed networks as NNEF. So it needs neither
-tract's ONNX importer nor its pulsing, which spares about thirty crates, and the model is built
-in a fifth of the time.
+the uplink thread. Only that is kept: one channel, the model's weights read from memory, and
+inference; the dataset, training, LADSPA, C, WASM and command-line parts, the audio file
+formats, and logging are gone. The fork runs the model's three networks on tract, which pulses
+them from ONNX on every start; here they are written out, layer by layer, so the crate needs no
+inference engine, builds the model in milliseconds, and allocates nothing per hop. The output
+matches the fork's within float rounding, about 135 dB below the signal, instead of bit for bit:
+tract's kernels round differently and approximate the activations (`tests/fork.rs`, against
+output the fork produced from the same signal, with the default settings and with the post
+filter and an attenuation limit).
 
 - `src/lib.rs`: the STFT, the features and the ERB gains of the fork's `lib.rs`, for one channel;
   the complex features are written in the layout the encoder takes, instead of permuted after.
-- `src/tract.rs`: the fork's `tract.rs` on tract 0.23's API, for one channel, so without its
-  mask reduction across channels, which for one channel computes the gains as they are. Errors
-  are typed (`thiserror`) instead of `anyhow`; nothing logs; a model archive is read from memory
-  only, its networks pulsed already. The spectra around the model are plain vectors instead of
-  tensors, the encoder's inputs are written in place, and the networks' outputs are read where
-  they are, which leaves only tract's own allocations per hop and makes it free of `unsafe`. `reset` is new: it starts the
-  model anew as if just made, its networks' states included, which the fork can't.
-  `hop_size` and `delay` tell the caller the hop and the delay the model's config makes.
-- `examples/convert.rs`: new; the fork's loading of the networks, from its `tract.rs`, writing
-  them out instead: `cargo run --release --example convert -- DeepFilterNet3_onnx.tar.gz
-  models/DeepFilterNet3.tar.gz`. tract names a few nodes it adds in varying order, so another
-  run writes the same networks but not the same bytes; `tests/fork.rs` checks what it wrote.
-- `models/DeepFilterNet3.tar.gz`: made so from the fork's `models/DeepFilterNet3_onnx.tar.gz`,
-  sha256 `c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616`; the weights come
-  with the code's licences.
+- `src/filter.rs`: the enhancement of a hop of the fork's `tract.rs`, for one channel, so without
+  its mask reduction across channels, which for one channel computes the gains as they are. The
+  model's settings are DeepFilterNet3's, fixed, instead of read from its `config.ini`; errors are
+  typed (`thiserror`) instead of `anyhow`; nothing logs. `reset` is new: it starts the model anew
+  as if just made, its networks' states included, which the fork can't. `hop_size` and `delay`
+  tell the caller the hop and the delay the model makes.
+- `src/network.rs`: new; the encoder and the two decoders as the fork's ONNX networks compute
+  them, a hop at a time: the convolutions along time keep the hops they look back on, the GRUs
+  their states.
+- `src/weights.rs`: new; reads the model file.
+- `examples/convert.rs`: new; writes the model file from the fork's ONNX networks, reading
+  protobuf itself: `cargo run --example convert -- export models/DeepFilterNet3.bin`, where
+  `export` holds the three networks the fork's `models/DeepFilterNet3_onnx.tar.gz` unpacks, sha256
+  `c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616`.
+- `models/DeepFilterNet3.bin`: made so; the weights come with the code's licences.

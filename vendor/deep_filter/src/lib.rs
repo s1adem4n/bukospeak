@@ -1,18 +1,20 @@
-//! DeepFilterNet's real-time inference, trimmed to one channel and a model read from memory:
-//! [`DfTract`] enhances 48 kHz audio one hop at a time. The signal processing around the model,
-//! the STFT, the features it takes and the gains and deep filter it returns, is here; the model
-//! runs on tract, in [`tract`].
+//! DeepFilterNet3's real-time inference for one channel: [`DeepFilterNet`] enhances 48 kHz
+//! audio one hop at a time. The signal processing around the model, the STFT and the features it
+//! takes, is here; the enhancement of a hop in `filter`; the networks themselves in `network`.
 
 use std::sync::Arc;
 
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
-pub mod tract;
+mod filter;
+mod network;
+mod weights;
 
-pub use tract::{DfParams, DfTract, Error, RuntimeParams};
+pub use filter::{DeepFilterNet, RuntimeParams};
+pub use weights::Error;
 
-/// The DeepFilterNet3 model's archive, for [`DfParams::from_bytes`].
-pub const DEEPFILTERNET3: &[u8] = include_bytes!("../models/DeepFilterNet3.tar.gz");
+/// DeepFilterNet3's weights, for [`DeepFilterNet::new`].
+pub const DEEPFILTERNET3: &[u8] = include_bytes!("../models/DeepFilterNet3.bin");
 
 pub type Complex32 = num_complex::Complex32;
 
@@ -83,7 +85,8 @@ fn erb_fb(sr: usize, fft_size: usize, nb_bands: usize, min_nb_freqs: usize) -> V
 }
 
 impl DFState {
-    pub(crate) fn new(sr: usize, fft_size: usize, hop_size: usize, nb_bands: usize, min_nb_freqs: usize) -> Self {
+    /// The state of a channel whose complex features span the lowest `nb_df_freqs` bins.
+    pub(crate) fn new(sr: usize, fft_size: usize, hop_size: usize, nb_bands: usize, min_nb_freqs: usize, nb_df_freqs: usize) -> Self {
         assert!(hop_size * 2 <= fft_size);
         let mut fft = RealFftPlanner::<f32>::new();
         let frame_size = hop_size;
@@ -110,7 +113,7 @@ impl DFState {
         }
         let wnorm = 1. / (window_size.pow(2) as f32 / (2 * frame_size) as f32);
 
-        DFState {
+        let mut state = DFState {
             frame_size,
             window_size,
             freq_size,
@@ -125,15 +128,19 @@ impl DFState {
             synthesis_buf,
             window,
             wnorm,
-            mean_norm_state: Vec::new(),
-            unit_norm_state: Vec::new(),
-        }
+            mean_norm_state: vec![0.; nb_bands],
+            unit_norm_state: vec![0.; nb_df_freqs],
+        };
+        state.reset_norm_states();
+        state
     }
 
-    /// Forgets the audio of the frames before, which the STFT's overlap carries.
+    /// Forgets the frames before: the audio the STFT's overlap carries, and the features'
+    /// normalization.
     pub(crate) fn reset(&mut self) {
         self.analysis_mem.fill(0.);
         self.synthesis_mem.fill(0.);
+        self.reset_norm_states();
     }
 
     pub(crate) fn analysis(&mut self, input: &[f32], output: &mut [Complex32]) {
@@ -149,12 +156,11 @@ impl DFState {
     }
 
     /// Sets the features' normalization states to where they start.
-    pub(crate) fn init_norm_states(&mut self, nb_df_freqs: usize) {
-        let nb_erb = self.erb.len();
-        let step = (MEAN_NORM_INIT[1] - MEAN_NORM_INIT[0]) / (nb_erb - 1) as f32;
-        self.mean_norm_state = (0..nb_erb).map(|i| MEAN_NORM_INIT[0] + i as f32 * step).collect();
-        let step = (UNIT_NORM_INIT[1] - UNIT_NORM_INIT[0]) / (nb_df_freqs - 1) as f32;
-        self.unit_norm_state = (0..nb_df_freqs).map(|i| UNIT_NORM_INIT[0] + i as f32 * step).collect();
+    fn reset_norm_states(&mut self) {
+        for (states, [first, last]) in [(&mut self.mean_norm_state, MEAN_NORM_INIT), (&mut self.unit_norm_state, UNIT_NORM_INIT)] {
+            let step = (last - first) / (states.len() - 1) as f32;
+            states.iter_mut().enumerate().for_each(|(i, state)| *state = first + i as f32 * step);
+        }
     }
 
     pub(crate) fn feat_erb(&mut self, input: &[Complex32], alpha: f32, output: &mut [f32]) {
@@ -323,7 +329,7 @@ mod tests {
     #[test]
     fn a_mask_scales_each_erb_band_s_bins_by_its_gain() {
         let (n_fft, nb_bands) = (192, 24);
-        let state = DFState::new(24000, n_fft, n_fft / 2, nb_bands, 1);
+        let state = DFState::new(24000, n_fft, n_fft / 2, nb_bands, 1, 8);
         let input: Vec<Complex32> = (0..n_fft / 2 + 1).map(|i| Complex32::new(i as f32, -(i as f32))).collect();
         let mut mask = vec![1.; nb_bands];
         mask[3] = 0.3;
@@ -341,7 +347,7 @@ mod tests {
 
     #[test]
     fn analysis_and_synthesis_reconstruct_the_signal_a_window_later() {
-        let mut state = DFState::new(48000, 960, 480, 32, 2);
+        let mut state = DFState::new(48000, 960, 480, 32, 2, 96);
         let input: Vec<f32> = (0..480 * 20).map(|n| (n as f32 * 0.01).sin() * 0.5).collect();
         let mut spectrum = vec![Complex32::default(); 481];
         let mut output = vec![0.; input.len()];

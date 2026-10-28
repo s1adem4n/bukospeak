@@ -1,10 +1,10 @@
-//! The trimmed inference against the fork's over a signal that takes every stage, for the
-//! default settings and with the post filter and an attenuation limit. `fork_default.f32` and
-//! `fork_filtered.f32` hold the fork's output for the two. The fork ran on tract 0.21 and this
-//! crate runs on 0.23, whose kernels round differently, so the two agree within float rounding,
-//! not bit for bit.
+//! The inference against the fork's over a signal that takes every stage, for the default
+//! settings and with the post filter and an attenuation limit. `fork_default.f32` and
+//! `fork_filtered.f32` hold the fork's output for the two. The fork ran its networks on tract,
+//! whose kernels round differently and approximate the activations, so the two agree within
+//! float rounding, not bit for bit.
 
-use df::{DfParams, DfTract, RuntimeParams, DEEPFILTERNET3};
+use df::{DeepFilterNet, RuntimeParams, DEEPFILTERNET3};
 
 const FORK_DEFAULT: &[u8] = include_bytes!("fork_default.f32");
 const FORK_FILTERED: &[u8] = include_bytes!("fork_filtered.f32");
@@ -44,18 +44,18 @@ fn signal() -> Vec<f32> {
     out
 }
 
-fn run(model: &mut DfTract, input: &[f32]) -> Vec<f32> {
+fn run(model: &mut DeepFilterNet, input: &[f32]) -> Vec<f32> {
     let mut output = Vec::with_capacity(input.len());
     let mut enhanced = [0.0; HOP];
     for frame in input.as_chunks::<HOP>().0 {
-        model.process(frame, &mut enhanced).unwrap();
+        model.process(frame, &mut enhanced);
         output.extend_from_slice(&enhanced);
     }
     output
 }
 
-fn model(runtime: &RuntimeParams) -> DfTract {
-    DfTract::new(DfParams::from_bytes(DEEPFILTERNET3).unwrap(), runtime).unwrap()
+fn model(runtime: &RuntimeParams) -> DeepFilterNet {
+    DeepFilterNet::new(DEEPFILTERNET3, runtime).unwrap()
 }
 
 /// Panics unless `ours` is the fork's output up to float rounding: no sample off by more than
@@ -83,7 +83,7 @@ fn a_reset_model_is_a_new_one() {
     let input = signal();
     let mut used = model(&RuntimeParams::default());
     run(&mut used, &input[..120 * HOP]);
-    used.reset().unwrap();
+    used.reset();
     assert_eq!(run(&mut used, &input), run(&mut model(&RuntimeParams::default()), &input));
 }
 
