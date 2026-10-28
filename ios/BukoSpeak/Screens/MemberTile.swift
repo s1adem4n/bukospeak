@@ -1,21 +1,28 @@
 import SwiftUI
 
-/// A member: their initial, as Contacts shows it, in a ring that lights up while they speak, and
-/// their name; faded while they reconnect.
+/// A member: their avatar in a ring that lights up and lifts while they speak, and their name;
+/// faded while they reconnect.
 struct MemberTile: View {
     let member: Member
     let speaks: Bool
     let isMuted: Bool
 
+    private static let avatar: CGFloat = 72
+    /// The space between the avatar and its ring, and the ring's width.
+    private static let gap: CGFloat = 4
+    private static let ring: CGFloat = 3
+
     var body: some View {
-        VStack(spacing: 8) {
-            Avatar(name: member.name, size: 72)
-                .padding(4)
+        VStack(spacing: 10) {
+            Avatar(name: member.name, size: Self.avatar)
+                .padding(Self.gap + Self.ring)
                 .overlay {
                     Circle()
-                        .strokeBorder(.green, lineWidth: 3)
+                        .strokeBorder(.green, lineWidth: Self.ring)
+                        .shadow(color: .green.opacity(0.6), radius: 6)
                         .opacity(speaks ? 1 : 0)
                 }
+                .scaleEffect(speaks ? 1.04 : 1)
                 .overlay(alignment: .bottomTrailing) {
                     if isMuted {
                         Image(systemName: "mic.slash.fill")
@@ -30,7 +37,7 @@ struct MemberTile: View {
                 .animation(Motion.speaking, value: speaks)
                 .animation(Motion.spring, value: isMuted)
             Text(member.name)
-                .font(.subheadline)
+                .font(.subheadline.weight(.medium))
                 .lineLimit(1)
         }
         .opacity(member.reconnecting ? 0.4 : 1)

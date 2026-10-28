@@ -29,6 +29,8 @@ final class Call: NSObject {
     private(set) var changedServer: String?
     /// Who is in the channel, watched from the start screen.
     private(set) var present: [Member] = []
+    /// When the call came up, joining again within it included; nil out of a call.
+    private(set) var since: Date?
 
     @ObservationIgnored let settings: Settings
     @ObservationIgnored private let engine: Engine
@@ -227,6 +229,7 @@ final class Call: NSObject {
     /// Follows the engine's state once the join came back.
     private func connected() {
         phase = engineState == .reconnecting ? .reconnecting : .connected
+        if since == nil { since = .now }
         updateAudio()
     }
 
@@ -305,6 +308,7 @@ final class Call: NSObject {
         isMuted = false
         engine.setMuted(false)
         isHeld = false
+        since = nil
         phase = failure.map(Phase.failed) ?? .idle
         leaving = Task { [weak self, engine] in
             let left = await engine.leave()

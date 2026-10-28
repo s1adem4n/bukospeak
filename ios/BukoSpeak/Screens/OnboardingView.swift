@@ -19,17 +19,20 @@ struct OnboardingView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Always as high, so the pages stand still when the back button comes and goes.
-            HStack {
-                if step == .channel {
-                    Button("Zurück", systemImage: "chevron.backward") { go(to: .name) }
-                        .labelStyle(.iconOnly)
-                        .font(.title3.weight(.medium))
-                        .frame(width: 44, height: 44)
-                        .buttonStyle(.glass)
-                        .buttonBorderShape(.circle)
-                        .transition(.opacity)
+            ZStack {
+                StepDots(current: step == .name ? 0 : 1, count: 2)
+                HStack {
+                    if step == .channel {
+                        Button("Zurück", systemImage: "chevron.backward") { go(to: .name) }
+                            .labelStyle(.iconOnly)
+                            .font(.title3.weight(.medium))
+                            .frame(width: 44, height: 44)
+                            .buttonStyle(.glass)
+                            .buttonBorderShape(.circle)
+                            .transition(.opacity)
+                    }
+                    Spacer()
                 }
-                Spacer()
             }
             .frame(height: 44)
             ZStack(alignment: .top) {
@@ -73,10 +76,7 @@ struct OnboardingView: View {
     private var channelPage: some View {
         @Bindable var settings = call.settings
         return VStack(spacing: 24) {
-            Image(systemName: "server.rack")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-                .frame(width: 96, height: 96)
+            BrandMark(height: 96)
             title("Wo trefft ihr euch?")
             Fields {
                 TextField("Server", text: $settings.server, prompt: Text("host:port"))
@@ -131,6 +131,25 @@ struct OnboardingView: View {
             step = next
             focused = next == .name ? .name : .server
         }
+    }
+}
+
+/// Where in the welcome one is: a dot for each page, the current one drawn out.
+private struct StepDots: View {
+    let current: Int
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<count, id: \.self) { page in
+                Capsule()
+                    .fill(page == current ? AnyShapeStyle(.primary) : AnyShapeStyle(.quaternary))
+                    .frame(width: page == current ? 18 : 6, height: 6)
+            }
+        }
+        .animation(Motion.spring, value: current)
+        .accessibilityElement()
+        .accessibilityLabel("Schritt \(current + 1) von \(count)")
     }
 }
 
