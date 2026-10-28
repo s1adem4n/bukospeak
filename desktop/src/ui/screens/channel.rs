@@ -81,15 +81,13 @@ impl Channel {
             call.members()
                 .iter()
                 .map(|member| {
-                    let yours = Some(member.id) == you;
                     Member {
                         id: member.id.0,
                         name: member.name.clone().into(),
                         speaks: call.speaking().contains(&member.id),
                         // One's own as set here, before the server tells it back.
-                        muted: if yours { call.is_muted() } else { member.muted },
+                        muted: if Some(member.id) == you { call.is_muted() } else { member.muted },
                         reconnecting: member.reconnecting,
-                        yours,
                     }
                 })
                 .collect()
@@ -102,7 +100,6 @@ impl Channel {
                     speaks: false,
                     muted: member.muted,
                     reconnecting: member.reconnecting,
-                    yours: false,
                 })
                 .collect()
         };
@@ -302,7 +299,6 @@ struct Member {
     speaks: bool,
     muted: bool,
     reconnecting: bool,
-    yours: bool,
 }
 
 impl Member {
@@ -320,16 +316,7 @@ impl Member {
             .gap_2p5()
             .when(self.reconnecting, |row| row.opacity(theme::RECONNECTING_OPACITY))
             .child(Avatar::new(self.name.clone(), theme::MEMBER_AVATAR).ring(u64::from(self.id), self.speaks))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1p5()
-                    .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(self.name))
-                    .when(self.yours, |name| {
-                        name.child(div().flex_none().text_size(theme::TEXT_SM).text_color(tokens.text_faint).child("du"))
-                    }),
-            )
+            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(self.name))
             .children(mark.map(|(mark, color)| Icon::from(mark).size(theme::ICON_SM).text_color(color)))
     }
 }
