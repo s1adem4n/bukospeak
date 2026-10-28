@@ -115,8 +115,14 @@ impl Main {
         let observed = cx.observe(&client, |_, _, cx| cx.notify());
         let read = cx.subscribe_in(&client, window, |main, _, _: &RoomKeyRead, window, cx| main.read_room_key(window, cx));
         let appearance = cx.observe_window_appearance(window, |_, window, cx| Theme::sync_system_appearance(Some(window), cx));
-        // A closed window no longer shows who is in the channel.
-        cx.on_release(|main, cx| main.client.update(cx, |client, _| client.set_lobby(false))).detach();
+        // A closed window no longer shows who is in the channel, nor the microphone's level.
+        cx.on_release(|main, cx| {
+            main.client.update(cx, |client, _| {
+                client.set_lobby(false);
+                client.set_listening(false);
+            })
+        })
+        .detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let (screen, subscription) = match client.read(cx).missing() {
@@ -177,10 +183,14 @@ impl Main {
         self.show(Screen::Settings(settings), None, window, cx);
     }
 
-    /// Watches who is in the channel while the window shows it, and only then.
+    /// Watches who is in the channel while the window shows it, and listens to the microphone
+    /// while the settings show its level; only then.
     fn watch(&self, cx: &mut Context<Self>) {
-        let lobby = matches!(self.screen, Screen::Channel(_));
-        self.client.update(cx, |client, _| client.set_lobby(lobby));
+        let (lobby, listening) = (matches!(self.screen, Screen::Channel(_)), matches!(self.screen, Screen::Settings(_)));
+        self.client.update(cx, |client, _| {
+            client.set_lobby(lobby);
+            client.set_listening(listening);
+        });
     }
 
     /// Takes the room key the keyring kept into the screen that shows it; asks for it if

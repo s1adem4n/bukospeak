@@ -118,7 +118,7 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, p
 
     let failures = happenings.clone();
     // The client stops listening only on its way out.
-    let audio = Audio::start(microphone, speaker, input, output, move |error| _ = failures.send(Happening::AudioFailed(error)))?;
+    let audio = Audio::call(microphone, speaker, None, input, output, move |error| _ = failures.send(Happening::AudioFailed(error)))?;
     ctrlc::set_handler(move || _ = happenings.send(Happening::Stop))?;
 
     // The channel as last printed.

@@ -7,6 +7,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Icon, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
@@ -14,7 +15,7 @@ use gpui_kit::{
 
 use crate::ui::client::Client;
 use crate::ui::glyph::Glyph;
-use crate::ui::kit::{self, Avatar, Button, InlineField, InlineFieldEvent, Look, Variant};
+use crate::ui::kit::{self, Avatar, Button, InlineField, InlineFieldEvent, InputLevel, Look, Variant};
 use crate::ui::theme::{self, ActiveTokens};
 
 /// A device to choose: the system's default for None.
@@ -50,6 +51,7 @@ pub struct Settings {
     inputs: Vec<Choice>,
     outputs: Vec<Choice>,
     volume: Entity<SliderState>,
+    level: Entity<InputLevel>,
     _subscriptions: Vec<Subscription>,
     _listing: Task<()>,
 }
@@ -62,10 +64,12 @@ impl Settings {
         let (kept_input, kept_output) = (kept(Direction::Input), kept(Direction::Output));
         let most = (MAX_VOLUME * 100.0) as u16;
         let percent = read.settings.volume.min(most);
+        let meter = read.call.meter().clone();
 
         let name = cx.new(|cx| InlineField::new(name, "Name", Look::Title, window, cx).required());
         let server = cx.new(|cx| InlineField::new(server, "server.example:9988", Look::Mono, window, cx));
         let room_key = cx.new(|cx| InlineField::new(room_key, "Nicht gesetzt", Look::Secret, window, cx));
+        let level = cx.new(|cx| InputLevel::new(meter, cx));
         let volume = cx.new(|_| SliderState::new().min(0.0).max(f32::from(most)).step(5.0).default_value(f32::from(percent)));
         let subscriptions = vec![
             cx.observe(&client, |_, _, cx| cx.notify()),
@@ -106,6 +110,7 @@ impl Settings {
             server,
             room_key,
             volume,
+            level,
             _subscriptions: subscriptions,
             _listing: listing,
         }
@@ -160,6 +165,7 @@ impl Settings {
                 h_flex()
                     .min_w_0()
                     .gap_1p5()
+                    .when(direction == Direction::Input, |value| value.child(div().mr_1().child(self.level.clone())))
                     .child(div().min_w_0().truncate().child(chosen))
                     .child(Icon::from(Glyph::Choose).size(theme::ICON_SM).text_color(tokens.text_faint)),
             )

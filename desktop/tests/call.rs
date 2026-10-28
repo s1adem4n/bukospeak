@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use bukospeak_core::proto::Fingerprint;
 use bukospeak_core::proto::control::Rejection;
-use bukospeak_core::{Microphone, Speaker};
+use bukospeak_core::{Meter, Microphone, Speaker};
 use bukospeak_desktop::audio::{DeviceId, Direction};
 use bukospeak_desktop::call::{Call, Devices, Failure, Happening, Join, Phase, Player, Playing, Report};
 use bukospeak_desktop::known_servers::KnownServers;
@@ -42,28 +42,40 @@ fn serve_at(address: &str) -> Server {
     Server { _runtime: runtime, address, fingerprint: identity.fingerprint() }
 }
 
-/// Plays nothing, but holds the call's ends as the devices would, and counts the calls played;
-/// or fails to start, as devices may.
+/// Plays nothing, but holds the call's ends as the devices would, and counts the calls played
+/// and the inputs listened to; or fails to start a call, as devices may.
 #[derive(Clone, Default)]
 struct StandIn {
     played: Arc<AtomicUsize>,
     playing: Arc<AtomicUsize>,
+    listening: Arc<AtomicUsize>,
     fails: Arc<AtomicBool>,
 }
 
+/// A call's ends or the input held, counted in `count` while held.
 struct Played {
-    _ends: (Microphone, Speaker),
-    playing: Arc<AtomicUsize>,
+    _ends: Option<(Microphone, Speaker)>,
+    count: Arc<AtomicUsize>,
+}
+
+impl Played {
+    fn held(ends: Option<(Microphone, Speaker)>, count: &Arc<AtomicUsize>) -> Box<dyn Playing> {
+        count.fetch_add(1, Ordering::Relaxed);
+        Box::new(Self { _ends: ends, count: Arc::clone(count) })
+    }
 }
 
 impl Player for StandIn {
-    fn play(&mut self, microphone: Microphone, speaker: Speaker, _: &Devices, _: Report) -> std::io::Result<Box<dyn Playing>> {
+    fn play(&mut self, microphone: Microphone, speaker: Speaker, _: &Meter, _: &Devices, _: Report) -> std::io::Result<Box<dyn Playing>> {
         if self.fails.load(Ordering::Relaxed) {
             return Err(std::io::Error::other("the stand-in fails"));
         }
         self.played.fetch_add(1, Ordering::Relaxed);
-        self.playing.fetch_add(1, Ordering::Relaxed);
-        Ok(Box::new(Played { _ends: (microphone, speaker), playing: Arc::clone(&self.playing) }))
+        Ok(Played::held(Some((microphone, speaker)), &self.playing))
+    }
+
+    fn listen(&mut self, _: &Meter, _: Option<&DeviceId>, _: Report) -> std::io::Result<Box<dyn Playing>> {
+        Ok(Played::held(None, &self.listening))
     }
 }
 
@@ -73,7 +85,7 @@ impl Playing for Played {
 
 impl Drop for Played {
     fn drop(&mut self) {
-        self.playing.fetch_sub(1, Ordering::Relaxed);
+        self.count.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -162,6 +174,40 @@ fn a_call_plays_while_it_is_up_and_pins_the_server() {
     assert_eq!(app.call.since(), None);
     app.settle();
     assert_eq!(app.devices.playing.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn the_input_is_listened_to_while_asked_and_out_of_a_call_only() {
+    let server = serve();
+    let mut app = App::new("listens");
+    let listening = Arc::clone(&app.devices.listening);
+    app.call.listen(true);
+    app.settle();
+    assert_eq!(listening.load(Ordering::Relaxed), 1);
+
+    // The call's input takes over once the call plays, and gives it back when left.
+    app.join(&server, "first", ROOM_KEY);
+    app.until("the call", connected);
+    assert_eq!(listening.load(Ordering::Relaxed), 0);
+    assert_eq!(app.devices.playing.load(Ordering::Relaxed), 1);
+    app.call.leave();
+    app.settle();
+    assert_eq!((listening.load(Ordering::Relaxed), app.devices.playing.load(Ordering::Relaxed)), (1, 0));
+
+    // A join that fails leaves it listened to.
+    app.join(&server, "first", "a wrong key");
+    app.until("the rejection", |call| matches!(call.phase(), Phase::Failed(_)));
+    app.settle();
+    assert_eq!(listening.load(Ordering::Relaxed), 1);
+
+    app.call.listen(false);
+    app.settle();
+    assert_eq!(listening.load(Ordering::Relaxed), 0);
+    app.join(&server, "first", ROOM_KEY);
+    app.until("the call", connected);
+    app.call.leave();
+    app.settle();
+    assert_eq!(listening.load(Ordering::Relaxed), 0, "not asked to, it isn't listened to after a call");
 }
 
 #[test]

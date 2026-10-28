@@ -4,12 +4,14 @@
 mod avatar;
 mod button;
 mod field;
+mod level;
 
 pub use avatar::Avatar;
 pub use button::{Button, Size, Variant, icon_inset};
 pub use field::{InlineField, InlineFieldEvent, Look, field, init};
 use gpui_kit::component::{Icon, h_flex};
 use gpui_kit::prelude::FluentBuilder;
+pub use level::InputLevel;
 use std::sync::{Arc, LazyLock};
 
 use gpui_kit::{

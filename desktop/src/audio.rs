@@ -1,8 +1,9 @@
 //! A call on the desktop's audio devices, through cpal.
 //!
 //! [`Audio`] plays a call's microphone and speaker on an input and an output device, the
-//! system's defaults or chosen ones. A thread of its own holds the streams and builds them anew
-//! when a device is lost or the stream breaks, retrying every second until the device is back.
+//! system's defaults or chosen ones, or listens to the input alone, for its meter. A thread of
+//! its own holds the streams and builds them anew when a device is lost or the stream breaks,
+//! retrying every second until the device is back.
 
 mod convert;
 mod lease;
@@ -13,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bukospeak_core::proto::audio::SAMPLE_RATE;
-use bukospeak_core::{Microphone, Speaker};
+use bukospeak_core::{Meter, Microphone, Speaker};
 pub use cpal::DeviceId;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
@@ -26,6 +27,10 @@ use crate::audio::lease::{Half, Lease};
 
 /// How long a stream that couldn't be built waits before the next try.
 const RETRY: Duration = Duration::from_secs(1);
+
+/// How long a stream gone may take to give back what it played: PulseAudio's backend drops the
+/// callback on a thread of its own once it deleted the stream.
+const HAND_BACK: Duration = Duration::from_millis(250);
 
 /// The rate the device runs at if it can't run at the call's: CD audio's, which many run at.
 const CD_RATE: u32 = 44_100;
@@ -87,7 +92,7 @@ pub fn devices(direction: Direction) -> Result<Vec<Device>, Error> {
         .collect())
 }
 
-/// A call playing on the devices, until it is dropped.
+/// A call playing on the devices, or the input listened to, until it is dropped.
 pub struct Audio {
     commands: mpsc::Sender<Command>,
     thread: Option<thread::JoinHandle<()>>,
@@ -102,18 +107,28 @@ enum Command {
 }
 
 impl Audio {
-    /// Starts playing the call on the devices, the defaults for None. `report` hears why a
-    /// device doesn't play, once each time it stops.
-    pub fn start(
+    /// Starts playing the call on the devices, the defaults for None; `meter`, if any, measures
+    /// the microphone. `report` hears why a device doesn't play, once each time it stops.
+    pub fn call(
         microphone: Microphone,
         speaker: Speaker,
+        meter: Option<Meter>,
         input: Option<DeviceId>,
         output: Option<DeviceId>,
         report: impl Fn(Error) + Send + 'static,
     ) -> std::io::Result<Self> {
+        let capture = Capture { meter, microphone: Some(microphone) };
+        Self::start(Side::new(Direction::Input, input, capture), Some(Side::new(Direction::Output, output, speaker)), report)
+    }
+
+    /// Starts listening to the input device, the default for None, for `meter` alone.
+    pub fn listen(meter: Meter, input: Option<DeviceId>, report: impl Fn(Error) + Send + 'static) -> std::io::Result<Self> {
+        let capture = Capture { meter: Some(meter), microphone: None };
+        Self::start(Side::new(Direction::Input, input, capture), None, report)
+    }
+
+    fn start(input: Side<Capture>, output: Option<Side<Speaker>>, report: impl Fn(Error) + Send + 'static) -> std::io::Result<Self> {
         let (commands, received) = mpsc::channel();
-        let input = Side::new(Direction::Input, input, microphone);
-        let output = Side::new(Direction::Output, output, speaker);
         let sender = commands.clone();
         let thread =
             thread::Builder::new().name("bukospeak-audio".into()).spawn(move || run(input, output, &received, &sender, &report))?;
@@ -124,6 +139,7 @@ impl Audio {
         self.send(Command::Use(Direction::Input, device));
     }
 
+    /// Plays on another output device; listening to the input, there is none.
     pub fn set_output(&self, device: Option<DeviceId>) {
         self.send(Command::Use(Direction::Output, device));
     }
@@ -144,32 +160,76 @@ impl Drop for Audio {
 }
 
 fn run(
-    mut input: Side<Microphone>,
-    mut output: Side<Speaker>,
+    mut input: Side<Capture>,
+    mut output: Option<Side<Speaker>>,
     received: &mpsc::Receiver<Command>,
     commands: &mpsc::Sender<Command>,
     report: &dyn Fn(Error),
 ) {
     loop {
         input.start(commands, report, build_input);
-        output.start(commands, report, build_output);
-        let command = if input.stream.is_some() && output.stream.is_some() {
+        if let Some(output) = &mut output {
+            output.start(commands, report, build_output);
+        }
+        let command = if input.stream.is_some() && output.as_ref().is_none_or(|output| output.stream.is_some()) {
             received.recv().map_err(|_| RecvTimeoutError::Disconnected)
         } else {
             received.recv_timeout(RETRY)
         };
         match command {
             Ok(Command::Use(Direction::Input, device)) => input.switch(device),
-            Ok(Command::Use(Direction::Output, device)) => output.switch(device),
+            Ok(Command::Use(Direction::Output, device)) => {
+                if let Some(output) = &mut output {
+                    output.switch(device);
+                }
+            }
             Ok(Command::Broke(Direction::Input, generation, error)) => input.broke(generation, error, report),
-            Ok(Command::Broke(Direction::Output, generation, error)) => output.broke(generation, error, report),
+            Ok(Command::Broke(Direction::Output, generation, error)) => {
+                if let Some(output) = &mut output {
+                    output.broke(generation, error, report);
+                }
+            }
             Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
 }
 
-/// One direction's device and stream, and the call's half the stream plays.
+/// What the input stream feeds: the meter, if anyone shows it, and in a call the microphone.
+struct Capture {
+    meter: Option<Meter>,
+    microphone: Option<Microphone>,
+}
+
+impl Capture {
+    fn push(&mut self, samples: &[f32], captured: Instant) {
+        if let Some(meter) = &self.meter {
+            meter.measure(samples);
+        }
+        if let Some(microphone) = &mut self.microphone {
+            microphone.push(samples, captured);
+        }
+    }
+}
+
+impl Half for Capture {
+    fn stopped(&mut self) {
+        if let Some(meter) = &self.meter {
+            meter.reset();
+        }
+        if let Some(microphone) = &mut self.microphone {
+            microphone.stopped();
+        }
+    }
+}
+
+impl Half for Speaker {
+    fn stopped(&mut self) {
+        Speaker::stopped(self);
+    }
+}
+
+/// One direction's device and stream, and the half the stream plays.
 struct Side<T> {
     direction: Direction,
     device: Option<DeviceId>,
@@ -197,7 +257,10 @@ impl<T: Half> Side<T> {
         if self.stream.is_some() {
             return;
         }
-        let half = self.idle.try_recv().expect("a half no stream plays is back");
+        // Not back yet, it is waited for again with the next try.
+        let Ok(half) = self.idle.recv_timeout(HAND_BACK) else {
+            return;
+        };
         self.generation += 1;
         let (direction, generation, commands) = (self.direction, self.generation, commands.clone());
         let broke = Box::new(move |error: cpal::Error| match error.kind() {
@@ -239,7 +302,7 @@ impl<T: Half> Side<T> {
 fn build_input(
     host: &Host,
     id: Option<&DeviceId>,
-    mut microphone: Lease<Microphone>,
+    mut capture: Lease<Capture>,
     broke: Box<dyn FnMut(cpal::Error) + Send>,
 ) -> Result<Stream, Error> {
     let direction = Direction::Input;
@@ -254,7 +317,7 @@ fn build_input(
                 // were captured is the same on any.
                 let timestamp = info.timestamp();
                 let captured = Instant::now() - timestamp.callback.duration_since(timestamp.capture);
-                input.push(samples, captured, |frame, captured| microphone.push(frame, captured));
+                input.push(samples, captured, |frame, captured| capture.push(frame, captured));
             },
             broke,
             None,

@@ -1,5 +1,6 @@
 //! The call as the desktop app has it: joins, leaves and watches the channel on a worker thread
-//! of its own, plays the call through a [`Player`], and keeps what the window shows of it.
+//! of its own, plays the call through a [`Player`], and keeps what the window shows of it. Out
+//! of a call, the player listens to the input alone while asked to, for the meter.
 //!
 //! Joins and leaves block on the server, so they run on the worker, one after the other. What
 //! comes back, from the worker and from the engine, arrives as [`Happening`]s on one channel,
@@ -18,7 +19,7 @@ use std::time::Instant;
 use crate::audio::{self, Audio, DeviceId, Direction};
 use bukospeak_core::proto::control::{Member, Rejection};
 use bukospeak_core::proto::{Fingerprint, MemberId};
-use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Microphone, Speaker, State, Update};
+use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Meter, Microphone, Speaker, State, Update};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use crate::known_servers::KnownServers;
@@ -91,12 +92,22 @@ pub struct Join {
 /// Hears why a device doesn't play, once each time it stops.
 pub type Report = Box<dyn Fn(audio::Error) + Send>;
 
-/// Plays a call's two ends: on the desktop's devices, or on stand-ins in tests.
+/// Plays a call's two ends, or listens to the input alone, `meter` measuring the input either
+/// way: on the desktop's devices, or on stand-ins in tests.
 pub trait Player: Send + 'static {
-    fn play(&mut self, microphone: Microphone, speaker: Speaker, devices: &Devices, report: Report) -> io::Result<Box<dyn Playing>>;
+    fn play(
+        &mut self,
+        microphone: Microphone,
+        speaker: Speaker,
+        meter: &Meter,
+        devices: &Devices,
+        report: Report,
+    ) -> io::Result<Box<dyn Playing>>;
+
+    fn listen(&mut self, meter: &Meter, input: Option<&DeviceId>, report: Report) -> io::Result<Box<dyn Playing>>;
 }
 
-/// A call playing, until it is dropped.
+/// A call playing, or the input listened to, until it is dropped.
 pub trait Playing: Send {
     fn set_device(&self, direction: Direction, device: Option<DeviceId>);
 }
@@ -105,9 +116,20 @@ pub trait Playing: Send {
 pub struct DesktopPlayer;
 
 impl Player for DesktopPlayer {
-    fn play(&mut self, microphone: Microphone, speaker: Speaker, devices: &Devices, report: Report) -> io::Result<Box<dyn Playing>> {
-        let audio = Audio::start(microphone, speaker, devices.input.clone(), devices.output.clone(), report)?;
+    fn play(
+        &mut self,
+        microphone: Microphone,
+        speaker: Speaker,
+        meter: &Meter,
+        devices: &Devices,
+        report: Report,
+    ) -> io::Result<Box<dyn Playing>> {
+        let audio = Audio::call(microphone, speaker, Some(meter.clone()), devices.input.clone(), devices.output.clone(), report)?;
         Ok(Box::new(audio))
+    }
+
+    fn listen(&mut self, meter: &Meter, input: Option<&DeviceId>, report: Report) -> io::Result<Box<dyn Playing>> {
+        Ok(Box::new(Audio::listen(meter.clone(), input.cloned(), report)?))
     }
 }
 
@@ -139,6 +161,7 @@ enum Command {
     Leave,
     Watch { server: String, room_key: String },
     Unwatch,
+    Listen(bool),
     SetDevice(Direction, Option<DeviceId>),
 }
 
@@ -166,6 +189,10 @@ pub struct Call {
     left_call: u64,
     /// The server and room key to watch while out of a call, if any.
     watched: Option<(String, String)>,
+    /// How loud the input is, in a call or listened to.
+    meter: Meter,
+    /// Whether the input is to be listened to out of a call.
+    listening: bool,
     /// The call as the engine told it last, which may join again before its join came back
     /// here; empty out of a call.
     channel: Channel,
@@ -184,7 +211,19 @@ impl Call {
         let engine = Arc::new(Engine::new(Conditioning::Engine, Arc::new(Forward(happenings.clone())))?);
         let (commands, inbox) = mpsc::channel();
         let current = Arc::new(AtomicU64::new(0));
-        let worker = Worker { engine: Arc::clone(&engine), known, player: Box::new(player), happenings, current: Arc::clone(&current) };
+        let meter = Meter::default();
+        let worker = Worker {
+            engine: Arc::clone(&engine),
+            known,
+            player: Box::new(player),
+            happenings,
+            current: Arc::clone(&current),
+            meter: meter.clone(),
+            devices: Devices::default(),
+            listening: false,
+            playing: None,
+            listened: None,
+        };
         let worker = thread::Builder::new().name("bukospeak-call".into()).spawn(move || worker.run(&inbox))?;
         let call = Self {
             engine,
@@ -199,6 +238,8 @@ impl Call {
             leaves: 0,
             left_call: 0,
             watched: None,
+            meter,
+            listening: false,
             channel: Channel::default(),
             phase: Phase::Idle,
             present: Vec::new(),
@@ -299,7 +340,20 @@ impl Call {
         self.engine.set_volume(f32::from(percent) / 100.0);
     }
 
-    /// Plays the call on another device from now on; the next join is told its devices anew.
+    /// How loud the input is: in a call, or while listened to out of one.
+    pub fn meter(&self) -> &Meter {
+        &self.meter
+    }
+
+    /// Listens to the input while out of a call, for the meter, or stops.
+    pub fn listen(&mut self, on: bool) {
+        if self.listening != on {
+            self.listening = on;
+            self.send(Command::Listen(on));
+        }
+    }
+
+    /// Plays the call, and listens to the input, on another device from now on.
     pub fn set_device(&self, direction: Direction, device: Option<DeviceId>) {
         self.send(Command::SetDevice(direction, device));
     }
@@ -495,26 +549,38 @@ impl Listener for Forward {
     }
 }
 
-/// What the worker thread holds: it joins, leaves and watches, and holds the call's audio.
+/// What the worker thread holds: it joins, leaves and watches, and holds the call's audio, or
+/// out of a call the input listened to.
 struct Worker {
     engine: Arc<Engine>,
     known: KnownServers,
     player: Box<dyn Player>,
     happenings: UnboundedSender<Happening>,
     current: Arc<AtomicU64>,
+    meter: Meter,
+    /// The devices chosen last.
+    devices: Devices,
+    listening: bool,
+    /// The call's audio.
+    playing: Option<Box<dyn Playing>>,
+    /// The input listened to; never while the call's audio plays.
+    listened: Option<Box<dyn Playing>>,
 }
 
 impl Worker {
     fn run(mut self, inbox: &mpsc::Receiver<Command>) {
-        let mut playing: Option<Box<dyn Playing>> = None;
         for command in inbox {
             match command {
-                Command::Join { number, join, trust, asked } => playing = self.join(number, join, trust, asked),
+                Command::Join { number, join, trust, asked } => {
+                    self.playing = self.join(number, join, trust, asked);
+                    self.relisten();
+                }
                 Command::Leave => {
                     // The audio stops before the call, so nothing plays into a call that is gone.
-                    playing = None;
+                    self.playing = None;
                     let left = self.engine.leave();
                     self.tell(Event::Left(left));
+                    self.relisten();
                 }
                 Command::Watch { server, room_key } => match self.known.get(&server) {
                     Ok(Some(pin)) => self.engine.watch(server, room_key, pin),
@@ -527,21 +593,45 @@ impl Worker {
                     }
                 },
                 Command::Unwatch => self.engine.unwatch(),
+                Command::Listen(on) => {
+                    self.listening = on;
+                    self.relisten();
+                }
                 Command::SetDevice(direction, device) => {
-                    if let Some(playing) = &playing {
-                        playing.set_device(direction, device);
+                    for playing in [&self.playing, &self.listened].into_iter().flatten() {
+                        playing.set_device(direction, device.clone());
+                    }
+                    match direction {
+                        Direction::Input => self.devices.input = device,
+                        Direction::Output => self.devices.output = device,
                     }
                 }
             }
         }
-        drop(playing);
+        self.playing = None;
         self.engine.leave();
+    }
+
+    /// Listens to the input while asked to and no call plays, and only then.
+    fn relisten(&mut self) {
+        if !self.listening || self.playing.is_some() {
+            self.listened = None;
+        } else if self.listened.is_none() {
+            // An input that doesn't play leaves the meter still; the next call tells the user why.
+            let report: Report = Box::new(|error| tracing::warn!("listening: {error}"));
+            self.listened = self
+                .player
+                .listen(&self.meter, self.devices.input.as_ref(), report)
+                .inspect_err(|error| tracing::warn!("the input isn't listened to: {error}"))
+                .ok();
+        }
     }
 
     /// Joins, pins the server and starts the call's audio, and tells the call how it went; the
     /// audio returned plays the call until the next leave.
     fn join(&mut self, number: u64, join: Join, trust: Option<Fingerprint>, asked: Instant) -> Option<Box<dyn Playing>> {
         let Join { server, name, room_key, devices } = join;
+        self.devices = devices.clone();
         let pinned = match self.known.get(&server) {
             Ok(pinned) => pinned,
             Err(error) => {
@@ -575,7 +665,9 @@ impl Worker {
             // Closed only when the call is dropped, which stops the audio.
             let _ = happenings.unbounded_send(Happening(Event::Device(number, error)));
         });
-        match self.player.play(microphone, speaker, &devices, report) {
+        // The input listened to gives way to the call's, which the meter measures from now on.
+        self.listened = None;
+        match self.player.play(microphone, speaker, &self.meter, &devices, report) {
             Ok(playing) => {
                 log_step("the call's audio plays", asked);
                 self.tell(Event::Joined(number, Ok(())));

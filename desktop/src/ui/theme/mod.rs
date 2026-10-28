@@ -251,6 +251,11 @@ pub const MARK_SM: Pixels = px(20.);
 pub const MARK: Pixels = px(96.);
 pub const AVATAR_LG: Pixels = px(40.);
 pub const AVATAR_XL: Pixels = px(56.);
+/// The microphone's level: its bars, each so wide and high, and so far apart.
+pub const LEVEL_BARS: usize = 5;
+pub const LEVEL_BAR_WIDTH: Pixels = px(3.);
+pub const LEVEL_BAR_HEIGHT: Pixels = px(10.);
+pub const LEVEL_GAP: Pixels = px(2.);
 /// The update window's column, and the bar of how far its download is.
 pub const UPDATE: Pixels = px(220.);
 pub const PROGRESS: Pixels = px(6.);

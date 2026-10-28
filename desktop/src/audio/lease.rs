@@ -1,27 +1,13 @@
-//! A call's half lent to an audio callback: it comes back when the stream drops the callback,
-//! which every cpal backend does before dropping the stream returns.
+//! What a stream plays, lent to its audio callback: it comes back when the backend drops the
+//! callback, which most do before dropping the stream returns, and PulseAudio's a moment after.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::mpsc;
 
-use bukospeak_core::{Microphone, Speaker};
-
-/// A call's half, which a stream plays until it stops.
+/// What a stream plays until it stops: a call's half, or the input's meter.
 pub trait Half {
     /// Tells the half its stream stopped calling it.
     fn stopped(&mut self);
-}
-
-impl Half for Microphone {
-    fn stopped(&mut self) {
-        Microphone::stopped(self);
-    }
-}
-
-impl Half for Speaker {
-    fn stopped(&mut self) {
-        Speaker::stopped(self);
-    }
 }
 
 pub struct Lease<T: Half> {

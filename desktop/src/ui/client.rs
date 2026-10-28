@@ -51,6 +51,8 @@ impl Client {
         mute_keys: Option<&'static str>,
         cx: &mut Context<Self>,
     ) -> Self {
+        call.set_device(Direction::Input, settings.device(Direction::Input));
+        call.set_device(Direction::Output, settings.device(Direction::Output));
         call.set_noise_suppression(settings.noise_suppression);
         call.set_echo_cancellation(settings.echo_cancellation);
         call.set_volume(settings.volume);
@@ -148,6 +150,11 @@ impl Client {
     pub fn set_lobby(&mut self, lobby: bool) {
         self.lobby = lobby;
         self.watch();
+    }
+
+    /// Listens to the microphone while a window shows its level, out of a call too.
+    pub fn set_listening(&mut self, listening: bool) {
+        self.call.listen(listening);
     }
 
     /// Watches who is in the channel while a window shows it from outside.
