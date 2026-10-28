@@ -1,5 +1,6 @@
 //! The voice server: one channel that relays each member's audio to everyone else.
 
+mod certificate;
 mod identity;
 mod room;
 

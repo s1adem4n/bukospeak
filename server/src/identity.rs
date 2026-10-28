@@ -4,7 +4,11 @@ use std::path::Path;
 
 use anyhow::Context;
 use bukospeak_proto::{Fingerprint, SERVER_NAME};
+use ring::rand::{SecureRandom, SystemRandom};
+use ring::signature::Ed25519KeyPair;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+use crate::certificate;
 
 /// The server's self-signed certificate and its key. Clients pin the certificate's fingerprint,
 /// so it stays the same across restarts.
@@ -14,9 +18,16 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// A new identity: an Ed25519 key, and its certificate for [`SERVER_NAME`].
     pub fn generate() -> anyhow::Result<Self> {
-        let generated = rcgen::generate_simple_self_signed(vec![SERVER_NAME.to_owned()])?;
-        Ok(Self { certificate: generated.cert.der().clone(), key: PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()).into() })
+        let random = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).map_err(|_| anyhow::anyhow!("the system has no randomness for a key"))?;
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .map_err(|rejected| anyhow::anyhow!("the key just generated is rejected: {rejected}"))?;
+        let mut serial = [0; 16];
+        random.fill(&mut serial).map_err(|_| anyhow::anyhow!("the system has no randomness for a serial number"))?;
+        let certificate = certificate::self_signed(&key, SERVER_NAME, serial);
+        Ok(Self { certificate: certificate.into(), key: PrivatePkcs8KeyDer::from(pkcs8.as_ref().to_vec()).into() })
     }
 
     /// The identity in `dir`, created there on the first start.
