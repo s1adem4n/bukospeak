@@ -9,6 +9,8 @@ use quinn::{Connection, ConnectionError, Endpoint, Incoming, RecvStream, SendStr
 use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 
+use crate::downloads::Downloads;
+
 /// More than a group of friends needs, and few enough that relaying to all stays cheap.
 const MAX_MEMBERS: usize = 16;
 
@@ -26,6 +28,7 @@ const RESUME_GRACE: Duration = Duration::from_secs(20);
 pub struct Room {
     room_key: String,
     members: Mutex<Members>,
+    downloads: Option<Downloads>,
 }
 
 #[derive(Default)]
@@ -57,8 +60,9 @@ impl Peer {
 }
 
 impl Room {
-    pub fn new(room_key: String) -> Arc<Self> {
-        Arc::new(Self { room_key, members: Mutex::default() })
+    /// The channel members join with `room_key`, who may also download what `downloads` offers.
+    pub fn new(room_key: String, downloads: Option<Downloads>) -> Arc<Self> {
+        Arc::new(Self { room_key, members: Mutex::default(), downloads })
     }
 
     /// Admits the endpoint's connections until it closes.
@@ -75,8 +79,8 @@ impl Room {
     }
 
     /// Lets a connection join once its Hello checks out, and relays for it until it leaves or is
-    /// lost and not resumed; or once its Watch checks out, tells it who is in the channel until
-    /// it closes.
+    /// lost and not resumed; once its Watch checks out, tells it who is in the channel until it
+    /// closes; or once its Download checks out, sends it the download.
     async fn admit(&self, incoming: Incoming) -> anyhow::Result<()> {
         let connection = incoming.await?;
         let (send, recv, first) = timeout(HELLO_TIMEOUT, async {
@@ -122,8 +126,20 @@ impl Room {
                     () = drain(recv) => {}
                 }
             }
+            Some(ClientMessage::Download { version, room_key, name }) => {
+                if let Err(reason) = self.check(version, &room_key) {
+                    return reject(send, &connection, reason).await;
+                }
+                let Some(downloads) = &self.downloads else {
+                    return reject(send, &connection, Rejection::Unavailable).await;
+                };
+                tracing::debug!(name, remote = %connection.remote_address(), "downloading");
+                // The client says nothing more on the control stream.
+                drop(recv);
+                downloads.serve(&name, &connection, send).await?;
+            }
             Some(ClientMessage::Mute { .. }) => anyhow::bail!("a Mute before a Hello"),
-            None => anyhow::bail!("the stream ended before a Hello or a Watch"),
+            None => anyhow::bail!("the stream ended before a Hello, a Watch or a Download"),
         }
         Ok(())
     }
@@ -292,7 +308,7 @@ fn check_name(name: &str) -> Result<(), Rejection> {
 }
 
 /// Tells the client why it was turned away, and closes the connection once it has read it.
-async fn reject(mut send: SendStream, connection: &Connection, reason: Rejection) -> anyhow::Result<()> {
+pub(crate) async fn reject(mut send: SendStream, connection: &Connection, reason: Rejection) -> anyhow::Result<()> {
     control::write(&mut send, &ServerMessage::Rejected { reason }).await?;
     send.finish()?;
     // The client closes once it has read the rejection; one that doesn't is closed on.

@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use bukospeak_server::{Identity, Room, endpoint};
+use bukospeak_server::{Downloads, Identity, Ngc, Room, endpoint};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -13,12 +13,16 @@ struct Args {
     /// The UDP address to listen on.
     #[arg(long, env = "BUKOSPEAK_LISTEN", default_value = "[::]:9988")]
     listen: SocketAddr,
-    /// Where the server keeps its certificate.
+    /// Where the server keeps its certificate, and the downloads it offers.
     #[arg(long, env = "BUKOSPEAK_DATA", default_value = "data")]
     data: PathBuf,
     /// The key members need to join.
     #[arg(long, env = "BUKOSPEAK_ROOM_KEY", hide_env_values = true)]
     room_key: String,
+    /// An API key of NGC, NVIDIA's catalogue, with which the server offers its members NVIDIA's
+    /// effects for their cards, downloading them from NGC the first time each is asked for.
+    #[arg(long, env = "BUKOSPEAK_NGC_KEY", hide_env_values = true)]
+    ngc_key: Option<String>,
 }
 
 #[tokio::main]
@@ -34,8 +38,9 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = endpoint(&identity, args.listen)?;
     tracing::info!(listen = %args.listen, fingerprint = %identity.fingerprint(), "serving");
 
+    let downloads = args.ngc_key.map(|key| Downloads::new(args.data.join("downloads"), Ngc::new(key)));
     tokio::select! {
-        () = Room::new(args.room_key).serve(endpoint.clone()) => {}
+        () = Room::new(args.room_key, downloads).serve(endpoint.clone()) => {}
         () = shutdown() => {}
     }
     endpoint.close(0u32.into(), b"server stopped");

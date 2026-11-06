@@ -15,8 +15,8 @@ See `README.md` for what the parts are. Run `mise run check` before calling a ch
 - Tests exercise real behavior where they can; timing logic runs on the deterministic
   simulator in `core/src/simulator.rs`, not on wall clocks.
 - No real people's names in code, tests or docs; use placeholders such as `first` or `member`.
-- `unsafe` only in `ios/ffi`, which binds native interfaces; each block says why it is sound
-  (`// SAFETY:`).
+- `unsafe` only in `ios/ffi`, which binds native interfaces, and `maxine`, which binds NVIDIA's
+  runtime; each block says why it is sound (`// SAFETY:`).
 - After changing the `ios/ffi` crate's interface, `mise run header` rewrites its C header.
 
 ## iOS

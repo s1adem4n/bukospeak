@@ -9,9 +9,9 @@
 use std::error::Error;
 use std::time::Duration;
 
-use bukospeak_core::Conditioning;
-use bukospeak_core::harness::{self, Options, Suppression};
+use bukospeak_core::harness::{self, Options};
 use bukospeak_core::proto::audio::SAMPLE_RATE;
+use bukospeak_core::{Conditioning, Suppression};
 
 /// The excerpt the delay is measured on, in seconds.
 const EXCERPT: (usize, usize) = (5, 10);

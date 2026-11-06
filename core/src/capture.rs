@@ -2,12 +2,13 @@
 //!
 //! The uplink thread owns it and hands it what the capture callback captured, in order: frames,
 //! filtered where the engine conditions the signal, and where the input stopped. It suppresses
-//! noise with DeepFilterNet3 where it has it, else with RNNoise, which tells the gate what is
-//! speech either way; evens out the level where the platform doesn't, lets the gate decide, and
-//! encodes every frame, sent or not, so the encoder stays warm. Frames that went missing on the
-//! way, or came too late, end the speech they were in as if the input had stopped there, and so
-//! does a change of how noise is suppressed: the signal before and after doesn't line up.
+//! noise as its [`Stage`] says, while RNNoise tells the gate what is speech either way; evens out
+//! the level where the platform doesn't, lets the gate decide, and encodes every frame, sent or
+//! not, so the encoder stays warm. Frames that went missing on the way, or came too late, end the
+//! speech they were in as if the input had stopped there, and so does a change of the stage: the
+//! signal before and after doesn't line up.
 
+use std::mem;
 use std::time::{Duration, Instant};
 
 use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES, Level, MAX_OPUS_LEN, SAMPLE_RATE};
@@ -15,11 +16,10 @@ use nnnoiseless::DenoiseState;
 use opus::{Application, Bitrate, Channels, Encoder, Signal};
 
 use crate::conditioner::{Conditioning, Gain};
-#[cfg(feature = "deepfilter")]
-use crate::deep_filter::DeepFilter;
 use crate::gate::{Decision, Gate};
 use crate::jitter;
 use crate::limiter::limit;
+use crate::suppression::{MAX_DELAY, Stage};
 
 /// Low enough that libopus stays in hybrid mode, where in-band FEC exists.
 const BITRATE: i32 = 48_000;
@@ -37,6 +37,8 @@ const MAX_AGE: Duration = FRAME_DURATION.saturating_mul(jitter::MAX_TARGET);
 pub(crate) const PCM_SCALE: f32 = 32_768.0;
 
 const _: () = assert!(DenoiseState::FRAME_SIZE == FRAME_SAMPLES);
+// The frames captured with a signal are kept as bits of a u32, the latest and those of the delay.
+const _: () = assert!(MAX_DELAY < u32::BITS as usize);
 // An encoded frame's length is stored as a u16.
 const _: () = assert!(MAX_OPUS_LEN <= u16::MAX as usize);
 
@@ -67,31 +69,21 @@ impl Encoded {
     }
 }
 
-/// How noise is suppressed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Suppression {
-    /// It isn't: the frames go out as captured.
-    Off,
-    RNNoise,
-    #[cfg(feature = "deepfilter")]
-    DeepFilter,
-}
-
-pub struct Capture {
-    /// RNNoise, which suppresses noise where DeepFilterNet3 doesn't, and tells the gate what is
-    /// speech.
+pub(crate) struct Capture {
+    /// RNNoise, which tells the gate what is speech, and suppresses the noise where the stage
+    /// is RNNoise.
     denoiser: Box<DenoiseState<'static>>,
-    #[cfg(feature = "deepfilter")]
-    deep_filter: Option<DeepFilter>,
-    #[cfg(feature = "deepfilter")]
-    enhanced: [f32; FRAME_SAMPLES],
+    stage: Stage,
+    /// Whether the stage changed since the frame before.
+    changed: bool,
+    /// Whether each of the latest frames was captured with a signal, the latest in the lowest
+    /// bit: the frame the stage puts out is told by the one its voice came in with.
+    signals: u32,
+    suppressed: [f32; FRAME_SAMPLES],
     /// None where the platform's audio evens out the level.
     gain: Option<Gain>,
     encoder: Encoder,
     gate: Gate,
-    noise_suppression: bool,
-    /// How the frames before were suppressed, if there were any.
-    suppressed: Option<Suppression>,
     /// The index the next frame should have, unless the input stopped before it.
     expected: Option<u32>,
     /// The latest frames the gate kept back, oldest first.
@@ -101,7 +93,7 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn new(conditioning: Conditioning) -> Result<Self, opus::Error> {
+    pub fn new(conditioning: Conditioning, stage: Stage) -> Result<Self, opus::Error> {
         let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
         encoder.set_bitrate(Bitrate::Bits(BITRATE))?;
         encoder.set_signal(Signal::Voice)?;
@@ -109,15 +101,13 @@ impl Capture {
         encoder.set_packet_loss_perc(EXPECTED_LOSS_PERCENT)?;
         Ok(Self {
             denoiser: DenoiseState::new(),
-            #[cfg(feature = "deepfilter")]
-            deep_filter: None,
-            #[cfg(feature = "deepfilter")]
-            enhanced: [0.0; FRAME_SAMPLES],
+            stage,
+            changed: false,
+            signals: 0,
+            suppressed: [0.0; FRAME_SAMPLES],
             gain: (conditioning == Conditioning::Engine).then(Gain::default),
             encoder,
             gate: Gate::default(),
-            noise_suppression: true,
-            suppressed: None,
             expected: None,
             preroll: [None; PREROLL],
             scaled: [0.0; FRAME_SAMPLES],
@@ -125,26 +115,10 @@ impl Capture {
         })
     }
 
-    /// Whether noise is suppressed (the default), or the frames go out as captured, for a
-    /// microphone whose noise is suppressed already, by the system or the device.
-    pub fn set_noise_suppression(&mut self, on: bool) {
-        self.noise_suppression = on;
-    }
-
-    /// The capture suppressing noise with DeepFilterNet3 rather than RNNoise.
-    #[cfg(feature = "deepfilter")]
-    pub(crate) fn with_deep_filter(mut self, deep_filter: DeepFilter) -> Self {
-        self.deep_filter = Some(deep_filter);
-        self
-    }
-
-    /// How noise is suppressed now.
-    pub fn suppression(&self) -> Suppression {
-        #[cfg(feature = "deepfilter")]
-        if self.noise_suppression && self.deep_filter.is_some() {
-            return Suppression::DeepFilter;
-        }
-        if self.noise_suppression { Suppression::RNNoise } else { Suppression::Off }
+    /// Suppresses noise as `stage` does from the next frame on.
+    pub fn set_stage(&mut self, stage: Stage) {
+        self.stage = stage;
+        self.changed = true;
     }
 
     /// Takes what the capture callback handed over, processed at `now`, and hands `send` what the
@@ -164,17 +138,14 @@ impl Capture {
                     self.end(expected, &mut send)?;
                 }
                 self.expected = Some(index.wrapping_add(1));
-                let suppression = self.suppression();
-                match self.suppressed.replace(suppression) {
-                    Some(before) if before != suppression => {
-                        // The frame is lost to the last frame of the speech before, and the gate
-                        // learns the room anew, as it sounds now.
-                        self.end(index, send)?;
-                        self.gate = Gate::default();
-                        Ok(())
-                    }
-                    _ => self.process(index, samples, suppression, send),
+                if mem::take(&mut self.changed) {
+                    // The frame is lost to the last frame of the speech before, and the gate
+                    // learns the room anew, as it sounds now.
+                    self.end(index, send)?;
+                    self.gate = Gate::default();
+                    return Ok(());
                 }
+                self.process(index, samples, send)
             }
             Captured::Stopped { index } => {
                 // Where frames went missing before the stop, the first of them is free for the last.
@@ -184,28 +155,23 @@ impl Capture {
         }
     }
 
-    fn process(
-        &mut self,
-        index: u32,
-        samples: &[f32; FRAME_SAMPLES],
-        suppression: Suppression,
-        mut send: impl FnMut(&Encoded),
-    ) -> Result<(), opus::Error> {
-        // Told from the frame as captured: suppression silences noise too.
-        let captured = Level::of(samples) != Level::SILENT;
-        #[cfg(feature = "deepfilter")]
-        let samples = match &mut self.deep_filter {
-            Some(deep_filter) if suppression == Suppression::DeepFilter => {
-                deep_filter.process(samples, &mut self.enhanced);
-                &self.enhanced
+    fn process(&mut self, index: u32, samples: &[f32; FRAME_SAMPLES], mut send: impl FnMut(&Encoded)) -> Result<(), opus::Error> {
+        // Told from the frame as captured, the stage's delay before: suppression silences noise
+        // too.
+        self.signals = self.signals << 1 | u32::from(Level::of(samples) != Level::SILENT);
+        let captured = self.signals >> self.stage.delay() & 1 == 1;
+        let samples = match &mut self.stage {
+            Stage::Suppressor(suppressor) => {
+                suppressor.process(samples, &mut self.suppressed);
+                &self.suppressed
             }
-            _ => samples,
+            Stage::Off | Stage::RNNoise => samples,
         };
         self.scaled.iter_mut().zip(samples).for_each(|(scaled, sample)| *scaled = sample * PCM_SCALE);
         let voice_probability = self.denoiser.process_frame(&mut self.denoised, &self.scaled);
         // Unless it suppresses the noise, RNNoise just tells the gate what is speech, in the frame
         // as it goes out.
-        let signal = if suppression == Suppression::RNNoise { &mut self.denoised } else { &mut self.scaled };
+        let signal = if matches!(self.stage, Stage::RNNoise) { &mut self.denoised } else { &mut self.scaled };
         // The gate measures the level before the gain, which follows the voice's.
         let gate_level = Level::of(&signal.map(|sample| sample / PCM_SCALE));
         let level = if let Some(gain) = &mut self.gain {
@@ -241,9 +207,9 @@ impl Capture {
     /// last frame there.
     fn end(&mut self, index: u32, send: impl FnOnce(&Encoded)) -> Result<(), opus::Error> {
         self.preroll = [None; PREROLL];
-        #[cfg(feature = "deepfilter")]
-        if let Some(deep_filter) = &mut self.deep_filter {
-            deep_filter.reset();
+        self.signals = 0;
+        if let Stage::Suppressor(suppressor) = &mut self.stage {
+            suppressor.reset();
         }
         if !self.gate.end() {
             return Ok(());
@@ -260,6 +226,9 @@ mod tests {
     use super::*;
     use crate::gate;
     use crate::signal::{noise, voice};
+    #[cfg(feature = "deepfilter")]
+    use crate::suppression::Suppression;
+    use crate::suppression::tests::Delayed;
 
     const SECOND: usize = SAMPLE_RATE as usize;
 
@@ -276,15 +245,13 @@ mod tests {
             .collect()
     }
 
-    /// Captures a signal with noise suppression, conditioned by the platform, and returns the
-    /// frames sent.
+    /// Captures a signal with RNNoise, conditioned by the platform, and returns the frames sent.
     fn capture(signal: &[f32]) -> Vec<Encoded> {
-        capture_with(signal, true, Conditioning::Platform)
+        capture_with(signal, Stage::RNNoise, Conditioning::Platform)
     }
 
-    fn capture_with(signal: &[f32], noise_suppression: bool, conditioning: Conditioning) -> Vec<Encoded> {
-        let mut capture = Capture::new(conditioning).unwrap();
-        capture.set_noise_suppression(noise_suppression);
+    fn capture_with(signal: &[f32], stage: Stage, conditioning: Conditioning) -> Vec<Encoded> {
+        let mut capture = Capture::new(conditioning, stage).unwrap();
         let start = Instant::now();
         let mut sent = Vec::new();
         for captured in frames(signal, 0, start) {
@@ -342,11 +309,11 @@ mod tests {
 
     #[test]
     fn without_suppression_noise_still_sends_nothing_and_speech_goes_out_as_captured() {
-        assert!(capture_with(&noise(3 * SECOND, 0.05), false, Conditioning::Platform).is_empty());
+        assert!(capture_with(&noise(3 * SECOND, 0.05), Stage::Off, Conditioning::Platform).is_empty());
 
         let signal = voice(2 * SECOND, 0.3);
         let frames = signal.as_chunks::<FRAME_SAMPLES>().0;
-        let sent = capture_with(&signal, false, Conditioning::Platform);
+        let sent = capture_with(&signal, Stage::Off, Conditioning::Platform);
         assert!(sent.len() >= 150, "only {} frames of 2 s of speech sent", sent.len());
         for frame in sent {
             assert_eq!(frame.level, Level::of(&frames[frame.index as usize]), "frame {}", frame.index);
@@ -356,7 +323,7 @@ mod tests {
     #[test]
     fn conditioned_quiet_speech_goes_out_louder_and_noise_still_sends_nothing() {
         let loudest = |conditioning| {
-            let sent = capture_with(&voice(5 * SECOND, 0.03), true, conditioning);
+            let sent = capture_with(&voice(5 * SECOND, 0.03), Stage::RNNoise, conditioning);
             assert!(sent.len() >= 400, "only {} frames of 5 s of speech sent", sent.len());
             sent.iter().map(|frame| frame.level.minus_dbov()).min().unwrap()
         };
@@ -364,12 +331,12 @@ mod tests {
         assert!(conditioned + 15 <= captured, "loudest frame at −{captured} dBov, conditioned at −{conditioned} dBov");
 
         let signal: Vec<f32> = [vec![0.0; SECOND], noise(3 * SECOND, 0.05), vec![0.0; SECOND]].concat();
-        assert!(capture_with(&signal, true, Conditioning::Engine).is_empty());
+        assert!(capture_with(&signal, Stage::RNNoise, Conditioning::Engine).is_empty());
     }
 
     #[test]
     fn conditioned_speech_is_captured_without_allocating() {
-        let mut capture = Capture::new(Conditioning::Engine).unwrap();
+        let mut capture = Capture::new(Conditioning::Engine, Stage::RNNoise).unwrap();
         let start = Instant::now();
         let frames = frames(&voice(2 * SECOND, 0.3), 0, start);
         let (first, rest) = frames.split_first().unwrap();
@@ -395,7 +362,7 @@ mod tests {
 
     #[test]
     fn stopping_in_speech_sends_a_silent_last_frame_at_the_index_kept_free_and_capture_starts_anew() {
-        let mut capture = Capture::new(Conditioning::Platform).unwrap();
+        let mut capture = Capture::new(Conditioning::Platform, Stage::RNNoise).unwrap();
         let start = Instant::now();
         let sent = take_all(&mut capture, frames(&voice(SECOND, 0.3), 0, start), start);
         assert!(!sent.last().unwrap().last, "still speaking");
@@ -415,7 +382,7 @@ mod tests {
 
     #[test]
     fn frames_missing_in_speech_end_it_at_the_first_of_them() {
-        let mut capture = Capture::new(Conditioning::Platform).unwrap();
+        let mut capture = Capture::new(Conditioning::Platform, Stage::RNNoise).unwrap();
         let start = Instant::now();
         let captured = frames(&voice(2 * SECOND, 0.3), 0, start)
             .into_iter()
@@ -430,7 +397,7 @@ mod tests {
 
     #[test]
     fn a_stop_after_missing_frames_ends_the_speech_at_the_first_of_them() {
-        let mut capture = Capture::new(Conditioning::Platform).unwrap();
+        let mut capture = Capture::new(Conditioning::Platform, Stage::RNNoise).unwrap();
         let start = Instant::now();
         assert!(!take_all(&mut capture, frames(&voice(SECOND, 0.3), 0, start), start).is_empty());
         let ended = take_all(&mut capture, [Captured::Stopped { index: 103 }], start);
@@ -439,7 +406,7 @@ mod tests {
 
     #[test]
     fn frames_too_late_to_be_heard_are_discarded_as_missing() {
-        let mut capture = Capture::new(Conditioning::Platform).unwrap();
+        let mut capture = Capture::new(Conditioning::Platform, Stage::RNNoise).unwrap();
         let start = Instant::now();
         let sent = take_all(&mut capture, frames(&voice(SECOND, 0.3), 0, start), start);
         assert!(!sent.is_empty());
@@ -450,16 +417,29 @@ mod tests {
 
     #[test]
     fn indices_wrap_around_without_a_gap() {
-        let mut capture = Capture::new(Conditioning::Platform).unwrap();
+        let mut capture = Capture::new(Conditioning::Platform, Stage::RNNoise).unwrap();
         let start = Instant::now();
         let sent = take_all(&mut capture, frames(&voice(2 * SECOND, 0.3), u32::MAX - 100, start), start);
         assert_eq!(sent.iter().filter(|frame| frame.last).count(), 0, "no end where the index wrapped");
         assert!(sent.iter().any(|frame| frame.index < 100));
     }
 
+    #[test]
+    fn a_suppressor_that_delays_the_voice_sends_it_as_had_it_been_captured_that_much_later() {
+        let signal: Vec<f32> = [vec![0.0; SECOND], voice(2 * SECOND, 0.3), vec![0.0; SECOND]].concat();
+        let delay = 8;
+        let later: Vec<f32> = [vec![0.0; delay * FRAME_SAMPLES], signal.clone()].concat();
+        let sent = capture_with(&signal, Stage::Suppressor(Box::new(Delayed::new(delay))), Conditioning::Platform);
+        let captured_later = capture_with(&later, Stage::Off, Conditioning::Platform);
+        let frames =
+            |sent: &[Encoded]| sent.iter().map(|frame| (frame.index, frame.last, frame.level, frame.opus().to_vec())).collect::<Vec<_>>();
+        assert!(!sent.is_empty());
+        assert_eq!(frames(&sent), frames(&captured_later[..sent.len()]));
+    }
+
     #[cfg(feature = "deepfilter")]
     fn deep_filtered() -> Capture {
-        Capture::new(Conditioning::Platform).unwrap().with_deep_filter(DeepFilter::new().unwrap())
+        Capture::new(Conditioning::Platform, Stage::new(&Suppression::DeepFilter)).unwrap()
     }
 
     #[test]
@@ -468,7 +448,7 @@ mod tests {
         let start = Instant::now();
         let signal: Vec<f32> = [vec![0.0; SECOND], noise(3 * SECOND, 0.05), vec![0.0; SECOND]].concat();
         let mut capture = deep_filtered();
-        assert_eq!(capture.suppression(), Suppression::DeepFilter);
+        assert!(matches!(capture.stage, Stage::Suppressor(_)));
         assert!(take_all(&mut capture, frames(&signal, 0, start), start).is_empty());
 
         let sent = take_all(&mut deep_filtered(), frames(&voice(2 * SECOND, 0.3), 0, start), start);
@@ -497,7 +477,7 @@ mod tests {
         let captured = frames(&voice(3 * SECOND, 0.3), 0, start);
         let sent = take_all(&mut capture, captured[..100].iter().copied(), start);
         assert!(!sent.last().unwrap().last, "still speaking");
-        capture.set_noise_suppression(false);
+        capture.set_stage(Stage::Off);
         let sent = take_all(&mut capture, captured[100..].iter().copied(), start);
         assert!(sent[0].last && sent[0].index == 100, "the speech ends at frame 100");
         // The gate learns the room anew, so the speech goes on once the denoiser settled.
@@ -514,11 +494,12 @@ mod tests {
         take_all(&mut capture, [Captured::Stopped { index: 100 }], start);
 
         let frame = signal.as_chunks::<FRAME_SAMPLES>().0[0];
-        let mut new = DeepFilter::new().unwrap();
+        let Stage::Suppressor(mut new) = Stage::new(&Suppression::DeepFilter) else { panic!("DeepFilterNet3 builds") };
+        let Stage::Suppressor(after) = &mut capture.stage else { panic!("DeepFilterNet3 runs") };
         let (mut after_stop, mut fresh) = ([0.0; FRAME_SAMPLES], [0.0; FRAME_SAMPLES]);
         // Through the model's delay, so what comes out is what went in after the stop.
         for _ in 0..4 {
-            capture.deep_filter.as_mut().unwrap().process(&frame, &mut after_stop);
+            after.process(&frame, &mut after_stop);
             new.process(&frame, &mut fresh);
         }
         assert_eq!(after_stop, fresh);

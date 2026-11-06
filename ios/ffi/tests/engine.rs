@@ -89,7 +89,7 @@ fn serve() -> Server {
     let identity = Identity::generate().unwrap();
     let endpoint = runtime.block_on(async { bukospeak_server::endpoint(&identity, "127.0.0.1:0".parse().unwrap()) }).unwrap();
     let address = endpoint.local_addr().unwrap().to_string();
-    runtime.spawn(Room::new(ROOM_KEY.into()).serve(endpoint));
+    runtime.spawn(Room::new(ROOM_KEY.into(), None).serve(endpoint));
     Server { _runtime: runtime, address, fingerprint: identity.fingerprint().0 }
 }
 

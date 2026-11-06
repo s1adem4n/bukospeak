@@ -2,8 +2,8 @@
 //! capture callback wakes it, since waking a thread is all a realtime callback may do.
 
 use std::io;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread::{self, Thread};
 use std::time::Instant;
 
@@ -12,22 +12,35 @@ use bukospeak_proto::audio::Frame;
 use rtrb::Consumer;
 
 use crate::capture::{Capture, Captured};
-use crate::microphone::Settings;
 use crate::session::AudioSender;
 use crate::speaking::Speaking;
+use crate::suppression::Stage;
 
-/// Starts the uplink; it ends when the microphone is gone.
+/// A stage made for the suppression chosen as the `choice`-th.
+pub struct Made {
+    pub choice: u64,
+    pub stage: Stage,
+}
+
+/// Starts the uplink; it ends when the microphone is gone. It suppresses noise with each stage
+/// `made` hands it that is for the latest suppression `chosen`, from the next frame on.
 pub fn spawn(
     mut captured: Consumer<Captured>,
     mut capture: Capture,
+    made: mpsc::Receiver<Made>,
+    chosen: Arc<AtomicU64>,
     sender: AudioSender,
-    settings: Arc<Settings>,
     speaking: Arc<Speaking>,
 ) -> io::Result<Thread> {
     let uplink = thread::Builder::new().name("bukospeak-uplink".into()).spawn(move || {
         loop {
             while let Ok(next) = captured.pop() {
-                capture.set_noise_suppression(settings.noise_suppression.load(Ordering::Relaxed));
+                // Stages may be made out of order; one for an earlier choice is dropped.
+                for Made { choice, stage } in made.try_iter() {
+                    if choice == chosen.load(Ordering::Relaxed) {
+                        capture.set_stage(stage);
+                    }
+                }
                 let mut last_sent = None;
                 // libopus fails only on arguments the fixed frame size rules out; such a frame
                 // is lost.

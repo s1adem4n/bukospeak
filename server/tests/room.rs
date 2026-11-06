@@ -22,7 +22,7 @@ fn serve() -> Server {
     let identity = Identity::generate().unwrap();
     let endpoint = endpoint(&identity, "127.0.0.1:0".parse().unwrap()).unwrap();
     let address = endpoint.local_addr().unwrap();
-    tokio::spawn(Room::new(ROOM_KEY.into()).serve(endpoint));
+    tokio::spawn(Room::new(ROOM_KEY.into(), None).serve(endpoint));
     Server { address, fingerprint: identity.fingerprint() }
 }
 

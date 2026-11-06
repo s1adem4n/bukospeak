@@ -38,7 +38,7 @@ pub enum Error {
     Resolve(String),
     #[error("the server's certificate changed: pinned {pinned}, presented {presented}")]
     FingerprintChanged { pinned: Fingerprint, presented: Fingerprint },
-    #[error("the server turned the join away")]
+    #[error("the server turned the client away")]
     Rejected(#[from] Rejection),
     #[error(transparent)]
     Connect(#[from] quinn::ConnectError),
@@ -46,12 +46,16 @@ pub enum Error {
     Connection(#[from] quinn::ConnectionError),
     #[error(transparent)]
     Control(#[from] control::Error),
+    #[error(transparent)]
+    Read(#[from] quinn::ReadError),
     #[error("the server broke the protocol: {0}")]
     Protocol(&'static str),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("the server didn't answer within {} s", JOIN_TIMEOUT.as_secs())]
     TimedOut,
+    #[error("{0} came other than the server listed it")]
+    Damaged(String),
 }
 
 /// What happens in the channel after the join.
@@ -139,9 +143,13 @@ impl Session {
                     Some(Ok(ServerMessage::Joined { member })) => return Ok(Event::Joined(member)),
                     Some(Ok(ServerMessage::Changed { member })) => return Ok(Event::Changed(member)),
                     Some(Ok(ServerMessage::Left { id })) => return Ok(Event::Left(id)),
-                    Some(Ok(ServerMessage::Welcome { .. } | ServerMessage::Present { .. } | ServerMessage::Rejected { .. })) => {
-                        return Err(Error::Protocol("a Welcome, Present or Rejected after the join"));
-                    }
+                    Some(Ok(
+                        ServerMessage::Welcome { .. }
+                        | ServerMessage::Present { .. }
+                        | ServerMessage::Rejected { .. }
+                        | ServerMessage::Preparing { .. }
+                        | ServerMessage::Files { .. },
+                    )) => return Err(Error::Protocol("a message after the join that only answers a client's first")),
                     Some(Err(error)) => return Err(error.into()),
                     None => return Err(self.connection.closed().await.into()),
                 },
@@ -205,20 +213,20 @@ impl Watch {
 }
 
 /// A connection to the server, trusted by its pin, whose first message the server answered.
-struct Opened {
-    endpoint: Endpoint,
-    connection: Connection,
-    send: SendStream,
+pub(crate) struct Opened {
+    pub(crate) endpoint: Endpoint,
+    pub(crate) connection: Connection,
+    pub(crate) send: SendStream,
     /// The server's messages after its answer.
-    control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
-    fingerprint: Fingerprint,
+    pub(crate) control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
+    pub(crate) fingerprint: Fingerprint,
 }
 
 impl Opened {
     /// Connects to the server, trusting it by `pin`, or on first use if it is None, and sends
     /// `first`; the server's answer comes along, unless it is a Rejected or doesn't come within
     /// [`JOIN_TIMEOUT`].
-    async fn with(server: &str, pin: Option<Fingerprint>, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
+    pub(crate) async fn with(server: &str, pin: Option<Fingerprint>, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
         tokio::time::timeout(JOIN_TIMEOUT, Self::unbounded(server, pin, first)).await.unwrap_or(Err(Error::TimedOut))
     }
 

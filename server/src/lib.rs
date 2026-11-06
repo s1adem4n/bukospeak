@@ -1,7 +1,9 @@
 //! The voice server: one channel that relays each member's audio to everyone else.
 
 mod certificate;
+mod downloads;
 mod identity;
+mod ngc;
 mod room;
 
 use std::net::SocketAddr;
@@ -11,7 +13,9 @@ use anyhow::Context;
 use bukospeak_proto::{ALPN, IDLE_TIMEOUT};
 use quinn::crypto::rustls::QuicServerConfig;
 
+pub use downloads::{Downloads, Source, compress};
 pub use identity::Identity;
+pub use ngc::Ngc;
 pub use room::Room;
 
 /// A QUIC endpoint on `listen` that presents the identity's certificate.

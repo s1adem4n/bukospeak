@@ -87,6 +87,12 @@ pub enum Trouble {
     /// The keyring couldn't be read: the room key is to be given anew.
     RoomKeyUnreadable,
     RoomKeyNotKept,
+    /// The server offers no NVIDIA effects for the card: Standard suppresses the noise.
+    NvidiaUnavailable,
+    /// NVIDIA's effects didn't install: Standard suppresses the noise.
+    NvidiaNotInstalled,
+    /// NVIDIA's effect didn't start: Standard suppresses the noise instead.
+    NvidiaFailed,
 }
 
 /// The screen the window shows.

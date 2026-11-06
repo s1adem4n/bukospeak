@@ -1,0 +1,23 @@
+[package]
+name = "bukospeak-maxine"
+description = "NVIDIA Maxine's audio effects on RTX cards, through NVIDIA's runtime loaded at runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+libloading.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hound.workspace = true
+
+# The workspace's lints, but with unsafe code: this crate binds NVIDIA's runtime.
+[lints.rust]
+unused_qualifications = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

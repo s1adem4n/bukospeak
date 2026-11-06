@@ -19,7 +19,6 @@ use crate::echo::Tap;
 
 /// The engine's settings the capture and the speaker follow.
 pub(crate) struct Settings {
-    pub noise_suppression: AtomicBool,
     pub echo_cancellation: AtomicBool,
     pub muted: AtomicBool,
     /// The gain on what the speaker plays, as an `f32`'s bits.
@@ -28,12 +27,7 @@ pub(crate) struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
-            noise_suppression: AtomicBool::new(true),
-            echo_cancellation: AtomicBool::new(true),
-            muted: AtomicBool::new(false),
-            volume: AtomicU32::new(1.0f32.to_bits()),
-        }
+        Self { echo_cancellation: AtomicBool::new(true), muted: AtomicBool::new(false), volume: AtomicU32::new(1.0f32.to_bits()) }
     }
 }
 

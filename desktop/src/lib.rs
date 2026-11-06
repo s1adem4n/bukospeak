@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod call;
 pub mod known_servers;
+pub mod nvidia;
 pub mod settings;
 
 use std::path::{Path, PathBuf};

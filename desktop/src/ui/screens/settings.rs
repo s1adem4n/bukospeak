@@ -3,6 +3,8 @@
 
 use bukospeak_core::MAX_VOLUME;
 use bukospeak_desktop::audio::{self, Direction};
+use bukospeak_desktop::nvidia::Progress;
+use bukospeak_desktop::settings::Suppression;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Context, DismissEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
@@ -40,6 +42,21 @@ fn choices(devices: impl IntoIterator<Item = (String, String)>, kept: Option<&st
     choices
 }
 
+/// A menu of the settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opened {
+    Device(Direction),
+    Suppression,
+}
+
+/// The choices of noise suppression, by their titles; NVIDIA's on an RTX card.
+const SUPPRESSIONS: [(Suppression, &str); 4] = [
+    (Suppression::Off, "Aus"),
+    (Suppression::Standard, "Standard"),
+    (Suppression::NvidiaDereverbDenoiser, "NVIDIA Rauschen und Hall"),
+    (Suppression::NvidiaStudioVoice, "NVIDIA Studio Voice"),
+];
+
 pub struct Settings {
     client: Entity<Client>,
     name: Entity<InlineField>,
@@ -51,8 +68,8 @@ pub struct Settings {
     outputs: Vec<Choice>,
     volume: Entity<Slider>,
     level: Entity<InputLevel>,
-    /// The menu of devices open, for the direction it chooses.
-    menu: Option<(Direction, Entity<Menu>, Subscription)>,
+    /// The menu open, and which it is.
+    menu: Option<(Opened, Entity<Menu>, Subscription)>,
     _subscriptions: Vec<Subscription>,
     _listing: Task<()>,
 }
@@ -151,7 +168,7 @@ impl Settings {
         let chosen =
             choices.iter().find(|choice| choice.id.as_deref() == kept).map_or_else(|| "Standard".into(), |choice| choice.title.clone());
         let tokens = cx.tokens();
-        let open = self.menu.as_ref().filter(|(shown, ..)| *shown == direction).map(|(_, menu, _)| menu);
+        let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Device(direction)).map(|(_, menu, _)| menu);
         div()
             .relative()
             .child(
@@ -201,18 +218,93 @@ impl Settings {
             let menu = if devices.is_empty() { menu } else { menu.separator() };
             devices.iter().fold(menu, |menu, choice| menu.item(item(choice)))
         });
+        self.show(Opened::Device(direction), menu, cx);
+    }
+
+    /// Shows `menu` until it is dismissed.
+    fn show(&mut self, opened: Opened, menu: Entity<Menu>, cx: &mut Context<Self>) {
         let closed = cx.subscribe(&menu, |settings, _, _: &DismissEvent, cx| {
             settings.menu = None;
             cx.notify();
         });
-        self.menu = Some((direction, menu, closed));
+        self.menu = Some((opened, menu, closed));
         cx.notify();
+    }
+
+    /// The row that chooses the noise suppression from a menu, and tells how far installing
+    /// NVIDIA's effects got.
+    fn render_suppression(&self, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let chosen =
+            SUPPRESSIONS.iter().find(|(suppression, _)| *suppression == client.settings.suppression).map_or("", |(_, title)| title);
+        let installing = client.nvidia.as_ref().and_then(|nvidia| nvidia.installing).map(|progress| match progress {
+            Progress::Preparing { done, total } => format!("Vorbereitung {} %", (done * 100).checked_div(total).unwrap_or(0)),
+            Progress::Fetching { done, total } => format!("Lädt {} %", (done * 100).checked_div(total).unwrap_or(0)),
+        });
+        let tokens = cx.tokens();
+        let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Suppression).map(|(_, menu, _)| menu);
+        div()
+            .relative()
+            .child(
+                Button::new("suppression", Variant::Ghost)
+                    .w_full()
+                    .h(theme::ROW)
+                    .px(theme::PANEL_INSET - theme::PANEL_PAD)
+                    .justify_between()
+                    .gap_3()
+                    .font_weight(FontWeight::NORMAL)
+                    .selected(open.is_some())
+                    .child(div().flex_none().text_color(tokens.text).child("Rauschunterdrückung"))
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_1p5()
+                            .children(installing.map(|installing| {
+                                div()
+                                    .flex_none()
+                                    .mr_1()
+                                    .font_family(theme::MONO)
+                                    .text_size(theme::TEXT_SM)
+                                    .text_color(tokens.text_faint)
+                                    .child(installing)
+                            }))
+                            .child(div().min_w_0().truncate().child(chosen))
+                            .child(Icon::new(Glyph::Choose).size(theme::ICON_SM).color(tokens.text_faint)),
+                    )
+                    .on_click(cx.listener(|settings, _, window, cx| settings.open_suppressions(window, cx))),
+            )
+            .children(open.map(|menu| Popover::new(menu, Place::BelowEnd)))
+            .into_any_element()
+    }
+
+    /// Opens the menu of noise suppressions, the one chosen checked.
+    fn open_suppressions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let read = self.client.read(cx);
+        let (chosen, nvidia) = (read.settings.suppression, read.nvidia.is_some());
+        let client = self.client.downgrade();
+        let menu = Menu::open(window, cx, |menu| {
+            let item = |&(suppression, title): &(Suppression, &'static str)| {
+                let client = client.clone();
+                Item::new(title, move |_, cx| {
+                    // The window may be gone with the choice.
+                    let _ = client.update(cx, |client, cx| client.set_suppression(suppression, cx));
+                })
+                .checked(suppression == chosen)
+            };
+            let (built_in, nvidias) = SUPPRESSIONS.split_at(2);
+            let menu = built_in.iter().fold(menu, |menu, choice| menu.item(item(choice)));
+            match nvidia {
+                true => nvidias.iter().fold(menu.separator(), |menu, choice| menu.item(item(choice))),
+                false => menu,
+            }
+        });
+        self.show(Opened::Suppression, menu, cx);
     }
 
     fn render_audio(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = &self.client.read(cx).settings;
         let tokens = cx.tokens();
-        let (percent, noise, echo) = (settings.volume, settings.noise_suppression, settings.echo_cancellation);
+        let (percent, echo) = (settings.volume, settings.echo_cancellation);
         let volume = kit::row("Lautstärke", cx).child(
             h_flex().flex_none().w(theme::VOLUME).gap_3().child(div().flex_1().child(self.volume.clone())).child(
                 div()
@@ -229,7 +321,7 @@ impl Settings {
                 self.render_device(Direction::Input, cx),
                 self.render_device(Direction::Output, cx),
                 volume.into_any_element(),
-                self.render_switch("noise", "Rauschunterdrückung", noise, Client::set_noise_suppression, cx),
+                self.render_suppression(cx),
                 self.render_switch("echo", "Echounterdrückung", echo, Client::set_echo_cancellation, cx),
             ],
             cx,

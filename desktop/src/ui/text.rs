@@ -13,6 +13,7 @@ pub fn failure(failure: &Failure) -> &'static str {
         Failure::Rejected(Rejection::Name) => "Name nicht erlaubt",
         Failure::Rejected(Rejection::Full) => "Kanal ist voll",
         Failure::Rejected(Rejection::Version) => "Server-Version passt nicht",
+        Failure::Rejected(Rejection::Unavailable) => "Download nicht verfügbar",
         Failure::NotFound => "Server nicht gefunden",
         Failure::NoAnswer => "Server antwortet nicht",
         Failure::Unreachable => "Keine Verbindung zum Server",
@@ -38,5 +39,8 @@ pub fn trouble(trouble: Trouble) -> &'static str {
         Trouble::NotSaved => "Einstellungen nicht gespeichert",
         Trouble::RoomKeyUnreadable => "Raumschlüssel nicht lesbar",
         Trouble::RoomKeyNotKept => "Raumschlüssel nicht gespeichert",
+        Trouble::NvidiaUnavailable => "NVIDIA-Effekte nicht verfügbar",
+        Trouble::NvidiaNotInstalled => "NVIDIA-Effekte nicht geladen",
+        Trouble::NvidiaFailed => "NVIDIA-Effekt nicht gestartet",
     }
 }

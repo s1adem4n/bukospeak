@@ -2,12 +2,16 @@
 //! and the tray and the hotkey act on them, with or without a window open.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use bukospeak_core::Error;
+use bukospeak_core::proto::control::Rejection;
 use bukospeak_desktop::audio::Direction;
 use bukospeak_desktop::call::{Call, Happening, Phase};
-use bukospeak_desktop::settings::{self as stored, Settings};
+use bukospeak_desktop::nvidia::{self, Architecture, Effects, Progress};
+use bukospeak_desktop::settings::{self as stored, Settings, Suppression};
 use futures::StreamExt;
-use futures::channel::mpsc::UnboundedReceiver;
+use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{AppContext, Context, EventEmitter, Task};
 
 use crate::ui::Trouble;
@@ -26,6 +30,32 @@ pub enum Missing {
 
 impl EventEmitter<RoomKeyRead> for Client {}
 
+/// NVIDIA's effects on the system's RTX card.
+pub struct Nvidia {
+    architecture: Architecture,
+    /// The effects, once installed.
+    effects: Option<Arc<Effects>>,
+    /// How far the installation going on got.
+    pub installing: Option<Progress>,
+    /// Tells the app that an effect didn't start.
+    failed: mpsc::UnboundedSender<()>,
+}
+
+impl Nvidia {
+    /// The effects, if installed.
+    fn installed(&self) -> Option<Arc<Effects>> {
+        let failed = self.failed.clone();
+        // The app hears of it as long as it runs.
+        Effects::installed(self.architecture, move || _ = failed.unbounded_send(()))
+    }
+}
+
+/// What the installation's thread tells.
+enum Installing {
+    Progress(Progress),
+    Done(Result<(), nvidia::Error>),
+}
+
 pub struct Client {
     pub call: Call,
     pub settings: Settings,
@@ -37,8 +67,11 @@ pub struct Client {
     pub mute_keys: Option<&'static str>,
     /// Whether a window shows the channel from outside, so who is in it is watched.
     lobby: bool,
+    /// NVIDIA's effects, once the system's RTX card was found.
+    pub nvidia: Option<Nvidia>,
     _happenings: Task<()>,
     _room_key: Task<()>,
+    _card: Task<()>,
 }
 
 impl Client {
@@ -53,7 +86,7 @@ impl Client {
     ) -> Self {
         call.set_device(Direction::Input, settings.device(Direction::Input));
         call.set_device(Direction::Output, settings.device(Direction::Output));
-        call.set_noise_suppression(settings.noise_suppression);
+        call.set_suppression(settings.suppression.engines(None));
         call.set_echo_cancellation(settings.echo_cancellation);
         call.set_volume(settings.volume);
         let happenings = cx.spawn(async move |this, cx| {
@@ -74,6 +107,13 @@ impl Client {
             // The app may be quitting before the keyring answered.
             let _ = this.update(cx, |client, cx| client.read_room_key(read, cx));
         });
+        // CUDA takes a moment to tell the card.
+        let card = cx.spawn(async move |this, cx| {
+            if let Some(architecture) = cx.background_spawn(async { nvidia::card() }).await {
+                // The app may be quitting before the card was found.
+                let _ = this.update(cx, |client, cx| client.found(architecture, cx));
+            }
+        });
         Self {
             call,
             settings,
@@ -82,9 +122,117 @@ impl Client {
             trouble,
             mute_keys,
             lobby: false,
+            nvidia: None,
             _happenings: happenings,
             _room_key: room_key,
+            _card: card,
         }
+    }
+
+    /// Takes in the system's RTX card: NVIDIA's effects suppress the noise from now on if they
+    /// are chosen, once installed.
+    fn found(&mut self, architecture: Architecture, cx: &mut Context<Self>) {
+        let (failed, failures) = mpsc::unbounded();
+        cx.spawn(async move |this, cx| {
+            let mut failures = failures;
+            while failures.next().await.is_some() {
+                let told = this.update(cx, |client, cx| {
+                    client.trouble = Some(Trouble::NvidiaFailed);
+                    cx.notify();
+                });
+                if told.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let mut nvidia = Nvidia { architecture, effects: None, installing: None, failed };
+        nvidia.effects = nvidia.installed();
+        self.nvidia = Some(nvidia);
+        self.suppress(cx);
+    }
+
+    /// Suppresses the noise as chosen, installing NVIDIA's effects first if they are chosen and
+    /// not installed: Standard suppresses it meanwhile.
+    fn suppress(&mut self, cx: &mut Context<Self>) {
+        let effects = self.nvidia.as_ref().and_then(|nvidia| nvidia.effects.as_ref());
+        self.call.set_suppression(self.settings.suppression.engines(effects));
+        if self.settings.suppression.nvidia().is_some()
+            && let Some(nvidia) = &self.nvidia
+            && nvidia.effects.is_none()
+            && nvidia.installing.is_none()
+        {
+            self.install(nvidia.architecture, cx);
+        }
+        cx.notify();
+    }
+
+    /// Installs NVIDIA's effects for `architecture` from the server, on a thread of its own:
+    /// it may take minutes.
+    fn install(&mut self, architecture: Architecture, cx: &mut Context<Self>) {
+        let (server, room_key, known) =
+            (self.settings.server.trim().to_owned(), self.room_key().to_owned(), self.call.known_servers().clone());
+        if let Some(nvidia) = &mut self.nvidia {
+            nvidia.installing = Some(Progress::Preparing { done: 0, total: 0 });
+        }
+        let (tell, mut told) = mpsc::unbounded();
+        let progress = tell.clone();
+        std::thread::Builder::new()
+            .name("bukospeak-nvidia".into())
+            .spawn(move || {
+                let mut shown = None;
+                let installed = nvidia::install(&server, room_key, &known, architecture, |now| {
+                    // Each percent, not each chunk: the window redraws for each.
+                    let percent = match now {
+                        Progress::Preparing { done, total } | Progress::Fetching { done, total } => (done * 100).checked_div(total),
+                    };
+                    if shown.replace((std::mem::discriminant(&now), percent)) != Some((std::mem::discriminant(&now), percent)) {
+                        // The app may be quitting; the installation goes on to the end regardless.
+                        let _ = progress.unbounded_send(Installing::Progress(now));
+                    }
+                });
+                // As above.
+                let _ = tell.unbounded_send(Installing::Done(installed));
+            })
+            .expect("the installation's thread starts");
+        cx.spawn(async move |this, cx| {
+            while let Some(told) = told.next().await {
+                let applied = this.update(cx, |client, cx| match told {
+                    Installing::Progress(progress) => {
+                        if let Some(nvidia) = &mut client.nvidia {
+                            nvidia.installing = Some(progress);
+                        }
+                        cx.notify();
+                    }
+                    Installing::Done(installed) => client.installed(installed, cx),
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Takes in how installing NVIDIA's effects ended: they suppress the noise if chosen, or
+    /// Standard does once they couldn't be installed.
+    fn installed(&mut self, installed: Result<(), nvidia::Error>, cx: &mut Context<Self>) {
+        let Some(nvidia) = &mut self.nvidia else { return };
+        nvidia.installing = None;
+        match installed {
+            Ok(()) => nvidia.effects = nvidia.installed(),
+            Err(error) => {
+                tracing::warn!("installing NVIDIA's effects: {error}");
+                self.trouble = Some(match error {
+                    nvidia::Error::Download(Error::Rejected(Rejection::Unavailable)) => Trouble::NvidiaUnavailable,
+                    _ => Trouble::NvidiaNotInstalled,
+                });
+                if self.settings.suppression.nvidia().is_some() {
+                    self.change(|settings| settings.suppression = Suppression::Standard, cx);
+                }
+            }
+        }
+        self.suppress(cx);
     }
 
     /// Takes in the room key the keyring kept, unless one was given meanwhile.
@@ -209,9 +357,9 @@ impl Client {
         self.call.set_device(direction, self.settings.device(direction));
     }
 
-    pub fn set_noise_suppression(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.change(|settings| settings.noise_suppression = on, cx);
-        self.call.set_noise_suppression(on);
+    pub fn set_suppression(&mut self, suppression: Suppression, cx: &mut Context<Self>) {
+        self.change(|settings| settings.suppression = suppression, cx);
+        self.suppress(cx);
     }
 
     pub fn set_echo_cancellation(&mut self, on: bool, cx: &mut Context<Self>) {

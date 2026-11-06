@@ -7,7 +7,8 @@
 //! last through joining again.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::atomic::Ordering;
+use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -28,7 +29,8 @@ use crate::playout::Mixer;
 use crate::session::{self, AudioSender, Entry, Error, JoinConfig, Session, Watch};
 use crate::speaker::{Downlink, Speaker};
 use crate::speaking::Speaking;
-use crate::uplink;
+use crate::suppression::{Stage, Suppression};
+use crate::uplink::{self, Made};
 
 /// The loudest [`Engine::set_volume`] plays the others: 6 dB above their level.
 pub const MAX_VOLUME: f32 = 2.0;
@@ -84,6 +86,10 @@ pub struct Engine {
     muted: watch::Sender<bool>,
     calls: Mutex<Calls>,
     watch: Mutex<Option<Running>>,
+    suppressing: Mutex<Suppressing>,
+    /// How many times a suppression was chosen: the stages made for an earlier choice are
+    /// dropped.
+    chosen: Arc<AtomicU64>,
     // Fields drop in order: the last sender of events goes before the listener's thread, which
     // ends with it, is waited for.
     events: mpsc::Sender<Event>,
@@ -108,6 +114,27 @@ struct Calls {
     running: Option<Running>,
 }
 
+/// The suppression chosen, and the call's uplink, which takes the stages made for it.
+struct Suppressing {
+    suppression: Suppression,
+    uplink: Option<mpsc::Sender<Made>>,
+}
+
+impl Suppressing {
+    /// Makes the stage of the `choice`-th suppression for the call's uplink, if there is a call,
+    /// on a thread of its own: loading a plugged-in suppressor may take seconds.
+    fn make(&self, choice: u64) -> io::Result<()> {
+        let Some(uplink) = self.uplink.clone() else { return Ok(()) };
+        let suppression = self.suppression.clone();
+        thread::Builder::new().name("bukospeak-suppression".into()).spawn(move || {
+            let stage = Stage::new(&suppression);
+            // The call may be over by now, and its uplink gone with it.
+            let _ = uplink.send(Made { choice, stage });
+        })?;
+        Ok(())
+    }
+}
+
 /// A call or a watch, on the runtime until it is stopped.
 struct Running {
     stop: oneshot::Sender<()>,
@@ -116,7 +143,7 @@ struct Running {
 
 impl Engine {
     /// An engine whose calls condition the microphone's signal as `conditioning` says.
-    pub fn new(conditioning: Conditioning, listener: Arc<dyn Listener>) -> std::io::Result<Self> {
+    pub fn new(conditioning: Conditioning, listener: Arc<dyn Listener>) -> io::Result<Self> {
         // One worker runs the network side; a current-thread runtime would run it only while
         // a call into the engine blocks on it.
         let runtime =
@@ -140,6 +167,8 @@ impl Engine {
             muted: watch::Sender::new(false),
             calls: Mutex::default(),
             watch: Mutex::default(),
+            suppressing: Mutex::new(Suppressing { suppression: Suppression::built_in(), uplink: None }),
+            chosen: Arc::default(),
             events,
             _listening: Listening(Some(listening)),
         })
@@ -153,8 +182,13 @@ impl Engine {
         self.end(calls.running.take());
         self.unwatch();
         let conditioning = self.conditioning;
-        // Built while the session joins, which hides most of the time DeepFilterNet3 takes.
-        let capture = thread::Builder::new().name("bukospeak-capture".into()).spawn(move || capture(conditioning))?;
+        let (suppression, choice) = {
+            let mut suppressing = self.suppressing();
+            suppressing.uplink = None;
+            (suppressing.suppression.clone(), self.chosen.load(Ordering::Relaxed))
+        };
+        // Built while the session joins, which hides the time a plugged-in suppressor takes to load.
+        let capture = thread::Builder::new().name("bukospeak-capture".into()).spawn(move || capture(conditioning, &suppression))?;
         // libopus creates codecs without fail for the fixed formats asked for.
         let mixer = Mixer::new().expect("the decoders can be created");
 
@@ -169,7 +203,17 @@ impl Engine {
         let speaking = Arc::new(Speaking::default());
         let (frames, uplink_frames) = RingBuffer::new(UPLINK_FRAMES);
         let sender = session.audio_sender();
-        let uplink = uplink::spawn(uplink_frames, capture, sender.clone(), Arc::clone(&self.settings), Arc::clone(&speaking))?;
+        let (made, uplink_made) = mpsc::channel();
+        let uplink = uplink::spawn(uplink_frames, capture, uplink_made, Arc::clone(&self.chosen), sender.clone(), Arc::clone(&speaking))?;
+        {
+            let mut suppressing = self.suppressing();
+            suppressing.uplink = Some(made);
+            // Chosen anew while the call joined.
+            let latest = self.chosen.load(Ordering::Relaxed);
+            if latest != choice {
+                suppressing.make(latest)?;
+            }
+        }
         let (microphone, tap) = Microphone::new(self.conditioning, frames, uplink, Arc::clone(&self.settings));
         let (downlink, speaker_downlink) = RingBuffer::new(DOWNLINK_FRAMES);
 
@@ -189,6 +233,7 @@ impl Engine {
     pub fn leave(&self) -> u64 {
         let mut calls = self.calls.lock().expect("the calls lock is never poisoned");
         self.end(calls.running.take());
+        self.suppressing().uplink = None;
         calls.joined
     }
 
@@ -209,9 +254,18 @@ impl Engine {
         self.end(watch.take());
     }
 
-    /// Whether the microphone's noise is suppressed (the default), or sent as captured.
-    pub fn set_noise_suppression(&self, on: bool) {
-        self.settings.noise_suppression.store(on, Ordering::Relaxed);
+    /// How the microphone's noise is suppressed: by the best suppression built in unless set
+    /// otherwise. In a call, the suppression before goes on until the new one is ready; a
+    /// plugged-in suppressor takes what it takes to load.
+    pub fn set_suppression(&self, suppression: Suppression) -> io::Result<()> {
+        let mut suppressing = self.suppressing();
+        suppressing.suppression = suppression;
+        let choice = self.chosen.fetch_add(1, Ordering::Relaxed) + 1;
+        suppressing.make(choice)
+    }
+
+    fn suppressing(&self) -> std::sync::MutexGuard<'_, Suppressing> {
+        self.suppressing.lock().expect("the suppressing lock is never poisoned")
     }
 
     /// Whether the speaker's echo is cancelled in what the microphone hears (the default), where
@@ -420,17 +474,10 @@ async fn watch_present(server: String, room_key: String, pin: Fingerprint, event
     tell(Event::Present(Vec::new()));
 }
 
-/// A call's capture, suppressing noise with DeepFilterNet3 where it is built in.
-fn capture(conditioning: Conditioning) -> Capture {
+/// A call's capture, suppressing noise as `suppression` says.
+fn capture(conditioning: Conditioning, suppression: &Suppression) -> Capture {
     // libopus creates codecs without fail for the fixed formats asked for.
-    let capture = Capture::new(conditioning).expect("the encoder can be created");
-    // The model is built in, so it fails to build only on a bug; RNNoise suppresses the noise then.
-    #[cfg(feature = "deepfilter")]
-    let capture = match crate::deep_filter::DeepFilter::new() {
-        Ok(deep_filter) => capture.with_deep_filter(deep_filter),
-        Err(_) => capture,
-    };
-    capture
+    Capture::new(conditioning, Stage::new(suppression)).expect("the encoder can be created")
 }
 
 /// Everyone in the session's channel but this member.
@@ -474,7 +521,7 @@ impl Deliveries {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::time::Instant;
 
     use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES, Level, SAMPLE_RATE};
@@ -485,6 +532,8 @@ mod tests {
     use super::*;
     use crate::channel::State;
     use crate::signal::voice;
+    use crate::suppression::tests::Delayed;
+    use crate::suppression::{MakeSuppressor, Suppressor};
 
     const ROOM_KEY: &str = "room-key";
     const FRAME: Duration = Duration::from_millis(10);
@@ -529,7 +578,7 @@ mod tests {
     /// A room on a new endpoint on localhost that presents the identity.
     fn serve(runtime: &Runtime, identity: &Identity) -> quinn::Endpoint {
         let endpoint = runtime.block_on(async { bukospeak_server::endpoint(identity, "127.0.0.1:0".parse().unwrap()) }).unwrap();
-        runtime.spawn(Room::new(ROOM_KEY.into()).serve(endpoint.clone()));
+        runtime.spawn(Room::new(ROOM_KEY.into(), None).serve(endpoint.clone()));
         endpoint
     }
 
@@ -724,6 +773,76 @@ mod tests {
         relay.cut(false);
         let back = announced(&updates, Announcement::Reconnected);
         assert_eq!((back.state(), back.you()), (State::Connected, Some(you)));
+    }
+
+    /// Makes suppressors that pass the voice through, and counts how many it made and how many
+    /// frames they processed.
+    #[derive(Default)]
+    struct Counting {
+        made: AtomicUsize,
+        processed: Arc<AtomicUsize>,
+    }
+
+    struct Counted {
+        delayed: Delayed,
+        processed: Arc<AtomicUsize>,
+    }
+
+    impl Suppressor for Counted {
+        fn delay(&self) -> usize {
+            self.delayed.delay()
+        }
+
+        fn process(&mut self, frame: &[f32; FRAME_SAMPLES], out: &mut [f32; FRAME_SAMPLES]) {
+            self.processed.fetch_add(1, Ordering::Relaxed);
+            self.delayed.process(frame, out);
+        }
+
+        fn reset(&mut self) {
+            self.delayed.reset();
+        }
+    }
+
+    impl MakeSuppressor for Counting {
+        fn make(&self) -> Option<Box<dyn Suppressor>> {
+            self.made.fetch_add(1, Ordering::Relaxed);
+            Some(Box::new(Counted { delayed: Delayed::new(2), processed: Arc::clone(&self.processed) }))
+        }
+    }
+
+    /// Pushes a frame of voice into the microphone each frame's time until `done`, for at most 5 s.
+    fn speak_until(microphone: &mut Microphone, done: impl Fn() -> bool) {
+        let frame = voice(FRAME_SAMPLES, 0.3);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "not done within 5 s");
+            microphone.push(&frame, Instant::now());
+            thread::sleep(FRAME);
+        }
+    }
+
+    #[test]
+    fn a_suppressor_plugged_in_runs_in_the_call_and_one_chosen_during_it_takes_over() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let address = serve(&server, &identity).local_addr().unwrap();
+        let (engine, updates) = engine();
+        let (first, second) = (Arc::new(Counting::default()), Arc::new(Counting::default()));
+        engine.set_suppression(Suppression::Plugged(first.clone())).unwrap();
+        assert_eq!(first.made.load(Ordering::Relaxed), 0, "made for a call only");
+
+        let mut joined = engine.join(config(address, &identity, "first")).unwrap();
+        entered(&updates);
+        assert_eq!(first.made.load(Ordering::Relaxed), 1);
+        speak_until(&mut joined.microphone, || first.processed.load(Ordering::Relaxed) > 0);
+
+        engine.set_suppression(Suppression::Plugged(second.clone())).unwrap();
+        speak_until(&mut joined.microphone, || second.processed.load(Ordering::Relaxed) > 0);
+        // The first is dropped with the frame the second took over on.
+        let before = first.processed.load(Ordering::Relaxed);
+        speak_until(&mut joined.microphone, || second.processed.load(Ordering::Relaxed) > 10);
+        assert_eq!(first.processed.load(Ordering::Relaxed), before);
+        assert_eq!(second.made.load(Ordering::Relaxed), 1);
     }
 
     #[test]

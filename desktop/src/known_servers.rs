@@ -24,6 +24,7 @@ pub enum Error {
     Write { path: PathBuf, source: io::Error },
 }
 
+#[derive(Clone)]
 pub struct KnownServers {
     path: PathBuf,
 }

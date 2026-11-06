@@ -19,7 +19,9 @@ use std::time::Instant;
 use crate::audio::{self, Audio, DeviceId, Direction};
 use bukospeak_core::proto::control::{Member, Rejection};
 use bukospeak_core::proto::{Fingerprint, MemberId};
-use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Meter, Microphone, Speaker, State, Update};
+use bukospeak_core::{
+    Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Meter, Microphone, Speaker, State, Suppression, Update,
+};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use crate::known_servers::KnownServers;
@@ -191,6 +193,8 @@ pub struct Call {
     watched: Option<(String, String)>,
     /// How loud the input is, in a call or listened to.
     meter: Meter,
+    /// The servers pinned, which the worker pins joins by.
+    known: KnownServers,
     /// Whether the input is to be listened to out of a call.
     listening: bool,
     /// The call as the engine told it last, which may join again before its join came back
@@ -214,7 +218,7 @@ impl Call {
         let meter = Meter::default();
         let worker = Worker {
             engine: Arc::clone(&engine),
-            known,
+            known: known.clone(),
             player: Box::new(player),
             happenings,
             current: Arc::clone(&current),
@@ -227,6 +231,7 @@ impl Call {
         let worker = thread::Builder::new().name("bukospeak-call".into()).spawn(move || worker.run(&inbox))?;
         let call = Self {
             engine,
+            known,
             commands: Some(commands),
             worker: Some(worker),
             current,
@@ -327,8 +332,16 @@ impl Call {
         self.engine.set_muted(muted);
     }
 
-    pub fn set_noise_suppression(&self, on: bool) {
-        self.engine.set_noise_suppression(on);
+    /// The servers pinned, by their fingerprints.
+    pub fn known_servers(&self) -> &KnownServers {
+        &self.known
+    }
+
+    pub fn set_suppression(&self, suppression: Suppression) {
+        if let Err(error) = self.engine.set_suppression(suppression) {
+            // The call goes on with the suppression before; the next takes this one.
+            tracing::warn!("making the noise suppression chosen: {error}");
+        }
     }
 
     pub fn set_echo_cancellation(&self, on: bool) {
@@ -530,7 +543,13 @@ fn failure(error: Error, server: String) -> Failure {
         Error::Rejected(rejection) => Failure::Rejected(rejection),
         Error::Resolve(_) => Failure::NotFound,
         Error::TimedOut => Failure::NoAnswer,
-        Error::Connect(_) | Error::Connection(_) | Error::Control(_) | Error::Protocol(_) | Error::Io(_) => Failure::Unreachable,
+        Error::Connect(_)
+        | Error::Connection(_)
+        | Error::Control(_)
+        | Error::Read(_)
+        | Error::Protocol(_)
+        | Error::Io(_)
+        | Error::Damaged(_) => Failure::Unreachable,
     }
 }
 

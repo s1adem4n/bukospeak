@@ -5,6 +5,7 @@ mod channel;
 mod conditioner;
 #[cfg(feature = "deepfilter")]
 mod deep_filter;
+pub mod download;
 mod echo;
 mod engine;
 mod gate;
@@ -19,6 +20,7 @@ mod playout;
 pub mod session;
 mod speaker;
 mod speaking;
+mod suppression;
 mod uplink;
 
 /// Lets tests assert that the realtime paths don't allocate.
@@ -39,3 +41,4 @@ pub use meter::Meter;
 pub use microphone::Microphone;
 pub use session::{Error, JoinConfig};
 pub use speaker::Speaker;
+pub use suppression::{MAX_DELAY, MakeSuppressor, Suppression, Suppressor};

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["proto", "core", "ios/ffi", "server", "desktop"]
+members = ["proto", "core", "ios/ffi", "maxine", "server", "desktop"]
 # Upstream crates patched below, built as they are.
 exclude = ["vendor"]
 
@@ -13,10 +13,12 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 bukospeak-core = { path = "core" }
+bukospeak-maxine = { path = "maxine" }
 bukospeak-proto = { path = "proto" }
 bukospeak-server = { path = "server" }
 anyhow = "1.0.104"
 assert_no_alloc = "1.1.2"
+base64 = "0.22.1"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 cpal = "0.18.2"
@@ -34,6 +36,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features =
 hound = "3.5.1"
 interprocess = "2.4.7"
 keyring = "4.2.0"
+libloading = "0.9.0"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 nnnoiseless = { version = "0.5.2", default-features = false }
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
@@ -63,9 +66,13 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tray-icon = "0.26.1"
 unicode-segmentation = "1.13.3"
+# Only the server fetches over HTTP: NVIDIA's effects, from NGC.
+ureq = { version = "3.5.0", default-features = false, features = ["rustls", "json"] }
 # The same version as the `vpk` that packs the app in release.yml, so they agree on the format.
 velopack = "=1.3.39-g8d2844f"
 webpki = { package = "rustls-webpki", version = "0.103.16", default-features = false, features = ["ring", "std"] }
+zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zstd = "0.14.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

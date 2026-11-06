@@ -2,7 +2,6 @@
 //! measuring and hearing what the processing does, outside a call.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,17 +10,17 @@ use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES, SAMPLE_RATE};
 use rtrb::RingBuffer;
 
 use crate::capture::Capture;
-pub use crate::capture::Suppression;
 use crate::conditioner::Conditioning;
 use crate::jitter::Packet;
 use crate::microphone::{Microphone, Settings};
 use crate::playout::Mixer;
+use crate::suppression::{Stage, Suppression};
 
 /// Frames played after the recording ended, so the listener's buffer drains.
 const TAIL_FRAMES: usize = 10;
 
 /// How the capture processes the recording.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Options {
     pub conditioning: Conditioning,
     pub suppression: Suppression,
@@ -31,18 +30,11 @@ pub struct Options {
 /// gate held back is silence, and the playout delay comes first.
 pub fn play(recording: &[f32], options: Options) -> Result<Vec<f32>, opus::Error> {
     let settings = Arc::new(Settings::default());
-    let noise_suppression = options.suppression != Suppression::Off;
-    settings.noise_suppression.store(noise_suppression, Ordering::Relaxed);
     // A frame and the slot kept for a stop.
     let (frames, mut captured) = RingBuffer::new(2);
     // Nothing plays, which AEC3 hears as silence.
     let (mut microphone, _tap) = Microphone::new(options.conditioning, frames, thread::current(), settings);
-    let mut capture = Capture::new(options.conditioning)?;
-    #[cfg(feature = "deepfilter")]
-    if options.suppression == Suppression::DeepFilter {
-        capture = capture.with_deep_filter(crate::deep_filter::DeepFilter::new().expect("the built-in model builds"));
-    }
-    capture.set_noise_suppression(noise_suppression);
+    let mut capture = Capture::new(options.conditioning, Stage::new(&options.suppression))?;
     let mut mixer = Mixer::new()?;
     let sender = MemberId(1);
     let start = Instant::now();

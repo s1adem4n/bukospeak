@@ -48,7 +48,7 @@ fn serve_at(address: &str) -> Server {
     let identity = Identity::generate().unwrap();
     let endpoint = runtime.block_on(async { bukospeak_server::endpoint(&identity, address.parse().unwrap()) }).unwrap();
     let address = endpoint.local_addr().unwrap().to_string();
-    runtime.spawn(Room::new(ROOM_KEY.into()).serve(endpoint.clone()));
+    runtime.spawn(Room::new(ROOM_KEY.into(), None).serve(endpoint.clone()));
     Server { runtime, endpoint, address, fingerprint: identity.fingerprint() }
 }
 

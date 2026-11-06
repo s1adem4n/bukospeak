@@ -9,6 +9,8 @@ use bukospeak_core::proto::MemberId;
 use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Update};
 use bukospeak_desktop::audio::{self, Audio, DeviceId, Direction};
 use bukospeak_desktop::known_servers::KnownServers;
+use bukospeak_desktop::nvidia::{self, Effects, Progress};
+use bukospeak_desktop::settings::Suppression;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -37,9 +39,10 @@ enum Command {
         /// The speakers' or headphones' id; the default if not given.
         #[arg(long)]
         output: Option<DeviceId>,
-        /// Send the microphone as captured, for one whose noise is suppressed already.
-        #[arg(long)]
-        no_noise_suppression: bool,
+        /// How the microphone's noise is suppressed: NVIDIA's effects are installed from the
+        /// server first, if they aren't yet.
+        #[arg(long, value_enum, default_value_t = Suppression::Standard)]
+        suppression: Suppression,
         /// Leave the speakers' echo in what the microphone hears, for a headset.
         #[arg(long)]
         no_echo_cancellation: bool,
@@ -70,8 +73,8 @@ fn main() -> anyhow::Result<()> {
         .init();
     match Args::parse().command {
         Command::Devices => devices(),
-        Command::Join { server, name, room_key, input, output, no_noise_suppression, no_echo_cancellation } => {
-            let processing = Processing { noise_suppression: !no_noise_suppression, echo_cancellation: !no_echo_cancellation };
+        Command::Join { server, name, room_key, input, output, suppression, no_echo_cancellation } => {
+            let processing = Processing { suppression, echo_cancellation: !no_echo_cancellation };
             join(JoinConfig { server, name, room_key, pin: None }, input, output, processing)
         }
     }
@@ -89,7 +92,7 @@ fn devices() -> anyhow::Result<()> {
 
 /// What the engine does to the microphone's signal.
 struct Processing {
-    noise_suppression: bool,
+    suppression: Suppression,
     echo_cancellation: bool,
 }
 
@@ -99,10 +102,15 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, p
     let server = config.server.clone();
     let pin = known.get(&server)?;
 
+    let effects = match processing.suppression.nvidia() {
+        Some(_) => Some(install(&config, &known)?),
+        None => None,
+    };
+
     let (happenings, received) = mpsc::channel();
     // `cpal` passes the microphone's signal as it is.
     let engine = Engine::new(Conditioning::Engine, Arc::new(Forward(happenings.clone())))?;
-    engine.set_noise_suppression(processing.noise_suppression);
+    engine.set_suppression(processing.suppression.engines(effects.as_ref()))?;
     engine.set_echo_cancellation(processing.echo_cancellation);
     let Joined { fingerprint, microphone, speaker } = match engine.join(JoinConfig { pin, ..config }) {
         Err(Error::FingerprintChanged { pinned, presented }) => anyhow::bail!(
@@ -156,6 +164,29 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, p
     drop(audio);
     engine.leave();
     Ok(())
+}
+
+/// Installs NVIDIA's effects for the system's card from the server, unless they are installed,
+/// telling how far it got.
+fn install(config: &JoinConfig, known: &KnownServers) -> anyhow::Result<Arc<Effects>> {
+    let architecture = nvidia::card().context("NVIDIA's effects need an RTX card under Windows")?;
+    let mut shown = None;
+    nvidia::install(&config.server, config.room_key.clone(), known, architecture, |progress| {
+        let (what, done, total) = match progress {
+            Progress::Preparing { done, total } => ("the server gets NVIDIA's effects", done, total),
+            Progress::Fetching { done, total } => ("downloading NVIDIA's effects", done, total),
+        };
+        let percent = (done * 100).checked_div(total).unwrap_or(0);
+        if shown.replace((what, percent)) != Some((what, percent)) {
+            eprint!("\r{what}: {percent} %   ");
+        }
+    })
+    .with_context(|| format!("installing NVIDIA's effects for {}", architecture.name()))?;
+    if shown.is_some() {
+        eprintln!();
+    }
+    let failed = || eprintln!("NVIDIA's effect didn't start: the built-in suppression runs instead");
+    Effects::installed(architecture, failed).context("NVIDIA's effects aren't where they were installed")
 }
 
 /// A member's name, as the channel knows it.

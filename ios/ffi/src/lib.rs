@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use bukospeak_core::proto::Fingerprint;
 use bukospeak_core::proto::control::Member;
-use bukospeak_core::{Conditioning, Engine, Error, JoinConfig, Joined, Listener, State, Update};
+use bukospeak_core::{Conditioning, Engine, Error, JoinConfig, Joined, Listener, State, Suppression, Update};
 
 #[cfg(target_os = "ios")]
 use crate::ios::Audio;
@@ -300,7 +300,10 @@ pub extern "C" fn bukospeak_engine_set_muted(engine: &BukoSpeakEngine, muted: bo
 /// Whether the microphone's noise is suppressed (the default), or sent as captured.
 #[unsafe(no_mangle)]
 pub extern "C" fn bukospeak_engine_set_noise_suppression(engine: &BukoSpeakEngine, on: bool) {
-    engine.engine.set_noise_suppression(on);
+    let suppression = if on { Suppression::RNNoise } else { Suppression::Off };
+    // Without a thread to make it on, a call goes on with the suppression before; the next takes
+    // this one.
+    let _ = engine.engine.set_suppression(suppression);
 }
 
 /// How loud the others play: 1.0 as they come, up to [`bukospeak_max_volume`]; the limiter

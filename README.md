@@ -12,6 +12,7 @@ latency, Opus at high bitrates, and an iOS app that keeps its microphone through
 | `core/` | The client side the apps share: the engine, joining and pinning the server and joining again after a lost connection, the channel as the member sees it and what to announce about it, noise suppression, gain control, echo cancellation, voice activation, Opus, jitter buffers and the mix |
 | `ios/` | The iOS app (SwiftUI, CallKit) and `ios/dev`, which builds it on a Mac |
 | `ios/ffi/` | The C interface the iOS app calls the engine through, and its header; plays the call on the iPhone's microphone and speaker, through VoiceProcessingIO |
+| `maxine/` | NVIDIA Maxine's audio effects on RTX cards, through NVIDIA's runtime loaded while running; `measure`, an example that times an effect on the machine's card |
 | `desktop/` | The desktop app for Windows, macOS and Linux (GPUI), and `bukospeak`, a terminal client for trying the server on the desktop's devices; both play the call through cpal |
 
 One QUIC connection per member (TLS 1.3): control messages on its first stream, Opus frames as
@@ -55,3 +56,8 @@ podman run -d --name bukospeak -p 9988:9988/udp -v bukospeak:/data \
 ```
 
 It logs its certificate's fingerprint on start, which clients show on their first join.
+
+With `-e BUKOSPEAK_NGC_KEY=…`, an API key of [NGC](https://ngc.nvidia.com), NVIDIA's catalogue,
+the server also offers NVIDIA's noise suppression to members with an RTX card under Windows: the
+first time a card generation asks for it, the server downloads it from NGC (about 1.8 GB) into
+`/data/downloads`, and members then download it from the server (about 1.7 GB).

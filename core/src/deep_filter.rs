@@ -5,6 +5,11 @@
 use bukospeak_proto::audio::FRAME_SAMPLES;
 use df::{DEEPFILTERNET3, DeepFilterNet, RuntimeParams};
 
+use crate::suppression::Suppressor;
+
+/// The voice comes out three frames later.
+const DELAY: usize = 3;
+
 pub(crate) struct DeepFilter {
     model: DeepFilterNet,
 }
@@ -14,19 +19,23 @@ impl DeepFilter {
     pub fn new() -> Result<Self, df::Error> {
         let model = DeepFilterNet::new(DEEPFILTERNET3, &RuntimeParams::default())?;
         assert_eq!(model.hop_size(), FRAME_SAMPLES, "the model takes a frame at a time");
+        assert_eq!(model.delay(), DELAY * FRAME_SAMPLES);
         Ok(Self { model })
     }
+}
 
-    /// Enhances the next frame, in −1.0..=1.0, into `enhanced`, which holds the voice of the
-    /// model's delay before: three frames.
-    pub fn process(&mut self, frame: &[f32; FRAME_SAMPLES], enhanced: &mut [f32; FRAME_SAMPLES]) {
+impl Suppressor for DeepFilter {
+    fn delay(&self) -> usize {
+        DELAY
+    }
+
+    fn process(&mut self, frame: &[f32; FRAME_SAMPLES], enhanced: &mut [f32; FRAME_SAMPLES]) {
         // The local SNR it estimates matters only to the model, which chose by it what the frame
         // got of its stages.
         let _ = self.model.process(frame, enhanced);
     }
 
-    /// Starts anew, as after the input stopped: nothing from before comes out after.
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         self.model.reset();
     }
 }
@@ -38,7 +47,6 @@ mod tests {
     #[test]
     fn the_voice_comes_out_three_frames_later() {
         let mut deep_filter = DeepFilter::new().unwrap();
-        assert_eq!(deep_filter.model.delay(), 3 * FRAME_SAMPLES);
         // A click in the first frame, after which the output is silent until it comes out.
         let mut click = [0.0; FRAME_SAMPLES];
         click[100] = 0.5;

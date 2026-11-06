@@ -5,11 +5,13 @@
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::audio::{DeviceId, Direction};
 use serde::{Deserialize, Serialize};
 
 use crate::call::{Devices, Join};
+use crate::nvidia::{Effects, Kind};
 
 /// Where the room key is kept in the keyring.
 const KEYRING_SERVICE: &str = "bukospeak";
@@ -37,8 +39,8 @@ pub struct Settings {
     pub input: Option<String>,
     /// The speakers' or headphones' device id; the system's default for None.
     pub output: Option<String>,
-    /// Whether RNNoise suppresses the microphone's noise.
-    pub noise_suppression: bool,
+    /// How the microphone's noise is suppressed.
+    pub suppression: Suppression,
     /// Whether the speakers' echo is cancelled in what the microphone hears.
     pub echo_cancellation: bool,
     /// How loud the others play, in percent of their level, up to the engine's most.
@@ -52,9 +54,45 @@ impl Default for Settings {
             server: String::new(),
             input: None,
             output: None,
-            noise_suppression: true,
+            suppression: Suppression::Standard,
             echo_cancellation: true,
             volume: 100,
+        }
+    }
+}
+
+/// How the microphone's noise is suppressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Suppression {
+    /// It isn't: the microphone is sent as captured, for one whose noise is suppressed already.
+    Off,
+    /// By the best suppression the engine has built in.
+    Standard,
+    /// By NVIDIA's effect that takes out room echo and noise, on an RTX card.
+    NvidiaDereverbDenoiser,
+    /// By NVIDIA's Studio Voice, which also makes the voice sound as if from a studio's
+    /// microphone, on an RTX card.
+    NvidiaStudioVoice,
+}
+
+impl Suppression {
+    /// NVIDIA's effect it is, if it is one.
+    pub fn nvidia(self) -> Option<Kind> {
+        match self {
+            Self::Off | Self::Standard => None,
+            Self::NvidiaDereverbDenoiser => Some(Kind::DereverbDenoiser),
+            Self::NvidiaStudioVoice => Some(Kind::StudioVoiceLowLatency),
+        }
+    }
+
+    /// The engine's suppression for it: NVIDIA's effect by `effects`, as installed; the best
+    /// built in while it isn't.
+    pub fn engines(self, effects: Option<&Arc<Effects>>) -> bukospeak_core::Suppression {
+        match (self, self.nvidia(), effects) {
+            (Self::Off, ..) => bukospeak_core::Suppression::Off,
+            (_, Some(kind), Some(effects)) => effects.suppression(kind),
+            _ => bukospeak_core::Suppression::built_in(),
         }
     }
 }
@@ -157,7 +195,7 @@ mod tests {
             server: "example.com:9988".into(),
             input: Some("alsa:hw:0,0".into()),
             output: None,
-            noise_suppression: false,
+            suppression: Suppression::Off,
             echo_cancellation: true,
             volume: 150,
         };
