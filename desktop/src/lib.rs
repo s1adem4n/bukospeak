@@ -1,7 +1,11 @@
 //! What the BukoSpeak desktop app and the terminal client share, and the app's window.
 
 pub mod audio;
+pub mod autopilot;
+pub mod autostart;
 pub mod call;
+pub mod cues;
+pub mod games;
 #[cfg(feature = "harness")]
 pub mod harness;
 pub mod known_servers;

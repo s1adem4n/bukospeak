@@ -371,6 +371,41 @@ impl Client {
         self.suppress(cx);
     }
 
+    /// Has the system start the app with it or not, as the settings say: at the app's start,
+    /// so an install moved keeps being started, and when they change.
+    pub fn start_with_system(&mut self, cx: &mut Context<Self>) {
+        let (host, on) = (Arc::clone(&self.host), self.settings.start_with_system);
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = cx.background_spawn(async move { host.start_with_system(on) }).await {
+                tracing::warn!("starting with the system: {error}");
+                // The app may be quitting before the system answered.
+                let _ = this.update(cx, |client, cx| {
+                    client.trouble = Some(Trouble::StartNotSet);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn set_start_with_system(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.change(|settings| settings.start_with_system = on, cx);
+        self.start_with_system(cx);
+    }
+
+    /// Joins for `game` while it runs from now on, or no more.
+    pub fn set_game(&mut self, game: &str, on: bool, cx: &mut Context<Self>) {
+        self.change(
+            |settings| {
+                settings.games.retain(|kept| !kept.eq_ignore_ascii_case(game));
+                if on {
+                    settings.games.push(game.to_owned());
+                }
+            },
+            cx,
+        );
+    }
+
     pub fn set_echo_cancellation(&mut self, on: bool, cx: &mut Context<Self>) {
         self.change(|settings| settings.echo_cancellation = on, cx);
         self.call.set_echo_cancellation(on);

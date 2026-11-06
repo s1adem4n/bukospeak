@@ -9,6 +9,7 @@ mod convert;
 mod lease;
 
 use std::fmt;
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -353,6 +354,67 @@ fn build_output(
     Ok(stream)
 }
 
+/// A sound played once on the output device, the default for None, while the stream returned
+/// lives: `sound` in the call's format, 48 kHz mono, then silence. Also returned: how long the
+/// sound is.
+pub fn sound(id: Option<&DeviceId>, sound: Arc<[f32]>) -> Result<(Stream, Duration), Error> {
+    let direction = Direction::Output;
+    let host = cpal::default_host();
+    let device = device(direction, id, host.default_output_device(), &host)?;
+    let config = config(direction, device.supported_output_configs().map_err(|error| Error::Device(direction, error))?)?;
+    let mut output = convert::Output::new(format(config)).map_err(|error| Error::Format(direction, error))?;
+    let length = Duration::from_secs_f64(sound.len() as f64 / f64::from(SAMPLE_RATE));
+    let mut played = 0;
+    let stream = device
+        .build_output_stream(
+            config,
+            move |samples: &mut [f32], _: &OutputCallbackInfo| {
+                output.pull(samples, Instant::now(), |frame, _| {
+                    for sample in frame {
+                        *sample = sound.get(played).copied().unwrap_or(0.);
+                        played += 1;
+                    }
+                });
+            },
+            |error| tracing::warn!("a sound: {error}"),
+            None,
+        )
+        .map_err(|error| Error::Device(direction, error))?;
+    stream.play().map_err(|error| Error::Device(direction, error))?;
+    Ok((stream, length))
+}
+
+/// Why a sound file couldn't be read.
+#[derive(Debug, thiserror::Error)]
+pub enum SoundError {
+    #[error(transparent)]
+    Wav(#[from] hound::Error),
+    #[error(transparent)]
+    Format(#[from] convert::Error),
+}
+
+/// The sound in the WAV file at `path`, in the call's format, 48 kHz mono: its channels mixed
+/// down and its rate converted as a microphone's are.
+pub fn read_sound(path: &std::path::Path) -> Result<Arc<[f32]>, SoundError> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
+        hound::SampleFormat::Int => {
+            let full = (1_i64 << (spec.bits_per_sample - 1)) as f32;
+            reader.samples::<i32>().map(|sample| sample.map(|sample| sample as f32 / full)).collect::<Result<_, _>>()?
+        }
+    };
+    let mut input = convert::Input::new(Format { channels: usize::from(spec.channels), rate: spec.sample_rate })?;
+    // Silence after it lets out its last part short of a chunk and what the resampler holds back.
+    let flush = vec![0.; usize::from(spec.channels) * spec.sample_rate as usize / 20];
+    let mut sound = Vec::with_capacity(samples.len() + flush.len());
+    for part in [&samples, &flush] {
+        input.push(part, Instant::now(), |frame, _| sound.extend_from_slice(frame));
+    }
+    Ok(sound.into())
+}
+
 fn device(direction: Direction, id: Option<&DeviceId>, default: Option<cpal::Device>, host: &Host) -> Result<cpal::Device, Error> {
     match id {
         Some(id) => host.device_by_id(id).ok_or_else(|| Error::Missing(direction, id.clone())),
@@ -414,5 +476,29 @@ mod tests {
         assert_eq!(with(SupportedBufferSize::Range { min: 64, max: 4096 }), BufferSize::Fixed(480));
         assert_eq!(with(SupportedBufferSize::Range { min: 1024, max: 4096 }), BufferSize::Default);
         assert_eq!(with(SupportedBufferSize::Unknown), BufferSize::Default);
+    }
+
+    #[test]
+    fn a_sound_file_comes_in_the_calls_format() {
+        let path = std::env::temp_dir().join(format!("bukospeak-sound-{}.wav", std::process::id()));
+        let spec = hound::WavSpec { channels: 2, sample_rate: CD_RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        // A fifth of a second of 440 Hz, the same on both channels.
+        for n in 0..CD_RATE / 5 {
+            let sample = (0.5 * (std::f32::consts::TAU * 440. * n as f32 / CD_RATE as f32).sin() * f32::from(i16::MAX)) as i16;
+            writer.write_sample(sample).unwrap();
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        let sound = read_sound(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // All of it at 48 kHz, and the flush after it.
+        assert!(sound.len() >= SAMPLE_RATE as usize / 5, "{} samples", sound.len());
+        let middle = &sound[SAMPLE_RATE as usize / 20..SAMPLE_RATE as usize * 3 / 20];
+        let crossings = middle.windows(2).filter(|pair| (pair[0] < 0.) != (pair[1] < 0.)).count();
+        let pitch = crossings as f32 / 2. / (middle.len() as f32 / SAMPLE_RATE as f32);
+        assert!((pitch - 440.).abs() < 10., "{pitch} Hz");
+        let loudest = middle.iter().fold(0_f32, |most, sample| most.max(sample.abs()));
+        assert!((loudest - 0.5).abs() < 0.05, "{loudest}");
     }
 }

@@ -1,7 +1,9 @@
-//! The settings: the microphone, the output, and who one is where, each kept as soon as it is
-//! changed: the fields once Enter is pressed or the focus goes, the rest at once.
+//! The settings: the microphone, the output, what the app does on its own, and who one is
+//! where, each kept as soon as it is changed: the fields once Enter is pressed or the focus
+//! goes, the rest at once.
 
 use crate::audio::{self, Direction};
+use crate::games;
 use crate::nvidia::Progress;
 use crate::settings::Suppression;
 use bukospeak_core::MAX_VOLUME;
@@ -43,6 +45,7 @@ fn choices(devices: impl IntoIterator<Item = (String, String)>, kept: Option<&st
 enum Opened {
     Device(Direction),
     Suppression,
+    Games,
 }
 
 /// The choices of noise suppression, by their titles: the app's own, then NVIDIA's, which an RTX
@@ -64,6 +67,9 @@ pub struct Settings {
     inputs: Vec<Choice>,
     outputs: Vec<Choice>,
     volume: Entity<Slider>,
+    /// The programs running when the settings opened, the largest first, to choose games from;
+    /// empty until the system listed them.
+    programs: Vec<String>,
     level: Entity<InputLevel>,
     /// The menu open, and which it is.
     menu: Option<(Opened, Entity<Menu>, Subscription)>,
@@ -97,24 +103,30 @@ impl Settings {
         ];
         let host = std::sync::Arc::clone(client.read(cx).host());
         let listing = cx.spawn(async move |settings, cx| {
-            let list = move |direction| {
-                host.devices(direction).unwrap_or_else(|error| {
-                    tracing::warn!("{error}");
-                    Vec::new()
+            // Listing asks the sound server and the system: not on the window's thread.
+            let (inputs, outputs, programs) = cx
+                .background_spawn(async move {
+                    let list = |direction| {
+                        host.devices(direction).unwrap_or_else(|error| {
+                            tracing::warn!("{error}");
+                            Vec::new()
+                        })
+                    };
+                    (list(Direction::Input), list(Direction::Output), host.programs())
                 })
-            };
-            // Listing asks the sound server: not on the window's thread.
-            let (inputs, outputs) = cx.background_spawn(async move { (list(Direction::Input), list(Direction::Output)) }).await;
+                .await;
             // The settings may be closed before the system answered.
             let _ = settings.update(cx, |settings, cx| {
                 let named = |devices: Vec<audio::Device>| devices.into_iter().map(|device| (device.id.to_string(), device.name));
                 let read = settings.client.read(cx);
                 settings.inputs = choices(named(inputs), read.settings.device_id(Direction::Input));
                 settings.outputs = choices(named(outputs), read.settings.device_id(Direction::Output));
+                settings.programs = programs;
                 cx.notify();
             });
         });
         Self {
+            programs: Vec::new(),
             inputs: kept_choice(kept_input),
             outputs: kept_choice(kept_output),
             client,
@@ -248,6 +260,51 @@ impl Settings {
         self.show(Opened::Suppression, menu, cx);
     }
 
+    /// The row that chooses the games the app joins for, from a menu: the games kept, and the
+    /// programs running that could be one.
+    fn render_games(&self, cx: &mut Context<Self>) -> AnyElement {
+        let games = &self.client.read(cx).settings.games;
+        let chosen = match games.as_slice() {
+            [] => "Keinem".to_owned(),
+            games => games.iter().map(|game| games::title(game)).collect::<Vec<_>>().join(", "),
+        };
+        let tokens = cx.tokens();
+        let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Games).map(|(_, menu, _)| menu);
+        let value = div().text_color(tokens.text_muted).child(chosen);
+        div()
+            .relative()
+            .child(
+                kit::menu_row("games", "Beitreten bei", Some(value.into_any_element()), open.is_some(), cx)
+                    .on_click(cx.listener(|settings, _, window, cx| settings.open_games(window, cx))),
+            )
+            .children(open.map(|menu| Popover::new(menu, Place::BelowEnd)))
+            .into_any_element()
+    }
+
+    /// Opens the menu of games: those kept, checked, then the programs running that aren't.
+    fn open_games(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let kept = self.client.read(cx).settings.games.clone();
+        let running: Vec<String> =
+            self.programs.iter().filter(|program| !kept.iter().any(|game| game.eq_ignore_ascii_case(program))).cloned().collect();
+        let client = self.client.downgrade();
+        let menu = Menu::open(window, cx, |menu| {
+            let item = |program: &String, on: bool| {
+                let (client, program) = (client.clone(), program.clone());
+                Item::new(games::title(&program).to_owned(), move |_, cx| {
+                    // The window may be gone with the choice.
+                    let _ = client.update(cx, |client, cx| client.set_game(&program, !on, cx));
+                })
+                .checked(on)
+            };
+            let menu = kept.iter().fold(menu, |menu, game| menu.item(item(game, true)));
+            match running.is_empty() {
+                true => menu,
+                false => running.iter().fold(menu.separator().heading("Läuft gerade"), |menu, program| menu.item(item(program, false))),
+            }
+        });
+        self.show(Opened::Games, menu, cx);
+    }
+
     /// How loud the others are: the slider from the panel's inset, its value at the end.
     fn render_volume(&self, cx: &mut Context<Self>) -> AnyElement {
         let percent = self.client.read(cx).settings.volume;
@@ -293,6 +350,9 @@ impl Render for Settings {
             self.render_switch("echo", "Echounterdrückung", echo, Client::set_echo_cancellation, cx),
         ];
         let output = [self.render_device(Direction::Output, cx), self.render_volume(cx)];
+        let start = self.client.read(cx).settings.start_with_system;
+        let automatic =
+            [self.render_switch("start", "Mit dem System starten", start, Client::set_start_with_system, cx), self.render_games(cx)];
         let account = [
             kit::row("Name", cx).child(self.name.clone()).into_any_element(),
             kit::row("Server", cx).child(self.server.clone()).into_any_element(),
@@ -306,6 +366,7 @@ impl Render for Settings {
                 .gap_5()
                 .child(kit::group("Mikrofon", microphone, cx))
                 .child(kit::group("Ausgabe", output, cx))
+                .child(kit::group("Automatisch", automatic, cx))
                 .child(kit::group("Konto", account, cx)),
         )
     }

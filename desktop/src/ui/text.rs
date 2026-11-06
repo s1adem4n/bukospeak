@@ -42,5 +42,6 @@ pub fn trouble(trouble: Trouble) -> &'static str {
         Trouble::NvidiaUnavailable => "NVIDIA-Effekte nicht verfügbar",
         Trouble::NvidiaNotInstalled => "NVIDIA-Effekte nicht geladen",
         Trouble::NvidiaFailed => "NVIDIA-Effekt nicht gestartet",
+        Trouble::StartNotSet => "Autostart nicht eingerichtet",
     }
 }

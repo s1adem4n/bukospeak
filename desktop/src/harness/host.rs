@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::thread;
 
 use crate::audio::{self, Device, DeviceId, Direction};
+use crate::autostart;
 use crate::known_servers::KnownServers;
 use crate::nvidia::{self, Architecture, Progress};
 use crate::settings::{self, Settings};
@@ -48,6 +49,14 @@ impl Host for Staged {
                 is_default: index == 0,
             })
             .collect())
+    }
+
+    fn start_with_system(&self, _: bool) -> Result<(), autostart::Error> {
+        Ok(())
+    }
+
+    fn programs(&self) -> Vec<String> {
+        ["FortniteClient-Win64-Shipping.exe", "chrome.exe", "Spotify.exe"].map(str::to_owned).to_vec()
     }
 
     fn card(&self) -> Option<Architecture> {

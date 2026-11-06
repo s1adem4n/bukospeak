@@ -19,8 +19,8 @@ use gpui::{
 };
 
 use crate::ui::chrome::TitleBar;
-pub use crate::ui::client::Client;
-use crate::ui::client::{Missing, RoomKeyRead};
+use crate::ui::client::Missing;
+pub use crate::ui::client::{Client, RoomKeyRead};
 pub use crate::ui::glyph::Assets;
 use crate::ui::glyph::Glyph;
 pub use crate::ui::host::{Desktop, Host};
@@ -102,6 +102,8 @@ pub enum Trouble {
     NvidiaNotInstalled,
     /// NVIDIA's effect didn't start: Standard suppresses the noise instead.
     NvidiaFailed,
+    /// The system wasn't told to start the app with it, or not to any more.
+    StartNotSet,
 }
 
 /// The screen the window shows.

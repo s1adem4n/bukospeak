@@ -11,11 +11,13 @@ license.workspace = true
 bukospeak-core = { workspace = true, features = ["deepfilter"] }
 bukospeak-maxine.workspace = true
 anyhow.workspace = true
+auto-launch.workspace = true
 clap.workspace = true
 cpal.workspace = true
 ctrlc.workspace = true
 dirs.workspace = true
 futures.workspace = true
+hound.workspace = true
 global-hotkey.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
@@ -24,6 +26,7 @@ keyring.workspace = true
 rubato.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sysinfo.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 toml.workspace = true

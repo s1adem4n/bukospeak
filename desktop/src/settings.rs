@@ -45,6 +45,10 @@ pub struct Settings {
     pub echo_cancellation: bool,
     /// How loud the others play, in percent of their level, up to the engine's most.
     pub volume: u16,
+    /// Whether the system starts the app with it, in the background.
+    pub start_with_system: bool,
+    /// The games the app joins the call for while one runs, by their programs' file names.
+    pub games: Vec<String>,
 }
 
 impl Default for Settings {
@@ -57,6 +61,8 @@ impl Default for Settings {
             suppression: Suppression::Standard,
             echo_cancellation: true,
             volume: 100,
+            start_with_system: true,
+            games: vec![crate::games::FORTNITE.to_owned()],
         }
     }
 }
@@ -198,6 +204,8 @@ mod tests {
             suppression: Suppression::Off,
             echo_cancellation: true,
             volume: 150,
+            start_with_system: false,
+            games: vec!["Game.exe".into()],
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);

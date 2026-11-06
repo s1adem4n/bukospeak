@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use crate::audio::{self, Device, Direction};
+use crate::autostart;
 use crate::known_servers::KnownServers;
 use crate::nvidia::{self, Architecture, Progress};
 use crate::settings::{self, Settings};
@@ -20,6 +21,12 @@ pub trait Host: Send + Sync + 'static {
 
     /// The devices there are for a direction.
     fn devices(&self, direction: Direction) -> Result<Vec<Device>, audio::Error>;
+
+    /// Has the system start the app with it, in the background, or not.
+    fn start_with_system(&self, on: bool) -> Result<(), autostart::Error>;
+
+    /// The programs running, the largest first, which a game is among while it runs.
+    fn programs(&self) -> Vec<String>;
 
     /// The system's RTX card, if it has one NVIDIA's effects run on.
     fn card(&self) -> Option<Architecture>;
@@ -62,6 +69,22 @@ impl Host for Desktop {
 
     fn devices(&self, direction: Direction) -> Result<Vec<Device>, audio::Error> {
         audio::devices(direction)
+    }
+
+    fn start_with_system(&self, on: bool) -> Result<(), autostart::Error> {
+        // A build of one's own runs from where it was built, which the system isn't to start.
+        if cfg!(debug_assertions) {
+            tracing::info!("a debug build doesn't start with the system");
+            return Ok(());
+        }
+        autostart::set(on)
+    }
+
+    fn programs(&self) -> Vec<String> {
+        crate::games::running().unwrap_or_else(|error| {
+            tracing::warn!("{error}");
+            Vec::new()
+        })
     }
 
     fn card(&self) -> Option<Architecture> {

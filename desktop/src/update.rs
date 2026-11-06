@@ -7,6 +7,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+use crate::autostart;
+use crate::autostart::BACKGROUND;
 use crate::call::Phase;
 use futures::StreamExt;
 use gpui::{App, AppContext, AsyncApp, Context, Entity, Subscription, Task, WeakEntity};
@@ -22,7 +25,21 @@ const EVERY: Duration = Duration::from_secs(60 * 60);
 /// applies an update downloaded before; either ends the process. First in `main`, before
 /// anything is started that would have to be stopped.
 pub fn start() {
-    VelopackApp::build().run();
+    velopack().run();
+}
+
+/// Velopack's part of the app, and what the app does around it.
+fn velopack() -> VelopackApp<'static> {
+    let app = VelopackApp::build();
+    // Velopack installs on Windows only; uninstalled, the app is gone, so a start with the
+    // system left would point at nothing.
+    #[cfg(target_os = "windows")]
+    let app = app.on_before_uninstall_fast_callback(|_| {
+        if let Err(error) = autostart::set(false) {
+            tracing::warn!("the start with the system stays: {error}");
+        }
+    });
+    app
 }
 
 /// Where the updater is.
@@ -105,8 +122,10 @@ impl Updater {
             return;
         };
         let version = release.TargetFullRelease.Version.clone();
-        // Velopack's installer waits for the app to quit, then starts it again.
-        match self.manager.wait_exit_then_apply_updates(&release, false, true, Vec::<String>::new()) {
+        // Velopack's installer waits for the app to quit, then starts it again: in the
+        // background if it ran there, without a window.
+        let arguments: &[&str] = if cx.windows().is_empty() { &[BACKGROUND] } else { &[] };
+        match self.manager.wait_exit_then_apply_updates(&release, false, true, arguments) {
             Ok(()) => {
                 self.set(State::Installing { version }, cx);
                 cx.quit();
