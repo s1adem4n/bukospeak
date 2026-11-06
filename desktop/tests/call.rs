@@ -12,7 +12,7 @@ use bukospeak_core::{Meter, Microphone, Speaker};
 use bukospeak_desktop::audio::{DeviceId, Direction};
 use bukospeak_desktop::call::{Call, Devices, Failure, Happening, Join, Phase, Player, Playing, Report};
 use bukospeak_desktop::known_servers::KnownServers;
-use bukospeak_server::{Identity, Room};
+use bukospeak_server::{Downloads, Identity, Room};
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use tokio::runtime::Runtime;
 
@@ -48,7 +48,7 @@ fn serve_at(address: &str) -> Server {
     let identity = Identity::generate().unwrap();
     let endpoint = runtime.block_on(async { bukospeak_server::endpoint(&identity, address.parse().unwrap()) }).unwrap();
     let address = endpoint.local_addr().unwrap().to_string();
-    runtime.spawn(Room::new(ROOM_KEY.into(), None).serve(endpoint.clone()));
+    runtime.spawn(Room::new(ROOM_KEY.into(), Downloads::none()).serve(endpoint.clone()));
     Server { runtime, endpoint, address, fingerprint: identity.fingerprint() }
 }
 

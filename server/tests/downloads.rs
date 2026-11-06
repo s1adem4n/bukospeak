@@ -10,10 +10,11 @@ use bukospeak_server::{Downloads, Identity, Room, Source, compress, endpoint};
 
 const ROOM_KEY: &str = "room-key";
 
-/// Offers `first`, of a small file and a large one, failing as many times first as `failures`
-/// says.
+/// Offers `first`, of a small file and a large one, from what `stamp` says, failing as many
+/// times first as `failures` says.
 struct Fake {
     prepared: Arc<AtomicU32>,
+    stamp: Arc<AtomicU32>,
     failures: u32,
 }
 
@@ -33,8 +34,8 @@ fn large() -> Vec<u8> {
 }
 
 impl Source for Fake {
-    fn offers(&self, name: &str) -> bool {
-        name == "first"
+    fn offers(&self, name: &str) -> anyhow::Result<Option<String>> {
+        Ok((name == "first").then(|| self.stamp.load(Ordering::Relaxed).to_string()))
     }
 
     fn prepare(&self, _: &str, folder: &Path, progress: &dyn Fn(u64, u64)) -> anyhow::Result<()> {
@@ -53,6 +54,7 @@ struct Server {
     address: String,
     fingerprint: Fingerprint,
     prepared: Arc<AtomicU32>,
+    stamp: Arc<AtomicU32>,
     _folder: Folder,
 }
 
@@ -81,10 +83,11 @@ fn serve(name: &str, failures: u32) -> Server {
     let endpoint = endpoint(&identity, "127.0.0.1:0".parse().unwrap()).unwrap();
     let address = endpoint.local_addr().unwrap().to_string();
     let folder = Folder::new(name);
-    let prepared = Arc::new(AtomicU32::new(0));
-    let downloads = Downloads::new(folder.0.clone(), Fake { prepared: Arc::clone(&prepared), failures });
-    tokio::spawn(Room::new(ROOM_KEY.into(), Some(downloads)).serve(endpoint));
-    Server { address, fingerprint: identity.fingerprint(), prepared, _folder: folder }
+    let (prepared, stamp) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+    let fake = Fake { prepared: Arc::clone(&prepared), stamp: Arc::clone(&stamp), failures };
+    let downloads = Downloads::new(folder.0.clone(), vec![Arc::new(fake)]);
+    tokio::spawn(Room::new(ROOM_KEY.into(), downloads).serve(endpoint));
+    Server { address, fingerprint: identity.fingerprint(), prepared, stamp, _folder: folder }
 }
 
 async fn start(server: &Server, name: &str) -> Result<Download, Error> {
@@ -151,4 +154,14 @@ async fn a_download_not_offered_or_asked_for_with_a_wrong_room_key_is_turned_awa
     let wrong = Download::start(&server.address, "guess".into(), Some(server.fingerprint), "first".into(), |_, _| ()).await;
     assert!(matches!(wrong, Err(Error::Rejected(Rejection::RoomKey))));
     assert_eq!(server.prepared.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn a_download_whose_source_changed_is_prepared_anew() {
+    let server = serve("changed", 0);
+    start(&server, "first").await.unwrap().close().await;
+    server.stamp.store(1, Ordering::Relaxed);
+    start(&server, "first").await.unwrap().close().await;
+    start(&server, "first").await.unwrap().close().await;
+    assert_eq!(server.prepared.load(Ordering::Relaxed), 2);
 }

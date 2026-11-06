@@ -5,6 +5,7 @@ mod downloads;
 mod identity;
 mod ngc;
 mod room;
+mod sounds;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ pub use downloads::{Downloads, Source, compress};
 pub use identity::Identity;
 pub use ngc::Ngc;
 pub use room::Room;
+pub use sounds::Sounds;
 
 /// A QUIC endpoint on `listen` that presents the identity's certificate.
 pub fn endpoint(identity: &Identity, listen: SocketAddr) -> anyhow::Result<quinn::Endpoint> {

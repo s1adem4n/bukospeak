@@ -2,7 +2,6 @@
 //! starts, leaves a call one has been alone in a while without a game, and sounds what happens
 //! in the call, for while its window isn't looked at.
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use bukospeak_core::proto::MemberId;
@@ -12,7 +11,7 @@ use gpui::{App, AppContext, Context, Entity, Subscription, Task};
 
 use crate::audio::Direction;
 use crate::call::{Call, Phase};
-use crate::cues::{Cue, Cues};
+use crate::cues::{self, Cue, Cues};
 use crate::games::Watcher;
 use crate::ui::Client;
 
@@ -142,8 +141,8 @@ pub struct Autopilot {
 }
 
 impl Autopilot {
-    /// Starts following `client`; the sounds' files are looked for in `sounds`.
-    pub fn new(client: Entity<Client>, sounds: PathBuf, cx: &mut App) -> Entity<Self> {
+    /// Starts following `client`.
+    pub fn new(client: Entity<Client>, cx: &mut App) -> Entity<Self> {
         cx.new(|cx| {
             let (tell, mut told) = mpsc::unbounded();
             let games = client.read(cx).settings.games.clone();
@@ -153,7 +152,7 @@ impl Autopilot {
             })
             .inspect_err(|error| tracing::warn!("no games watched: {error}"))
             .ok();
-            let cues = Cues::new(sounds).inspect_err(|error| tracing::warn!("no sounds: {error}")).ok();
+            let cues = Cues::new(cues::folder()).inspect_err(|error| tracing::warn!("no sounds: {error}")).ok();
             let following = cx.spawn(async move |this, cx| {
                 while let Some(runs) = told.next().await {
                     let applied = this.update(cx, |autopilot: &mut Self, cx| {

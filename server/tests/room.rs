@@ -7,7 +7,7 @@ use bukospeak_core::proto::control::{Member, Rejection};
 use bukospeak_core::proto::{Fingerprint, IDLE_TIMEOUT, MemberId, audio};
 use bukospeak_core::session::{Entry, Event, Session, Watch};
 use bukospeak_core::{Error, JoinConfig};
-use bukospeak_server::{Identity, Room, endpoint};
+use bukospeak_server::{Downloads, Identity, Room, endpoint};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
@@ -22,7 +22,7 @@ fn serve() -> Server {
     let identity = Identity::generate().unwrap();
     let endpoint = endpoint(&identity, "127.0.0.1:0".parse().unwrap()).unwrap();
     let address = endpoint.local_addr().unwrap();
-    tokio::spawn(Room::new(ROOM_KEY.into(), None).serve(endpoint));
+    tokio::spawn(Room::new(ROOM_KEY.into(), Downloads::none()).serve(endpoint));
     Server { address, fingerprint: identity.fingerprint() }
 }
 

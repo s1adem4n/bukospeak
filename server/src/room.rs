@@ -28,7 +28,7 @@ const RESUME_GRACE: Duration = Duration::from_secs(20);
 pub struct Room {
     room_key: String,
     members: Mutex<Members>,
-    downloads: Option<Downloads>,
+    downloads: Downloads,
 }
 
 #[derive(Default)]
@@ -61,7 +61,7 @@ impl Peer {
 
 impl Room {
     /// The channel members join with `room_key`, who may also download what `downloads` offers.
-    pub fn new(room_key: String, downloads: Option<Downloads>) -> Arc<Self> {
+    pub fn new(room_key: String, downloads: Downloads) -> Arc<Self> {
         Arc::new(Self { room_key, members: Mutex::default(), downloads })
     }
 
@@ -130,13 +130,10 @@ impl Room {
                 if let Err(reason) = self.check(version, &room_key) {
                     return reject(send, &connection, reason).await;
                 }
-                let Some(downloads) = &self.downloads else {
-                    return reject(send, &connection, Rejection::Unavailable).await;
-                };
                 tracing::debug!(name, remote = %connection.remote_address(), "downloading");
                 // The client says nothing more on the control stream.
                 drop(recv);
-                downloads.serve(&name, &connection, send).await?;
+                self.downloads.serve(&name, &connection, send).await?;
             }
             Some(ClientMessage::Mute { .. }) => anyhow::bail!("a Mute before a Hello"),
             None => anyhow::bail!("the stream ended before a Hello, a Watch or a Download"),

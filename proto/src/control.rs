@@ -17,6 +17,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::MemberId;
 
+/// The download of the call's sounds, WAV files named after what each tells.
+pub const SOUNDS: &str = "sounds";
+
 /// The longest name the server accepts, in characters.
 pub const MAX_NAME_CHARS: usize = 32;
 
@@ -42,7 +45,8 @@ pub enum ClientMessage {
     /// Watches who is in the channel without joining it: after the Present, the server tells
     /// who joins, changes and leaves, until the client closes the connection.
     Watch { version: u32, room_key: String },
-    /// Asks for the files of a download the server offers, by its `name`.
+    /// Asks for the files of a download the server offers, by its `name`: [`SOUNDS`], or one
+    /// of NVIDIA's effects.
     Download { version: u32, room_key: String, name: String },
     /// Mutes the member, or unmutes it, after the Hello.
     Mute { muted: bool },

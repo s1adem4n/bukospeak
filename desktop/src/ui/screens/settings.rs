@@ -4,7 +4,7 @@
 
 use crate::audio::{self, Direction};
 use crate::games;
-use crate::nvidia::Progress;
+use crate::install::Progress;
 use crate::settings::Suppression;
 use bukospeak_core::MAX_VOLUME;
 use gpui::{

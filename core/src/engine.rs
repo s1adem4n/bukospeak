@@ -525,7 +525,7 @@ mod tests {
     use std::time::Instant;
 
     use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES, Level, SAMPLE_RATE};
-    use bukospeak_server::{Identity, Room};
+    use bukospeak_server::{Downloads, Identity, Room};
     use rtrb::Consumer;
     use tokio::net::UdpSocket;
 
@@ -578,7 +578,7 @@ mod tests {
     /// A room on a new endpoint on localhost that presents the identity.
     fn serve(runtime: &Runtime, identity: &Identity) -> quinn::Endpoint {
         let endpoint = runtime.block_on(async { bukospeak_server::endpoint(identity, "127.0.0.1:0".parse().unwrap()) }).unwrap();
-        runtime.spawn(Room::new(ROOM_KEY.into(), None).serve(endpoint.clone()));
+        runtime.spawn(Room::new(ROOM_KEY.into(), Downloads::none()).serve(endpoint.clone()));
         endpoint
     }
 

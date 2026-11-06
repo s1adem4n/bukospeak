@@ -65,6 +65,10 @@ podman run -d --name bukospeak -p 9988:9988/udp -v bukospeak:/data \
 
 It logs its certificate's fingerprint on start, which clients show on their first join.
 
+WAV files in `/data/sounds`, named after what each tells (`joined`, `left`, `came`, `went`,
+`muted`, `unmuted`, each `.wav`), replace the desktop app's own tones: the app installs them
+from the server after it joins, and again whenever they changed there.
+
 With `-e BUKOSPEAK_NGC_KEY=…`, an API key of [NGC](https://ngc.nvidia.com), NVIDIA's catalogue,
 the server also offers NVIDIA's noise suppression to members with an RTX card under Windows: the
 first time a card generation asks for it, the server downloads it from NGC (about 1.8 GB) into

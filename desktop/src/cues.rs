@@ -1,17 +1,40 @@
 //! The app's sounds, for while its window isn't looked at: when one joins or leaves the call,
 //! the other comes or goes, and the microphone mutes or unmutes. Each is a soft tone, unless the
-//! folder of sounds has a WAV file of its name, which plays instead.
+//! server offers a sound of its name, which plays instead once installed.
 
 use std::f32::consts::TAU;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use bukospeak_core::Error as CallError;
 use bukospeak_core::proto::audio::SAMPLE_RATE;
+use bukospeak_core::proto::control::{Rejection, SOUNDS};
 use cpal::DeviceId;
 
 use crate::audio;
+use crate::install::{self, Error};
+use crate::known_servers::KnownServers;
+
+/// The folder the server's sounds are installed in, if the system has a folder for programs'
+/// data.
+pub fn folder() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|folder| folder.join("bukospeak").join(SOUNDS))
+}
+
+/// Installs the sounds `server` offers, which the room key opens, as it has them now, into
+/// `folder`, or removes them once it offers none. Only a server already trusted is asked: the
+/// sounds aren't worth trusting one. Blocks until they are installed.
+pub fn sync(server: &str, room_key: String, known: &KnownServers, folder: &Path) -> Result<(), Error> {
+    if known.get(server)?.is_none() {
+        return Ok(());
+    }
+    match install::install(server, room_key, known, SOUNDS, folder, |_| ()) {
+        Err(Error::Download(CallError::Rejected(Rejection::Unavailable))) => Ok(install::remove(folder)?),
+        installed => installed,
+    }
+}
 
 /// What a sound tells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,16 +136,16 @@ pub struct Cues {
 }
 
 impl Cues {
-    /// Cues from the WAV files in `folder` where there are, tones where not; the files are read
-    /// each time, so ones put there meanwhile play from then on.
-    pub fn new(folder: PathBuf) -> std::io::Result<Self> {
+    /// Cues from the WAV files in `folder` where there are, tones where not or without a
+    /// folder; the files are read each time, so ones installed meanwhile play from then on.
+    pub fn new(folder: Option<PathBuf>) -> std::io::Result<Self> {
         let (asked, cues) = mpsc::channel::<(Cue, Option<DeviceId>)>();
         thread::Builder::new().name("bukospeak-cues".into()).spawn(move || {
             for (cue, output) in cues {
-                let file = folder.join(cue.file()).with_extension("wav");
-                let sound = match file.exists().then(|| audio::read_sound(&file)) {
-                    Some(Ok(sound)) => sound,
-                    Some(Err(error)) => {
+                let file = folder.as_ref().map(|folder| folder.join(cue.file()).with_extension("wav"));
+                let sound = match file.filter(|file| file.exists()).map(|file| (audio::read_sound(&file), file)) {
+                    Some((Ok(sound), _)) => sound,
+                    Some((Err(error), file)) => {
                         tracing::warn!("{}: {error}", file.display());
                         cue.tone()
                     }

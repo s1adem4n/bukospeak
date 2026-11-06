@@ -7,7 +7,8 @@ use bukospeak_core::proto::{Fingerprint, MemberId};
 
 use crate::audio::Direction;
 use crate::call::{Failure, Notice, Phase, Stage};
-use crate::nvidia::{Architecture, Progress};
+use crate::install::Progress;
+use crate::nvidia::Architecture;
 use crate::settings::{Settings, Suppression};
 
 /// A state of the window: the settings, the call as staged, the system as staged, and the steps

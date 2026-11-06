@@ -1,9 +1,11 @@
-//! Downloads the server offers its members, as NVIDIA's effects for their cards. A [`Source`]
-//! prepares a download once it is first asked for; the server keeps its files in a folder of its
-//! own, each compressed with zstd, and sends them to whoever has the room key.
+//! Downloads the server offers its members, as NVIDIA's effects for their cards and the call's
+//! sounds. A [`Source`] prepares a download once it is first asked for; the server keeps its
+//! files in a folder of its own, each compressed with zstd, and sends them to whoever has the
+//! room key.
 //!
-//! A download is ready once its folder holds the list of its files, which is written last: a
-//! download prepared in part, as when the server stopped meanwhile, is prepared anew.
+//! A download is ready once its folder holds the list of its files, which is written last, and
+//! what it was prepared from is what its source has now: a download prepared in part, as when
+//! the server stopped meanwhile, or from what has changed since, is prepared anew.
 
 use std::collections::HashMap;
 use std::fs;
@@ -15,6 +17,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bukospeak_proto::control::{self, File, FileRequest, Rejection, ServerMessage};
 use quinn::{Connection, ConnectionError, RecvStream, SendStream};
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncSeekExt;
 use tokio::sync::watch;
 
@@ -31,8 +34,9 @@ const LEVEL: i32 = 3;
 
 /// What prepares the downloads the server offers.
 pub trait Source: Send + Sync + 'static {
-    /// Whether it offers the download `name`. A name it offers is safe as a folder's.
-    fn offers(&self, name: &str) -> bool;
+    /// What it would prepare the download `name` from, as a stamp that changes when that
+    /// does; None if it doesn't offer the download. A name it offers is safe as a folder's.
+    fn offers(&self, name: &str) -> anyhow::Result<Option<String>>;
 
     /// Puts the files of the download `name` into `folder`, each by [`compress`], telling
     /// `progress` how many of how many bytes it has so far.
@@ -47,26 +51,46 @@ enum State {
     Failed,
 }
 
+/// A ready download's list, in its folder.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Prepared {
+    /// What its source prepared it from.
+    stamp: String,
+    files: Vec<File>,
+}
+
 /// The downloads the server offers, in their folder.
 pub struct Downloads {
     folder: PathBuf,
-    source: Arc<dyn Source>,
-    /// The downloads asked for since the server started, and where each stands.
-    states: Mutex<HashMap<String, watch::Receiver<State>>>,
+    sources: Vec<Arc<dyn Source>>,
+    /// The downloads asked for since the server started: what each is prepared from, and where
+    /// it stands.
+    states: Mutex<HashMap<String, (String, watch::Receiver<State>)>>,
 }
 
 impl Downloads {
-    /// The downloads `source` prepares, kept in `folder`.
-    pub fn new(folder: PathBuf, source: impl Source) -> Self {
-        Self { folder, source: Arc::new(source), states: Mutex::default() }
+    /// The downloads `sources` prepare, kept in `folder`; a download is the first's that offers
+    /// it.
+    pub fn new(folder: PathBuf, sources: Vec<Arc<dyn Source>>) -> Self {
+        Self { folder, sources, states: Mutex::default() }
+    }
+
+    /// Offering nothing.
+    pub fn none() -> Self {
+        Self::new(PathBuf::new(), Vec::new())
     }
 
     /// Answers a client that asked for the download `name` on the control stream `send`: tells it
     /// how far preparing it got, then its files, and sends each it asks for, until it closes the
     /// connection.
     pub(crate) async fn serve(&self, name: &str, connection: &Connection, mut send: SendStream) -> anyhow::Result<()> {
-        let Some(mut state) = self.state(name)? else {
-            return reject(send, connection, Rejection::Unavailable).await;
+        let mut state = match self.state(name) {
+            Ok(Some(state)) => state,
+            Ok(None) => return reject(send, connection, Rejection::Unavailable).await,
+            Err(error) => {
+                tracing::warn!(name, "offering a download: {error:#}");
+                return reject(send, connection, Rejection::Unavailable).await;
+            }
         };
         let files = loop {
             let now = state.borrow_and_update().clone();
@@ -97,30 +121,39 @@ impl Downloads {
         }
     }
 
-    /// Where the download `name` stands, preparing it if it isn't ready yet nor being prepared;
-    /// None if the source doesn't offer it.
+    /// Where the download `name` stands, preparing it if it isn't ready yet, from what its
+    /// source has now, nor being prepared; None if no source offers it.
     fn state(&self, name: &str) -> anyhow::Result<Option<watch::Receiver<State>>> {
-        if !self.source.offers(name) {
-            return Ok(None);
+        let mut offered = None;
+        for source in &self.sources {
+            if let Some(stamp) = source.offers(name)? {
+                offered = Some((source, stamp));
+                break;
+            }
         }
+        let Some((source, stamp)) = offered else { return Ok(None) };
         let mut states = self.states.lock().expect("the states lock is never poisoned");
-        if let Some(state) = states.get(name)
-            && !matches!(*state.borrow(), State::Failed)
-        {
-            return Ok(Some(state.clone()));
+        if let Some((prepared, state)) = states.get(name) {
+            match *state.borrow() {
+                // Being prepared, it is told when ready, from what it was then; the next ask
+                // after prepares it anew if that changed meanwhile.
+                State::Preparing { .. } => return Ok(Some(state.clone())),
+                State::Ready(_) if *prepared == stamp => return Ok(Some(state.clone())),
+                State::Ready(_) | State::Failed => {}
+            }
         }
         let folder = self.folder.join(name);
         let state = match read_list(&folder)? {
-            Some(files) => watch::Sender::new(State::Ready(files.into())).subscribe(),
-            None => {
+            Some(prepared) if prepared.stamp == stamp => watch::Sender::new(State::Ready(prepared.files.into())).subscribe(),
+            _ => {
                 let (tell, state) = watch::channel(State::Preparing { done: 0, total: 0 });
-                let (source, folder, name) = (Arc::clone(&self.source), self.folder.clone(), name.to_owned());
+                let (source, folder, name, stamp) = (Arc::clone(source), self.folder.clone(), name.to_owned(), stamp.clone());
                 tokio::task::spawn_blocking(move || {
                     tracing::info!(name, "preparing a download");
                     let progress = |done, total| {
                         tell.send_replace(State::Preparing { done, total });
                     };
-                    match prepare(source.as_ref(), &name, &folder, &progress) {
+                    match prepare(source.as_ref(), &name, stamp, &folder, &progress) {
                         Ok(files) => {
                             tracing::info!(name, "prepared a download");
                             tell.send_replace(State::Ready(files.into()));
@@ -134,26 +167,28 @@ impl Downloads {
                 state
             }
         };
-        states.insert(name.to_owned(), state.clone());
+        states.insert(name.to_owned(), (stamp, state.clone()));
         Ok(Some(state))
     }
 }
 
 /// Has `source` put the files of the download `name` into a folder of their own beside where
-/// they go, lists them there, and moves the folder in place.
-fn prepare(source: &dyn Source, name: &str, folder: &Path, progress: &dyn Fn(u64, u64)) -> anyhow::Result<Vec<File>> {
+/// they go, lists them there with the `stamp` of what they were prepared from, and moves the
+/// folder in place.
+fn prepare(source: &dyn Source, name: &str, stamp: String, folder: &Path, progress: &dyn Fn(u64, u64)) -> anyhow::Result<Vec<File>> {
     let preparing = folder.join(format!(".{name}"));
     remove_folder(&preparing)?;
     fs::create_dir_all(&preparing).with_context(|| format!("creating {}", preparing.display()))?;
     source.prepare(name, &preparing, progress)?;
     let mut files = Vec::new();
     list(&preparing, "", &mut files)?;
-    let text = serde_json::to_string(&files).expect("a list of files is plain text");
+    let prepared = Prepared { stamp, files };
+    let text = serde_json::to_string(&prepared).expect("a list of files is plain text");
     fs::write(preparing.join(LIST), text).context("writing the list of files")?;
     let ready = folder.join(name);
     remove_folder(&ready)?;
     fs::rename(&preparing, &ready).with_context(|| format!("moving the download to {}", ready.display()))?;
-    Ok(files)
+    Ok(prepared.files)
 }
 
 /// Adds the files in `folder`, named relative to the download's folder as `prefix` is, with
@@ -175,11 +210,19 @@ fn list(folder: &Path, prefix: &str, files: &mut Vec<File>) -> anyhow::Result<()
 }
 
 /// The list of the download's files in `folder`, if the download is ready.
-fn read_list(folder: &Path) -> anyhow::Result<Option<Vec<File>>> {
-    match fs::read_to_string(folder.join(LIST)) {
-        Ok(text) => Ok(Some(serde_json::from_str(&text).context("reading the list of files")?)),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).context("reading the list of files"),
+fn read_list(folder: &Path) -> anyhow::Result<Option<Prepared>> {
+    let text = match fs::read_to_string(folder.join(LIST)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("reading the list of files"),
+    };
+    match serde_json::from_str(&text) {
+        Ok(prepared) => Ok(Some(prepared)),
+        // The list of a server before stamps: what it lists is prepared anew.
+        Err(error) => {
+            tracing::info!("{} isn't this server's list of files, so it is prepared anew: {error}", folder.display());
+            Ok(None)
+        }
     }
 }
 
@@ -221,8 +264,8 @@ mod tests {
     struct Two;
 
     impl Source for Two {
-        fn offers(&self, name: &str) -> bool {
-            name == "first"
+        fn offers(&self, name: &str) -> anyhow::Result<Option<String>> {
+            Ok((name == "first").then(|| "stamp".into()))
         }
 
         fn prepare(&self, _: &str, folder: &Path, progress: &dyn Fn(u64, u64)) -> anyhow::Result<()> {
@@ -243,12 +286,12 @@ mod tests {
     #[test]
     fn a_prepared_download_lists_its_files_compressed_and_is_ready_after() {
         let folder = folder("prepared");
-        let files = prepare(&Two, "first", &folder, &|_, _| ()).unwrap();
+        let files = prepare(&Two, "first", "stamp".into(), &folder, &|_, _| ()).unwrap();
         assert_eq!(files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), ["one", "sub/two"]);
         let compressed = fs::read(folder.join("first/sub/two")).unwrap();
         assert_eq!((files[1].size, files[1].sha256.clone()), control::digest(&mut compressed.as_slice()).unwrap());
         assert_eq!(zstd::decode_all(compressed.as_slice()).unwrap(), [7u8; 10_000]);
-        assert_eq!(read_list(&folder.join("first")).unwrap().unwrap(), files);
+        assert_eq!(read_list(&folder.join("first")).unwrap().unwrap(), Prepared { stamp: "stamp".into(), files });
         assert!(!folder.join(".first").exists());
         fs::remove_dir_all(folder).unwrap();
     }

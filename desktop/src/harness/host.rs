@@ -1,13 +1,14 @@
 //! The system as a scene gives it: settings kept nowhere, a room key in memory, devices and an
-//! RTX card as staged, and NVIDIA's effects installing without end.
+//! RTX card as staged, NVIDIA's effects installing without end, and no sounds from a server.
 
 use std::sync::Mutex;
 use std::thread;
 
 use crate::audio::{self, Device, DeviceId, Direction};
 use crate::autostart;
+use crate::install::{self, Progress};
 use crate::known_servers::KnownServers;
-use crate::nvidia::{self, Architecture, Progress};
+use crate::nvidia::Architecture;
 use crate::settings::{self, Settings};
 use crate::ui::Host;
 
@@ -70,11 +71,15 @@ impl Host for Staged {
         _: &KnownServers,
         _: Architecture,
         progress: &mut dyn FnMut(Progress),
-    ) -> Result<(), nvidia::Error> {
+    ) -> Result<(), install::Error> {
         progress(self.installing);
         // Stays where it got, as the scene shows it; the harness ends without waiting for it.
         loop {
             thread::park();
         }
+    }
+
+    fn sync_sounds(&self, _: &str, _: String, _: &KnownServers) -> Result<(), install::Error> {
+        Ok(())
     }
 }

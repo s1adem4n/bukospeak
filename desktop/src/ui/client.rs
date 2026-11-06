@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::audio::Direction;
 use crate::call::{Call, Happening, Phase};
-use crate::nvidia::{self, Architecture, Effects, Progress};
+use crate::install::{self, Progress};
+use crate::nvidia::{Architecture, Effects};
 use crate::settings::{self as stored, Settings, Suppression};
 use crate::ui::host::Host;
 use bukospeak_core::Error;
@@ -53,7 +54,7 @@ impl Nvidia {
 /// What the installation's thread tells.
 enum Installing {
     Progress(Progress),
-    Done(Result<(), nvidia::Error>),
+    Done(Result<(), install::Error>),
 }
 
 pub struct Client {
@@ -69,6 +70,8 @@ pub struct Client {
     lobby: bool,
     /// NVIDIA's effects, once the system's RTX card was found.
     pub nvidia: Option<Nvidia>,
+    /// The server's sounds being installed, if they are.
+    syncing: Option<Task<()>>,
     _happenings: Task<()>,
     _room_key: Task<()>,
     _card: Task<()>,
@@ -92,7 +95,11 @@ impl Client {
         let happenings = cx.spawn(async move |this, cx| {
             while let Some(happening) = happenings.next().await {
                 let applied = this.update(cx, |client, cx| {
+                    let connected = *client.call.phase() == Phase::Connected;
                     client.call.happen(happening);
+                    if !connected && *client.call.phase() == Phase::Connected {
+                        client.sync_sounds(cx);
+                    }
                     client.watch();
                     cx.notify();
                 });
@@ -125,6 +132,7 @@ impl Client {
             mute_keys,
             lobby: false,
             nvidia: None,
+            syncing: None,
             _happenings: happenings,
             _room_key: room_key,
             _card: card,
@@ -219,7 +227,7 @@ impl Client {
 
     /// Takes in how installing NVIDIA's effects ended: they suppress the noise if chosen, or
     /// Standard does once they couldn't be installed.
-    fn installed(&mut self, installed: Result<(), nvidia::Error>, cx: &mut Context<Self>) {
+    fn installed(&mut self, installed: Result<(), install::Error>, cx: &mut Context<Self>) {
         let Some(nvidia) = &mut self.nvidia else { return };
         nvidia.installing = None;
         match installed {
@@ -227,7 +235,7 @@ impl Client {
             Err(error) => {
                 tracing::warn!("installing NVIDIA's effects: {error}");
                 self.trouble = Some(match error {
-                    nvidia::Error::Download(Error::Rejected(Rejection::Unavailable)) => Trouble::NvidiaUnavailable,
+                    install::Error::Download(Error::Rejected(Rejection::Unavailable)) => Trouble::NvidiaUnavailable,
                     _ => Trouble::NvidiaNotInstalled,
                 });
                 if self.settings.suppression.nvidia().is_some() {
@@ -236,6 +244,26 @@ impl Client {
             }
         }
         self.suppress(cx);
+    }
+
+    /// Installs the sounds the server of the call offers as it has them now, in the background,
+    /// unless that is going on: the server is trusted then, and its room key right.
+    fn sync_sounds(&mut self, cx: &mut Context<Self>) {
+        if self.syncing.is_some() {
+            return;
+        }
+        let (server, room_key, known) =
+            (self.settings.server.trim().to_owned(), self.room_key().to_owned(), self.call.known_servers().clone());
+        let host = Arc::clone(&self.host);
+        self.syncing = Some(cx.spawn(async move |this, cx| {
+            let synced = cx.background_spawn(async move { host.sync_sounds(&server, room_key, &known) }).await;
+            // Without them, the cues are the app's own tones.
+            if let Err(error) = synced {
+                tracing::warn!("installing the server's sounds: {error}");
+            }
+            // The app may be quitting meanwhile.
+            let _ = this.update(cx, |client, _| client.syncing = None);
+        }));
     }
 
     /// Takes in the room key the keyring kept, unless one was given meanwhile.

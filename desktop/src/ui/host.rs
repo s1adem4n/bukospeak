@@ -1,14 +1,16 @@
 //! What the window asks of the system it runs on, beside the call: where the settings and the
-//! room key are kept, the audio devices, the RTX card and NVIDIA's effects for it. The app asks
+//! room key are kept, the audio devices, the RTX card and NVIDIA's effects for it, and the
+//! server's sounds. The app asks
 //! the system itself, through [`Desktop`]; the harness stands in for it.
 
 use std::path::PathBuf;
 
 use crate::audio::{self, Device, Direction};
-use crate::autostart;
+use crate::install::{self, Progress};
 use crate::known_servers::KnownServers;
-use crate::nvidia::{self, Architecture, Progress};
+use crate::nvidia::{self, Architecture};
 use crate::settings::{self, Settings};
+use crate::{autostart, cues};
 
 pub trait Host: Send + Sync + 'static {
     fn save_settings(&self, settings: &Settings) -> Result<(), settings::Error>;
@@ -40,7 +42,10 @@ pub trait Host: Send + Sync + 'static {
         known: &KnownServers,
         architecture: Architecture,
         progress: &mut dyn FnMut(Progress),
-    ) -> Result<(), nvidia::Error>;
+    ) -> Result<(), install::Error>;
+
+    /// Installs the sounds the server offers, as [`cues::sync`] does; blocks until they are.
+    fn sync_sounds(&self, server: &str, room_key: String, known: &KnownServers) -> Result<(), install::Error>;
 }
 
 /// The system the app runs on, its settings kept in the file at a path.
@@ -98,7 +103,12 @@ impl Host for Desktop {
         known: &KnownServers,
         architecture: Architecture,
         progress: &mut dyn FnMut(Progress),
-    ) -> Result<(), nvidia::Error> {
+    ) -> Result<(), install::Error> {
         nvidia::install(server, room_key, known, architecture, progress)
+    }
+
+    fn sync_sounds(&self, server: &str, room_key: String, known: &KnownServers) -> Result<(), install::Error> {
+        let folder = cues::folder().ok_or(install::Error::NoFolder)?;
+        cues::sync(server, room_key, known, &folder)
     }
 }

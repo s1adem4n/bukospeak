@@ -90,8 +90,8 @@ impl Ngc {
 }
 
 impl Source for Ngc {
-    fn offers(&self, name: &str) -> bool {
-        Architecture::of_download(name).is_some()
+    fn offers(&self, name: &str) -> anyhow::Result<Option<String>> {
+        Ok(Architecture::of_download(name).map(|_| VERSION.to_owned()))
     }
 
     fn prepare(&self, name: &str, folder: &Path, progress: &dyn Fn(u64, u64)) -> anyhow::Result<()> {

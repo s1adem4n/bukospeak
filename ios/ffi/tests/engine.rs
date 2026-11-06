@@ -10,7 +10,7 @@ use bukospeak_ffi::{
     BukoSpeakEngine, BukoSpeakFingerprint, BukoSpeakJoinResult, BukoSpeakJoinStatus, BukoSpeakMember, BukoSpeakState, BukoSpeakStr,
     BukoSpeakUpdate, bukospeak_engine_free, bukospeak_engine_join, bukospeak_engine_leave, bukospeak_engine_new,
 };
-use bukospeak_server::{Identity, Room};
+use bukospeak_server::{Downloads, Identity, Room};
 use tokio::runtime::Runtime;
 
 const ROOM_KEY: &str = "room-key";
@@ -89,7 +89,7 @@ fn serve() -> Server {
     let identity = Identity::generate().unwrap();
     let endpoint = runtime.block_on(async { bukospeak_server::endpoint(&identity, "127.0.0.1:0".parse().unwrap()) }).unwrap();
     let address = endpoint.local_addr().unwrap().to_string();
-    runtime.spawn(Room::new(ROOM_KEY.into(), None).serve(endpoint));
+    runtime.spawn(Room::new(ROOM_KEY.into(), Downloads::none()).serve(endpoint));
     Server { _runtime: runtime, address, fingerprint: identity.fingerprint().0 }
 }
 

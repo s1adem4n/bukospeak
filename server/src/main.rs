@@ -1,8 +1,9 @@
 use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use bukospeak_server::{Downloads, Identity, Ngc, Room, endpoint};
+use bukospeak_server::{Downloads, Identity, Ngc, Room, Sounds, Source, endpoint};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -13,7 +14,8 @@ struct Args {
     /// The UDP address to listen on.
     #[arg(long, env = "BUKOSPEAK_LISTEN", default_value = "[::]:9988")]
     listen: SocketAddr,
-    /// Where the server keeps its certificate, and the downloads it offers.
+    /// Where the server keeps its certificate and the downloads it offers, and finds the call's
+    /// sounds it offers, in `sounds`.
     #[arg(long, env = "BUKOSPEAK_DATA", default_value = "data")]
     data: PathBuf,
     /// The key members need to join.
@@ -38,7 +40,9 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = endpoint(&identity, args.listen)?;
     tracing::info!(listen = %args.listen, fingerprint = %identity.fingerprint(), "serving");
 
-    let downloads = args.ngc_key.map(|key| Downloads::new(args.data.join("downloads"), Ngc::new(key)));
+    let mut sources: Vec<Arc<dyn Source>> = vec![Arc::new(Sounds::new(args.data.join("sounds")))];
+    sources.extend(args.ngc_key.map(|key| Arc::new(Ngc::new(key)) as Arc<dyn Source>));
+    let downloads = Downloads::new(args.data.join("downloads"), sources);
     tokio::select! {
         () = Room::new(args.room_key, downloads).serve(endpoint.clone()) => {}
         () = shutdown() => {}

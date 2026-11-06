@@ -66,7 +66,6 @@ fn main() {
     let (call, happenings) = Call::new(KnownServers::at(folder.join("known_servers")), DesktopPlayer).expect("the engine's threads start");
     // The system starts the app so, with it: into the tray, unless the window is needed.
     let background = std::env::args().any(|argument| argument == BACKGROUND);
-    let sounds = folder.join("sounds");
 
     let app = gpui_platform::application().with_assets(ui::Assets);
     // The dock's icon, clicked while the window is closed.
@@ -85,7 +84,7 @@ fn main() {
         // the app goes on in the tray until it is told to quit there.
         cx.set_quit_mode(if tray { QuitMode::Explicit } else { QuitMode::LastWindowClosed });
         // It lives as long as the app.
-        let autopilot = Autopilot::new(client.clone(), sounds, cx);
+        let autopilot = Autopilot::new(client.clone(), cx);
         follow(asked, client.clone(), updater.clone(), hotkey, autopilot, cx);
         // Without a tray, or with something to set up first, the window is needed; the room key
         // only tells once the keyring answered.
