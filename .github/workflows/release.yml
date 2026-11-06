@@ -45,6 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
+      # The dependencies main's CI built and cached for releases; a release only reads them.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - run: mise exec -- cargo build --release --locked -p bukospeak-desktop
       # vpk's version is the velopack crate's, pinned in the workspace.
       - uses: actions/setup-dotnet@v6
@@ -94,6 +99,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
+      # The dependencies main's CI built and cached for releases; a release only reads them.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       # cpal's ALSA backend links against libasound; GPUI against the window systems' and the
       # fonts' libraries.
       - if: runner.os == 'Linux'

@@ -38,6 +38,31 @@ jobs:
       - run: mise exec -- cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: mise exec -- cargo test --workspace --locked
 
+  # The release's dependencies, built as release.yml builds them, on its runners and with its
+  # environment, and cached: a tag's run may restore what main saved, so a release compiles only
+  # the workspace instead of everything.
+  release-cache:
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    env:
+      # As in release.yml, whose environment the cache's key includes.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libfreetype-dev
+          libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
+      - run: mise exec -- cargo build --release --locked -p bukospeak-desktop
+
   server-image:
     needs: check
     if: github.event_name == 'push'
