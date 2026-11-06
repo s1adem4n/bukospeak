@@ -6,9 +6,9 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels,
+    AnyElement, App, Bounds, CursorStyle, Decorations, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels,
     RenderOnce, ResizeEdge, Size, Stateful, StatefulInteractiveElement, Styled, Tiling, TitlebarOptions, Window, WindowButton,
-    WindowControlArea, WindowDecorations, WindowOptions, div, point, px, transparent_black,
+    WindowControlArea, WindowDecorations, WindowOptions, div, point, transparent_black,
 };
 
 use crate::ui::glyph::Glyph;
@@ -40,7 +40,7 @@ pub fn options(size: Size<Pixels>, cx: &App) -> WindowOptions {
 /// tiled against the screen's edge or another window. Elsewhere the content alone.
 pub fn frame(content: impl IntoElement, window: &mut Window, cx: &App) -> Stateful<Div> {
     let Decorations::Client { tiling } = window.window_decorations() else {
-        window.set_client_inset(px(0.));
+        window.set_client_inset(Pixels::ZERO);
         return div().id("frame").size_full().child(content);
     };
     window.set_client_inset(theme::FRAME_SHADOW);
@@ -66,7 +66,7 @@ pub fn frame(content: impl IntoElement, window: &mut Window, cx: &App) -> Statef
                 .when(!tiling.right, |edge| edge.border_r(theme::FRAME_BORDER))
                 .when(!tiling.is_tiled(), |edge| {
                     let shadow = tokens.shadow.opacity(if window.is_window_active() { 1. } else { 0.6 });
-                    edge.shadow(vec![BoxShadow::new(px(0.), px(2.), shadow).blur_radius(theme::FRAME_SHADOW / 2.)])
+                    edge.shadow(theme::depth::frame(shadow))
                 })
                 .child(content),
         )
@@ -96,7 +96,7 @@ fn zones(size: Size<Pixels>, tiling: Tiling) -> Vec<(ResizeEdge, Bounds<Pixels>)
     let reach = theme::FRAME_SHADOW * 1.5;
     // Along an edge, between the corners there are; the whole length where both ends are tiled.
     let span = |start_tiled: bool, end_tiled: bool, length: Pixels| {
-        let start = if start_tiled { px(0.) } else { reach };
+        let start = if start_tiled { Pixels::ZERO } else { reach };
         let end = if end_tiled { length } else { length - reach };
         (start, end - start)
     };
@@ -105,22 +105,22 @@ fn zones(size: Size<Pixels>, tiling: Tiling) -> Vec<(ResizeEdge, Bounds<Pixels>)
     let mut zone = |edge, x, y, w, h| zones.push((edge, Bounds::new(point(x, y), gpui::size(w, h))));
     let (x, w) = span(tiling.left, tiling.right, width);
     if !tiling.top {
-        zone(ResizeEdge::Top, x, px(0.), w, reach);
+        zone(ResizeEdge::Top, x, Pixels::ZERO, w, reach);
     }
     if !tiling.bottom {
         zone(ResizeEdge::Bottom, x, height - reach, w, reach);
     }
     let (y, h) = span(tiling.top, tiling.bottom, height);
     if !tiling.left {
-        zone(ResizeEdge::Left, px(0.), y, reach, h);
+        zone(ResizeEdge::Left, Pixels::ZERO, y, reach, h);
     }
     if !tiling.right {
         zone(ResizeEdge::Right, width - reach, y, reach, h);
     }
     let corners = [
-        (ResizeEdge::TopLeft, tiling.top || tiling.left, px(0.), px(0.)),
-        (ResizeEdge::TopRight, tiling.top || tiling.right, width - reach, px(0.)),
-        (ResizeEdge::BottomLeft, tiling.bottom || tiling.left, px(0.), height - reach),
+        (ResizeEdge::TopLeft, tiling.top || tiling.left, Pixels::ZERO, Pixels::ZERO),
+        (ResizeEdge::TopRight, tiling.top || tiling.right, width - reach, Pixels::ZERO),
+        (ResizeEdge::BottomLeft, tiling.bottom || tiling.left, Pixels::ZERO, height - reach),
         (ResizeEdge::BottomRight, tiling.bottom || tiling.right, width - reach, height - reach),
     ];
     for (edge, tiled, x, y) in corners {
@@ -296,7 +296,7 @@ fn buttons(buttons: Vec<WindowButton>, window: &Window, cx: &App) -> impl IntoEl
                         .when(!close, |control| control.hover(|style| style.bg(tokens.inset).text_color(tokens.text)))
                 } else {
                     control
-                        .size(theme::CHIP + px(4.))
+                        .size(theme::WINDOW_BUTTON)
                         .rounded_full()
                         .bg(tokens.inset)
                         .hover(|style| style.bg(tokens.hover).text_color(tokens.text))
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn the_margin_resizes_by_the_edges_and_corners_not_tiled() {
-        let window = size(px(400.), px(300.));
+        let window = size(theme::step(100.), theme::step(75.));
         let edges = |tiling| zones(window, tiling).into_iter().map(|(edge, _)| edge).collect::<Vec<_>>();
         assert_eq!(edges(Tiling::default()).len(), 8);
         let top = Tiling { top: true, ..Tiling::default() };
@@ -338,8 +338,9 @@ mod tests {
     #[test]
     fn a_side_reaches_into_a_tiled_corner() {
         let top = Tiling { top: true, ..Tiling::default() };
-        let (_, left) = zones(size(px(400.), px(300.)), top).into_iter().find(|(edge, _)| *edge == ResizeEdge::Left).unwrap();
-        assert_eq!(left.top(), px(0.));
-        assert_eq!(left.bottom(), px(300.) - theme::FRAME_SHADOW * 1.5);
+        let (_, left) =
+            zones(size(theme::step(100.), theme::step(75.)), top).into_iter().find(|(edge, _)| *edge == ResizeEdge::Left).unwrap();
+        assert_eq!(left.top(), Pixels::ZERO);
+        assert_eq!(left.bottom(), theme::step(75.) - theme::FRAME_SHADOW * 1.5);
     }
 }

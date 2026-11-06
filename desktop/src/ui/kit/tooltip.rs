@@ -1,8 +1,8 @@
 //! A tooltip: a line of text floating beside the pointer while it rests on a control.
 
-use gpui::{AnyView, App, AppContext, BoxShadow, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div, px};
+use gpui::{AnyView, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div};
 
-use crate::ui::theme::{self, ActiveTokens};
+use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 pub struct Tooltip {
     text: SharedString,
@@ -20,17 +20,17 @@ impl Render for Tooltip {
         let tokens = cx.tokens();
         // Off the pointer, which would otherwise cover its start; drawn above the window's
         // content, it takes nothing of the content's text style.
-        div().pl_2().pt_2p5().child(
+        div().pl_2().pt(theme::TOOLTIP_OFFSET).child(
             div()
                 .px_2()
                 .py_1()
-                .rounded(theme::RADIUS_SMALL)
+                .rounded(theme::RADIUS_CONTROL_SM)
                 .bg(tokens.floating)
                 .border_1()
                 .border_color(tokens.edge)
-                .shadow(vec![BoxShadow::new(px(0.), px(2.), tokens.shadow).blur_radius(px(6.))])
+                .shadow(theme::depth::floating(tokens))
                 .font_family(theme::SANS)
-                .text_size(theme::TEXT_SM)
+                .typeset(theme::TEXT_SM)
                 .text_color(tokens.text)
                 .child(self.text.clone()),
         )

@@ -1,23 +1,19 @@
-//! The settings: who one is and where, the audio, and the server, each kept as soon as it is
+//! The settings: the microphone, the output, and who one is where, each kept as soon as it is
 //! changed: the fields once Enter is pressed or the focus goes, the rest at once.
 
+use crate::audio::{self, Direction};
+use crate::nvidia::Progress;
+use crate::settings::Suppression;
 use bukospeak_core::MAX_VOLUME;
-use bukospeak_desktop::audio::{self, Direction};
-use bukospeak_desktop::nvidia::Progress;
-use bukospeak_desktop::settings::Suppression;
-use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Context, DismissEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
+    AnyElement, App, AppContext, Context, DismissEvent, Entity, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
 };
 
 use crate::ui::client::Client;
-use crate::ui::glyph::Glyph;
 use crate::ui::kit::menu::{Item, Menu, Place, Popover};
-use crate::ui::kit::{
-    self, Avatar, Button, Icon, InlineField, InlineFieldEvent, InputLevel, Look, Slider, SliderEvent, Switch, Variant, h_flex, v_flex,
-};
-use crate::ui::theme::{self, ActiveTokens};
+use crate::ui::kit::{self, InlineField, InlineFieldEvent, InputLevel, Look, Slider, SliderEvent, Spinner, Switch, h_flex, v_flex};
+use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 /// A device to choose: the system's default for None.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,12 +45,13 @@ enum Opened {
     Suppression,
 }
 
-/// The choices of noise suppression, by their titles; NVIDIA's on an RTX card.
+/// The choices of noise suppression, by their titles: the app's own, then NVIDIA's, which an RTX
+/// card is offered under NVIDIA's name.
 const SUPPRESSIONS: [(Suppression, &str); 4] = [
     (Suppression::Off, "Aus"),
     (Suppression::Standard, "Standard"),
-    (Suppression::NvidiaDereverbDenoiser, "NVIDIA Rauschen und Hall"),
-    (Suppression::NvidiaStudioVoice, "NVIDIA Studio Voice"),
+    (Suppression::NvidiaDereverbDenoiser, "Rauschen und Hall"),
+    (Suppression::NvidiaStudioVoice, "Studio Voice"),
 ];
 
 pub struct Settings {
@@ -84,7 +81,7 @@ impl Settings {
         let percent = read.settings.volume.min(most);
         let meter = read.call.meter().clone();
 
-        let name = cx.new(|cx| InlineField::new(name, "Name", Look::Title, window, cx).required());
+        let name = cx.new(|cx| InlineField::new(name, "Name", Look::Plain, window, cx).required());
         let server = cx.new(|cx| InlineField::new(server, "server.example:9988", Look::Mono, window, cx));
         let room_key = cx.new(|cx| InlineField::new(room_key, "Nicht gesetzt", Look::Secret, window, cx));
         let level = cx.new(|cx| InputLevel::new(meter, cx));
@@ -98,9 +95,10 @@ impl Settings {
                 settings.client.update(cx, |client, cx| client.set_volume(event.value as u16, event.done, cx));
             }),
         ];
+        let host = std::sync::Arc::clone(client.read(cx).host());
         let listing = cx.spawn(async move |settings, cx| {
-            let list = |direction| {
-                audio::devices(direction).unwrap_or_else(|error| {
+            let list = move |direction| {
+                host.devices(direction).unwrap_or_else(|error| {
                     tracing::warn!("{error}");
                     Vec::new()
                 })
@@ -137,58 +135,23 @@ impl Settings {
         self.room_key.update(cx, |field, cx| field.set_value(key, cx));
     }
 
-    fn render_profile(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let client = self.client.read(cx);
-        let tokens = cx.tokens();
-        kit::panel(cx)
-            .flex()
-            .items_center()
-            .gap_3()
-            .p(theme::PANEL_INSET)
-            .child(Avatar::new(client.settings.name.clone(), theme::AVATAR_LG))
-            .child(
-                v_flex().flex_1().min_w_0().child(self.name.clone()).child(
-                    div()
-                        .truncate()
-                        .font_family(theme::MONO)
-                        .text_size(theme::TEXT_SM)
-                        .text_color(tokens.text_faint)
-                        .child(client.settings.server.clone()),
-                ),
-            )
-    }
-
-    /// A row that chooses a device from a menu: the row opens it, below its end.
+    /// A row that chooses a device from a menu, which the row opens below its end: the device's
+    /// name, which its group titles, and for the microphone how loud it is at the end.
     fn render_device(&self, direction: Direction, cx: &mut Context<Self>) -> AnyElement {
-        let (id, label, choices) = match direction {
-            Direction::Input => ("input", "Mikrofon", &self.inputs),
-            Direction::Output => ("output", "Ausgabe", &self.outputs),
+        let (id, choices) = match direction {
+            Direction::Input => ("input", &self.inputs),
+            Direction::Output => ("output", &self.outputs),
         };
         let kept = self.client.read(cx).settings.device_id(direction);
         let chosen =
             choices.iter().find(|choice| choice.id.as_deref() == kept).map_or_else(|| "Standard".into(), |choice| choice.title.clone());
-        let tokens = cx.tokens();
         let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Device(direction)).map(|(_, menu, _)| menu);
+        // The level sits where other rows show their value: the row reads as they do.
+        let level = (direction == Direction::Input).then(|| self.level.clone().into_any_element());
         div()
             .relative()
             .child(
-                Button::new(id, Variant::Ghost)
-                    .w_full()
-                    .h(theme::ROW)
-                    .px(theme::PANEL_INSET - theme::PANEL_PAD)
-                    .justify_between()
-                    .gap_3()
-                    .font_weight(FontWeight::NORMAL)
-                    .selected(open.is_some())
-                    .child(div().flex_none().text_color(tokens.text).child(label))
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .gap_1p5()
-                            .when(direction == Direction::Input, |value| value.child(div().mr_1().child(self.level.clone())))
-                            .child(div().min_w_0().truncate().child(chosen))
-                            .child(Icon::new(Glyph::Choose).size(theme::ICON_SM).color(tokens.text_faint)),
-                    )
+                kit::menu_row(id, div().truncate().child(chosen), level, open.is_some(), cx)
                     .on_click(cx.listener(move |settings, _, window, cx| settings.open_devices(direction, window, cx))),
             )
             .children(open.map(|menu| Popover::new(menu, Place::BelowEnd)))
@@ -238,39 +201,23 @@ impl Settings {
         let chosen =
             SUPPRESSIONS.iter().find(|(suppression, _)| *suppression == client.settings.suppression).map_or("", |(_, title)| title);
         let installing = client.nvidia.as_ref().and_then(|nvidia| nvidia.installing).map(|progress| match progress {
-            Progress::Preparing { done, total } => format!("Vorbereitung {} %", (done * 100).checked_div(total).unwrap_or(0)),
-            Progress::Fetching { done, total } => format!("Lädt {} %", (done * 100).checked_div(total).unwrap_or(0)),
+            Progress::Preparing { done, total } | Progress::Fetching { done, total } => (done * 100).checked_div(total).unwrap_or(0),
         });
         let tokens = cx.tokens();
         let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Suppression).map(|(_, menu, _)| menu);
+        let value = h_flex().gap_1p5().text_color(tokens.text_muted).child(chosen).children(installing.map(|percent| {
+            h_flex()
+                .gap_1()
+                .font_family(theme::MONO)
+                .typeset(theme::TEXT_SM)
+                .text_color(tokens.text_faint)
+                .child(Spinner::new(theme::ICON_SM).color(tokens.speaking))
+                .child(format!("{percent} %"))
+        }));
         div()
             .relative()
             .child(
-                Button::new("suppression", Variant::Ghost)
-                    .w_full()
-                    .h(theme::ROW)
-                    .px(theme::PANEL_INSET - theme::PANEL_PAD)
-                    .justify_between()
-                    .gap_3()
-                    .font_weight(FontWeight::NORMAL)
-                    .selected(open.is_some())
-                    .child(div().flex_none().text_color(tokens.text).child("Rauschunterdrückung"))
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .gap_1p5()
-                            .children(installing.map(|installing| {
-                                div()
-                                    .flex_none()
-                                    .mr_1()
-                                    .font_family(theme::MONO)
-                                    .text_size(theme::TEXT_SM)
-                                    .text_color(tokens.text_faint)
-                                    .child(installing)
-                            }))
-                            .child(div().min_w_0().truncate().child(chosen))
-                            .child(Icon::new(Glyph::Choose).size(theme::ICON_SM).color(tokens.text_faint)),
-                    )
+                kit::menu_row("suppression", "Rauschfilter", Some(value.into_any_element()), open.is_some(), cx)
                     .on_click(cx.listener(|settings, _, window, cx| settings.open_suppressions(window, cx))),
             )
             .children(open.map(|menu| Popover::new(menu, Place::BelowEnd)))
@@ -294,38 +241,29 @@ impl Settings {
             let (built_in, nvidias) = SUPPRESSIONS.split_at(2);
             let menu = built_in.iter().fold(menu, |menu, choice| menu.item(item(choice)));
             match nvidia {
-                true => nvidias.iter().fold(menu.separator(), |menu, choice| menu.item(item(choice))),
+                true => nvidias.iter().fold(menu.separator().heading("NVIDIA"), |menu, choice| menu.item(item(choice))),
                 false => menu,
             }
         });
         self.show(Opened::Suppression, menu, cx);
     }
 
-    fn render_audio(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let settings = &self.client.read(cx).settings;
-        let tokens = cx.tokens();
-        let (percent, echo) = (settings.volume, settings.echo_cancellation);
-        let volume = kit::row("Lautstärke", cx).child(
-            h_flex().flex_none().w(theme::VOLUME).gap_3().child(div().flex_1().child(self.volume.clone())).child(
+    /// How loud the others are: the slider from the panel's inset, its value at the end.
+    fn render_volume(&self, cx: &mut Context<Self>) -> AnyElement {
+        let percent = self.client.read(cx).settings.volume;
+        kit::row_frame()
+            // The rail, not the knob's room around it, starts where the labels do.
+            .child(div().flex_1().ml(-theme::SLIDER_KNOB / 2.).child(self.volume.clone()))
+            .child(
                 div()
                     .w(theme::VOLUME_VALUE)
                     .text_right()
                     .font_family(theme::MONO)
-                    .text_size(theme::TEXT_SM)
-                    .text_color(tokens.text_muted)
+                    .typeset(theme::TEXT_SM)
+                    .text_color(cx.tokens().text_muted)
                     .child(format!("{percent} %")),
-            ),
-        );
-        kit::list(
-            [
-                self.render_device(Direction::Input, cx),
-                self.render_device(Direction::Output, cx),
-                volume.into_any_element(),
-                self.render_suppression(cx),
-                self.render_switch("echo", "Echounterdrückung", echo, Client::set_echo_cancellation, cx),
-            ],
-            cx,
-        )
+            )
+            .into_any_element()
     }
 
     fn render_switch(
@@ -348,23 +286,27 @@ impl Settings {
 
 impl Render for Settings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let server = kit::list(
-            [
-                kit::row("Adresse", cx).child(self.server.clone()).into_any_element(),
-                kit::row("Raumschlüssel", cx).child(self.room_key.clone()).into_any_element(),
-            ],
-            cx,
-        );
+        let echo = self.client.read(cx).settings.echo_cancellation;
+        let microphone = [
+            self.render_device(Direction::Input, cx),
+            self.render_suppression(cx),
+            self.render_switch("echo", "Echounterdrückung", echo, Client::set_echo_cancellation, cx),
+        ];
+        let output = [self.render_device(Direction::Output, cx), self.render_volume(cx)];
+        let account = [
+            kit::row("Name", cx).child(self.name.clone()).into_any_element(),
+            kit::row("Server", cx).child(self.server.clone()).into_any_element(),
+            kit::row("Raumschlüssel", cx).child(self.room_key.clone()).into_any_element(),
+        ];
         div().id("settings").flex_1().min_h_0().overflow_y_scroll().child(
             v_flex()
-                .px(theme::GAP)
-                .pb(theme::GAP)
-                .gap(theme::GAP)
-                .child(self.render_profile(cx))
-                .child(kit::section("Audio", cx))
-                .child(self.render_audio(cx))
-                .child(kit::section("Server", cx))
-                .child(server),
+                .px(theme::GUTTER)
+                .pt_3()
+                .pb(theme::GUTTER)
+                .gap_5()
+                .child(kit::group("Mikrofon", microphone, cx))
+                .child(kit::group("Ausgabe", output, cx))
+                .child(kit::group("Konto", account, cx)),
         )
     }
 }

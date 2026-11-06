@@ -1,22 +1,27 @@
-//! The channel: a panel of who is in it, from outside or in the call, and beneath it the dock,
-//! which tells how the call is and holds the button to join or, in the call, to mute and leave.
-//! Between them a release waiting for the call to end, which can be installed at once.
+//! The channel: a stage of who is in it, each on a tile, from outside or in the call, and beneath
+//! it the dock, which tells how the call is and holds the button to join or, in the call, to
+//! mute and leave. Above the dock a notice, and a release waiting for the call to end.
 
 use std::time::Duration;
 
-use bukospeak_desktop::call::Phase;
+use crate::call::Phase;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
+    Animation, AnimationExt, AnimationPhase, AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, SpringAnimation, StatefulInteractiveElement, Styled, Subscription, Task, Window, div,
+    ease_out_quint, pulsating_between,
 };
 
 use crate::ui::client::{Client, Missing};
 use crate::ui::glyph::Glyph;
-use crate::ui::kit::{self, Avatar, Button, Icon, Variant, h_flex, v_flex};
+use crate::ui::kit::{self, Avatar, Button, Icon, Size, Variant, h_flex, v_flex};
+use crate::ui::marks::Mark;
 use crate::ui::text;
-use crate::ui::theme::{self, ActiveTokens};
+use crate::ui::theme::{self, ActiveTokens, Seats, Tokens, Typeset};
 use crate::update::{State, Updater};
+
+/// How long one's own place pulses, out and back, while the join is under way.
+const PULSE: Duration = Duration::from_millis(1400);
 
 /// Where the channel sends the window.
 pub enum ChannelEvent {
@@ -72,104 +77,79 @@ impl Channel {
         }
     }
 
-    fn render_members(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The places on the stage: in a call its members, the place of whoever comes next beside
+    /// one alone; outside it who is in the channel, and one's own place after them.
+    fn seats(&self, cx: &App) -> Vec<Seat> {
         let client = self.client.read(cx);
         let call = &client.call;
-        let members: Vec<Member> = if call.is_in_call() {
+        if call.is_in_call() {
             let you = call.you();
-            call.members()
+            let mut seats: Vec<Seat> = call
+                .members()
                 .iter()
                 .map(|member| {
-                    Member {
+                    Seat::Member(Member {
                         id: member.id.0,
                         name: member.name.clone().into(),
                         speaks: call.speaking().contains(&member.id),
                         // One's own as set here, before the server tells it back.
                         muted: if Some(member.id) == you { call.is_muted() } else { member.muted },
                         reconnecting: member.reconnecting,
-                    }
+                    })
                 })
-                .collect()
+                .collect();
+            if seats.len() == 1 {
+                seats.push(Seat::Empty);
+            }
+            seats
         } else {
-            call.present()
-                .iter()
-                .map(|member| Member {
+            let present = call.present().iter().map(|member| {
+                Seat::Member(Member {
                     id: member.id.0,
                     name: member.name.clone().into(),
                     speaks: false,
                     muted: member.muted,
                     reconnecting: member.reconnecting,
                 })
-                .collect()
-        };
-        let tokens = cx.tokens();
-        let head = h_flex()
-            .flex_none()
-            .h(theme::HEAD)
-            .px(theme::PANEL_INSET)
-            .gap_2()
-            .border_b_1()
-            .border_color(tokens.hairline)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Kanal"))
-            .child(kit::chip(members.len().to_string(), cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_right()
-                    .truncate()
-                    .font_family(theme::MONO)
-                    .text_size(theme::TEXT_SM)
-                    .text_color(tokens.text_faint)
-                    .child(client.settings.server.clone()),
-            );
-        let body = if members.is_empty() {
-            v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_2p5()
-                .text_color(tokens.text_muted)
-                .child(kit::tile(Glyph::Users, cx))
-                .child("Niemand im Kanal")
-                .into_any_element()
-        } else {
-            let reconnecting = *call.phase() == Phase::Reconnecting;
-            div()
-                .id("members")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .p(theme::PANEL_PAD)
-                .flex()
-                .flex_col()
-                .when(reconnecting, |list| list.opacity(theme::RECONNECTING_OPACITY))
-                .children(members.into_iter().map(|member| member.render(cx)))
-                .into_any_element()
-        };
-        kit::panel(cx).flex_1().min_h_0().flex().flex_col().child(head).child(body)
+            });
+            let you = Seat::Waiting { name: client.settings.name.clone().into(), joining: *call.phase() == Phase::Joining };
+            present.chain([you]).collect()
+        }
     }
 
-    /// One line of what went wrong beside the call: its notice, else the settings' trouble.
-    fn render_notice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let client = self.client.read(cx);
-        let message = match (client.call.notice(), client.trouble) {
-            (Some(notice), _) => text::notice(notice),
-            (None, Some(trouble)) => text::trouble(trouble),
-            (None, None) => return None,
+    fn render_stage(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let seats = self.seats(cx);
+        let layout = match seats.len() {
+            0..=2 => theme::SEATS_TWO,
+            3..=4 => theme::SEATS_FOUR,
+            _ => theme::SEATS_MANY,
         };
-        let tokens = cx.tokens();
-        Some(
-            kit::panel(cx)
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_2p5()
-                .h(theme::ROW)
-                .px(theme::PANEL_INSET)
-                .child(Icon::new(Glyph::Warning).size(theme::ICON_SM).color(tokens.warning))
-                .child(div().min_w_0().truncate().child(message)),
-        )
+        // A few sit in the middle of the stage; many fill it from the top and scroll.
+        let centered = seats.len() <= 4;
+        let full_rows = seats.len() > layout.columns;
+        let rows: Vec<AnyElement> = seats
+            .chunks(layout.columns)
+            .map(|row| {
+                // The last row's tiles keep the width of those above it.
+                let spacers = if full_rows { layout.columns - row.len() } else { 0 };
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .gap_3()
+                    .children(row.iter().map(|seat| seat.render(layout, cx)))
+                    .children((0..spacers).map(|_| div().flex_1().max_w(layout.width)))
+                    .into_any_element()
+            })
+            .collect();
+        let reconnecting = *self.client.read(cx).call.phase() == Phase::Reconnecting;
+        div()
+            .id("stage")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(theme::GUTTER)
+            .when(reconnecting, |stage| stage.opacity(theme::RECONNECTING_OPACITY))
+            .child(v_flex().py_3().gap_3().when(centered, |rows| rows.size_full().justify_center()).children(rows))
     }
 
     /// A release downloaded, which waits for the call to end, unless installed at once.
@@ -180,20 +160,15 @@ impl Channel {
         };
         let tokens = cx.tokens();
         Some(
-            kit::panel(cx)
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_3()
-                .p(theme::PANEL_PAD)
-                .pl(theme::PANEL_INSET)
-                .child(Icon::new(Glyph::Download).color(tokens.speaking))
+            kit::callout(Icon::new(Glyph::Download).size(theme::ICON_SM).color(tokens.speaking), cx)
+                .py(theme::PANEL_PAD)
+                .pr(theme::PANEL_PAD)
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
                         .child(div().truncate().font_weight(FontWeight::MEDIUM).child(format!("Update {version} bereit")))
-                        .child(div().truncate().text_size(theme::TEXT_SM).text_color(tokens.text_muted).child("Nach dem Verlassen")),
+                        .child(div().truncate().typeset(theme::TEXT_SM).text_color(tokens.text_muted).child("Nach dem Verlassen")),
                 )
                 .child(
                     Button::new("update", Variant::Raised)
@@ -203,26 +178,40 @@ impl Channel {
         )
     }
 
-    /// How the call is, and what to do with it.
-    fn render_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// How the call is, and how long it is up: what went wrong beside it, while something did,
+    /// else its state; a failed join before all. Out of a call and without trouble the line is
+    /// empty but keeps its place, so the stage doesn't move when one joins.
+    fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
         let call = &client.call;
         let tokens = cx.tokens();
-        let (status, color, label): (SharedString, _, _) = match call.phase() {
-            Phase::Idle => ("Nicht verbunden".into(), tokens.text_faint, tokens.text_muted),
-            Phase::Joining => ("Verbinde…".into(), tokens.text_faint, tokens.text_muted),
-            Phase::Connected => ("Verbunden".into(), tokens.speaking, tokens.text),
-            Phase::Reconnecting => ("Verbinde neu…".into(), tokens.warning, tokens.text),
-            Phase::Failed(failure) => (text::failure(failure).into(), tokens.danger, tokens.danger),
+        let notice = match (call.notice(), client.trouble) {
+            (Some(notice), _) => Some(text::notice(notice)),
+            (None, Some(trouble)) => Some(text::trouble(trouble)),
+            (None, None) => None,
+        };
+        let (status, dot, color): (SharedString, _, _) = match (call.phase(), notice) {
+            (Phase::Failed(failure), _) => (text::failure(failure).into(), tokens.danger, tokens.danger),
+            (_, Some(notice)) => (notice.into(), tokens.warning, tokens.text),
+            (Phase::Idle, None) => return div().h(theme::TEXT_SM.line).into_any_element(),
+            (Phase::Joining, None) => ("Verbinde…".into(), tokens.text_faint, tokens.text_muted),
+            (Phase::Connected, None) => ("Verbunden".into(), tokens.speaking, tokens.text_muted),
+            (Phase::Reconnecting, None) => ("Verbinde neu…".into(), tokens.warning, tokens.text),
         };
         let time = call.since().map(|since| clock(since.elapsed()));
-        let status = h_flex()
-            .h(theme::STATUS)
-            .px(theme::PANEL_INSET - theme::PANEL_PAD)
-            .gap_2p5()
-            .child(kit::dot(color))
-            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(label).child(status))
-            .children(time.map(|time| div().font_family(theme::MONO).text_size(theme::TEXT_SM).text_color(tokens.text_faint).child(time)));
+        // On the inset of the panels above it, so its text starts where a notice's does.
+        kit::led(kit::dot(dot))
+            .px(theme::PANEL_INSET)
+            .typeset(theme::TEXT_SM)
+            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(color).child(status))
+            .children(time.map(|time| div().font_family(theme::MONO).text_color(tokens.text_faint).child(time)))
+            .into_any_element()
+    }
+
+    /// What to do with the call.
+    fn render_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let client = self.client.read(cx);
+        let call = &client.call;
         let actions: Vec<AnyElement> = match call.phase() {
             Phase::Connected | Phase::Reconnecting => {
                 let mute = if call.is_muted() {
@@ -231,11 +220,13 @@ impl Channel {
                     Button::new("mute", Variant::Raised).icon(Glyph::Mic).label("Stummschalten")
                 };
                 vec![
-                    mute.flex_1()
+                    mute.size(Size::Large)
+                        .flex_1()
                         .keys(client.mute_keys)
                         .on_click(cx.listener(|channel, _, _, cx| channel.client.update(cx, |client, cx| client.toggle_mute(cx))))
                         .into_any_element(),
                     Button::new("leave", Variant::Danger)
+                        .size(Size::Large)
                         .square()
                         .icon(Glyph::PhoneOff)
                         .tooltip("Verlassen")
@@ -245,11 +236,13 @@ impl Channel {
             }
             Phase::Failed(_) => vec![
                 Button::new("settings", Variant::Raised)
+                    .size(Size::Large)
                     .flex_1()
                     .label("Einstellungen")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ChannelEvent::Settings)))
                     .into_any_element(),
                 Button::new("join", Variant::Primary)
+                    .size(Size::Large)
                     .flex_1()
                     .label("Erneut beitreten")
                     .on_click(cx.listener(|channel, _, _, cx| channel.join(cx)))
@@ -257,6 +250,7 @@ impl Channel {
             ],
             Phase::Idle | Phase::Joining => vec![
                 Button::new("join", Variant::Primary)
+                    .size(Size::Large)
                     .flex_1()
                     .label("Beitreten")
                     .loading(*call.phase() == Phase::Joining)
@@ -264,34 +258,39 @@ impl Channel {
                     .into_any_element(),
             ],
         };
-        kit::panel(cx)
-            .flex_none()
-            .p(theme::PANEL_PAD)
-            .flex()
-            .flex_col()
-            .gap(theme::PANEL_PAD)
-            .child(status)
-            .child(h_flex().gap(theme::PANEL_PAD).children(actions))
+        h_flex().gap_2().children(actions)
     }
 }
 
 impl Render for Channel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .px(theme::GAP)
-            .pb(theme::GAP)
-            .gap(theme::GAP)
-            .child(self.render_members(cx))
-            .children(self.render_notice(cx))
-            .children(self.render_update(cx))
-            .child(self.render_dock(cx))
+        v_flex().flex_1().min_h_0().child(self.render_stage(cx)).child(
+            v_flex()
+                .flex_none()
+                .px(theme::GUTTER)
+                .pb(theme::GUTTER)
+                .gap_2p5()
+                .children(self.render_update(cx))
+                .child(self.render_status(cx))
+                .child(self.render_actions(cx)),
+        )
     }
 }
 
-/// A member in the channel: the avatar in its speaking ring, the name, and at the end a mark
-/// while muted or reconnecting, when the row is faded.
+/// A place on the stage.
+enum Seat {
+    Member(Member),
+    /// One's own place before joining, which pulses while the join is under way.
+    Waiting {
+        name: SharedString,
+        joining: bool,
+    },
+    /// The place of whoever comes next, while one is alone in the call.
+    Empty,
+}
+
+/// A member on the stage: who, and whether they speak, are muted or reconnecting.
+#[derive(Clone)]
 struct Member {
     id: u16,
     name: SharedString,
@@ -300,24 +299,108 @@ struct Member {
     reconnecting: bool,
 }
 
+impl Seat {
+    fn render(&self, layout: Seats, cx: &App) -> AnyElement {
+        let tokens = *cx.tokens();
+        let place = div().relative().flex_1().min_w_0().max_w(layout.width).h(layout.height);
+        // A place nobody sits in: its outline, dashed.
+        let outline = move || {
+            v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap(layout.gap)
+                .rounded(layout.radius)
+                .border_1()
+                .border_dashed()
+                .border_color(tokens.seat)
+        };
+        match self {
+            Self::Empty => place.child(outline()).into_any_element(),
+            Self::Waiting { name, joining } => {
+                let you = v_flex().items_center().gap(layout.gap).child(Avatar::new(name.clone(), layout.avatar)).child(name_line(
+                    name.clone(),
+                    layout,
+                    tokens.text_muted,
+                ));
+                let you = if *joining {
+                    you.with_animation(
+                        "joining",
+                        Animation::new(PULSE).repeat().with_easing(pulsating_between(theme::WAITING_OPACITY, 1.)),
+                        |you, delta| you.opacity(delta),
+                    )
+                    .into_any_element()
+                } else {
+                    you.opacity(theme::WAITING_OPACITY).into_any_element()
+                };
+                place.id("you").mark("you").child(outline().child(you)).into_any_element()
+            }
+            Self::Member(member) => member.render(place, layout, tokens),
+        }
+    }
+}
+
 impl Member {
-    fn render(self, cx: &App) -> impl IntoElement {
-        let tokens = cx.tokens();
-        let mark = match (self.reconnecting, self.muted) {
-            (true, _) => Some((Glyph::Reconnecting, tokens.text_faint)),
+    fn render(&self, place: gpui::Div, layout: Seats, tokens: Tokens) -> AnyElement {
+        let Self { id, name, speaks, muted, reconnecting } = self.clone();
+        let badge = match (reconnecting, muted) {
+            (true, _) => Some((Glyph::Reconnecting, tokens.text_muted)),
             (false, true) => Some((Glyph::MicOff, tokens.danger)),
             (false, false) => None,
         };
-        h_flex()
-            .flex_none()
-            .h(theme::MEMBER)
-            .px(theme::PANEL_INSET - theme::PANEL_PAD)
-            .gap_2p5()
-            .when(self.reconnecting, |row| row.opacity(theme::RECONNECTING_OPACITY))
-            .child(Avatar::new(self.name.clone(), theme::MEMBER_AVATAR).ring(u64::from(self.id), self.speaks))
-            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(self.name))
-            .children(mark.map(|(mark, color)| Icon::new(mark).size(theme::ICON_SM).color(color)))
+        // Quick to light, slow to fade: the gaps between words don't flicker it.
+        let spring = SpringAnimation::new(if speaks { theme::SPEAK_ON } else { theme::SPEAK_OFF }).to(speaks);
+        let tile = div().size_full().relative().when(reconnecting, |tile| tile.opacity(theme::RECONNECTING_OPACITY)).with_spring(
+            ("speaking", u64::from(id)),
+            spring,
+            move |tile, lit| {
+                let lit = lit.clamp(0. ..=1.);
+                let avatar = Avatar::new(name.clone(), layout.avatar);
+                let avatar = match badge {
+                    Some((glyph, color)) => avatar.badge(glyph, color, tokens.tile[1]),
+                    None => avatar,
+                };
+                // Over the tile's hairline, so the edge thickening doesn't move what is inside.
+                let edge = div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(layout.radius)
+                    .border(theme::SPEAKING_EDGE)
+                    .border_color(tokens.speaking)
+                    .opacity(lit.0);
+                tile.top(-theme::LIFT * lit.0).child(
+                    v_flex()
+                        .relative()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .gap(layout.gap)
+                        .rounded(layout.radius)
+                        .bg(theme::gradient(tokens.tile))
+                        .border_1()
+                        .border_color(tokens.hairline)
+                        .shadow(theme::depth::tile(&tokens))
+                        .child(avatar)
+                        .child(name_line(name, layout, AnimationPhase::interpolate(lit, tokens.text_muted, tokens.text)))
+                        .child(edge),
+                )
+            },
+        );
+        // Who comes in rises into their place.
+        place
+            .id(("seat", u64::from(id)))
+            .mark(self.name.clone())
+            .child(tile)
+            .with_animation(("appear", u64::from(id)), Animation::new(theme::APPEAR).with_easing(ease_out_quint()), |place, delta| {
+                place.opacity(delta).top(theme::RISE * (1. - delta))
+            })
+            .into_any_element()
     }
+}
+
+/// A name beneath an avatar, cut short if the tile is too narrow for it.
+fn name_line(name: SharedString, layout: Seats, color: gpui::Hsla) -> impl IntoElement {
+    div().max_w_full().px_3().truncate().typeset(layout.name).font_weight(FontWeight::MEDIUM).text_color(color).child(name)
 }
 
 /// How long a call is up, as a clock shows it: minutes and seconds, the hours before once there

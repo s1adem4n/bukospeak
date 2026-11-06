@@ -15,7 +15,8 @@ use gpui::{
 
 use crate::ui::glyph::Glyph;
 use crate::ui::kit::menu::{Item, Menu, Place, Popover};
-use crate::ui::kit::{Button, Size, Variant, h_flex};
+use crate::ui::kit::{Button, Size, Variant, h_flex, icon_inset};
+use crate::ui::marks::Mark;
 use crate::ui::theme;
 use edit::{Kind, Text};
 use element::TextElement;
@@ -551,12 +552,14 @@ impl Render for TextField {
                 .size(Size::Small)
                 .square()
                 .unfocusable()
-                .mr(theme::PANEL_PAD)
+                // Its icon as far in from the field's end as the text from its start.
+                .mr(theme::FIELD_INSET - theme::HAIRLINE - icon_inset(Size::Small))
                 .icon(if self.revealed { Glyph::Hide } else { Glyph::Show })
                 .tooltip(if self.revealed { "Verbergen" } else { "Anzeigen" })
                 .on_click(cx.listener(|field, _, _, cx| field.toggle_revealed(cx)))
         });
         h_flex()
+            .mark(self.placeholder.clone())
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::backspace))

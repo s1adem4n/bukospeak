@@ -4,10 +4,11 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, BoxShadow, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement,
-    Styled, Toggled, Window, div, px,
+    App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled,
+    Toggled, Window, div,
 };
 
+use crate::ui::marks::Mark;
 use crate::ui::theme::{self, ActiveTokens};
 
 type ChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
@@ -38,8 +39,10 @@ impl RenderOnce for Switch {
         let tokens = cx.tokens();
         let on = self.on;
         let inset = (theme::SWITCH_HEIGHT - theme::SWITCH_KNOB) / 2.;
+        let mark = self.id.to_string();
         div()
             .id(self.id)
+            .mark(mark)
             .role(Role::Switch)
             .aria_label(self.label)
             .aria_toggled(if on { Toggled::True } else { Toggled::False })
@@ -50,7 +53,7 @@ impl RenderOnce for Switch {
             .when(on, |track| track.justify_end())
             .w(theme::SWITCH_WIDTH)
             .h(theme::SWITCH_HEIGHT)
-            .px(inset - px(1.))
+            .px(inset - theme::HAIRLINE)
             .rounded_full()
             .border_1()
             .border_color(tokens.hairline)
@@ -58,12 +61,6 @@ impl RenderOnce for Switch {
             .cursor_pointer()
             .focus_visible(|style| style.border_color(tokens.focus))
             .when_some(self.on_change, |track, on_change| track.on_click(move |_, window, cx| on_change(!on, window, cx)))
-            .child(
-                div()
-                    .size(theme::SWITCH_KNOB)
-                    .rounded_full()
-                    .bg(tokens.raised)
-                    .shadow(vec![BoxShadow::new(px(0.), px(1.), tokens.shadow).blur_radius(px(2.))]),
-            )
+            .child(div().size(theme::SWITCH_KNOB).rounded_full().bg(tokens.raised).shadow(theme::depth::control(tokens.highlight, tokens)))
     }
 }

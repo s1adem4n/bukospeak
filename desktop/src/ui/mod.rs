@@ -5,15 +5,17 @@
 mod chrome;
 mod client;
 mod glyph;
+mod host;
 mod kit;
+pub mod marks;
 mod screens;
 mod text;
-mod theme;
+pub(crate) mod theme;
 
-use bukospeak_desktop::call::{Failure, Phase};
+use crate::call::{Failure, Phase};
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    Render, Styled, Subscription, Window, WindowOptions, actions, div, px, size,
+    Animation, AnimationExt, AnyElement, App, AppContext, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement,
+    KeyBinding, ParentElement, Render, Styled, Subscription, Window, WindowOptions, actions, div, ease_out_quint, size,
 };
 
 use crate::ui::chrome::TitleBar;
@@ -21,9 +23,10 @@ pub use crate::ui::client::Client;
 use crate::ui::client::{Missing, RoomKeyRead};
 pub use crate::ui::glyph::Assets;
 use crate::ui::glyph::Glyph;
+pub use crate::ui::host::{Desktop, Host};
 use crate::ui::kit::{Button, Size, Variant, h_flex};
 use crate::ui::screens::{Channel, ChannelEvent, Settings, Update, Welcome, WelcomeEvent, certificate};
-use crate::ui::theme::ActiveTokens;
+use crate::ui::theme::{ActiveTokens, Typeset};
 use crate::update::Updater;
 
 actions!(
@@ -58,7 +61,11 @@ pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut 
         return open(client, None, cx);
     };
     // No title bar: the window is moved by any of it.
-    let options = WindowOptions { is_resizable: false, is_minimizable: false, ..chrome::options(size(px(300.), px(320.)), cx) };
+    let options = WindowOptions {
+        is_resizable: false,
+        is_minimizable: false,
+        ..chrome::options(size(theme::UPDATE_WINDOW.0, theme::UPDATE_WINDOW.1), cx)
+    };
     cx.open_window(options, |window, cx| {
         theme::follow(window, cx);
         cx.new(|cx| Update::new(client, updater, window, cx))
@@ -69,7 +76,9 @@ pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut 
 
 /// Opens the window, which shows the client and a release the updater waits to install.
 pub fn open(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut App) {
-    let options = WindowOptions { window_min_size: Some(size(px(320.), px(440.))), ..chrome::options(size(px(380.), px(560.)), cx) };
+    let (width, height) = theme::WINDOW;
+    let (least_width, least_height) = theme::WINDOW_MIN;
+    let options = WindowOptions { window_min_size: Some(size(least_width, least_height)), ..chrome::options(size(width, height), cx) };
     cx.open_window(options, |window, cx| {
         theme::follow(window, cx);
         cx.new(|cx| Main::new(client, updater, window, cx))
@@ -114,7 +123,7 @@ pub struct Main {
 }
 
 impl Main {
-    fn new(client: Entity<Client>, updater: Option<Entity<Updater>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(client: Entity<Client>, updater: Option<Entity<Updater>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&client, |_, _, cx| cx.notify());
         let read = cx.subscribe_in(&client, window, |main, _, _: &RoomKeyRead, window, cx| main.read_room_key(window, cx));
         let appearance = cx.observe_window_appearance(window, |_, window, cx| theme::follow(window, cx));
@@ -244,7 +253,15 @@ impl Main {
                 h_flex()
                     .w_full()
                     .justify_between()
-                    .child(kit::wordmark())
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(tokens.text_muted)
+                            .child(host(&self.client.read(cx).settings.server).to_owned()),
+                    )
                     .child(
                         div().occlude().child(
                             Button::new("settings", Variant::Ghost)
@@ -260,12 +277,14 @@ impl Main {
             Screen::Settings(_) => Some(
                 div()
                     .occlude()
-                    .ml(-inset)
+                    // The chevron's stroke, not its blank, lines up with the panels' edges.
+                    .ml(-inset - theme::BACK_BEARING)
                     .child(
                         Button::new("back", Variant::Ghost)
                             .size(Size::Small)
                             .pl(inset)
-                            .gap_1p5()
+                            // The title starts where the settings' titles and labels do.
+                            .gap(theme::PANEL_INSET - theme::ICON + theme::BACK_BEARING)
                             .text_color(tokens.text)
                             .icon(Glyph::Back)
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("Einstellungen"))
@@ -277,7 +296,8 @@ impl Main {
                 let welcome = welcome.clone();
                 div()
                     .occlude()
-                    .ml(-inset)
+                    // The chevron's stroke, not its blank, lines up with the panels' edges.
+                    .ml(-inset - theme::BACK_BEARING)
                     .child(Button::new("back", Variant::Ghost).size(Size::Small).square().icon(Glyph::Back).on_click(
                         move |_, window, cx| {
                             welcome.update(cx, |welcome, cx| welcome.back(window, cx));
@@ -287,17 +307,23 @@ impl Main {
             }),
         };
         // A button's icon lines up on the bar's inset, the button's surface reaching past it.
-        TitleBar::new(content.map(|content| h_flex().w_full().h_full().mr(-inset).child(content).into_any_element()))
+        TitleBar::new(content.map(|content| h_flex().flex_1().min_w_0().h_full().mr(-inset).child(content).into_any_element()))
     }
 }
 
 impl Render for Main {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match &self.screen {
-            Screen::Channel(channel) => channel.clone().into_any_element(),
-            Screen::Welcome(welcome) => welcome.clone().into_any_element(),
-            Screen::Settings(settings) => settings.clone().into_any_element(),
+        // A screen comes on from the side it lies on: the settings beyond the channel.
+        let (content, screen, from) = match &self.screen {
+            Screen::Channel(channel) => (channel.clone().into_any_element(), 0_usize, -1.),
+            Screen::Welcome(welcome) => (welcome.clone().into_any_element(), 1, 0.),
+            Screen::Settings(settings) => (settings.clone().into_any_element(), 2, 1.),
         };
+        let content = div().relative().flex_1().min_h_0().flex().flex_col().child(content).with_animation(
+            ("screen", screen),
+            Animation::new(theme::APPEAR).with_easing(ease_out_quint()),
+            move |content, delta| content.opacity(delta).left(theme::RISE * from * (1. - delta)),
+        );
         let dialog = match *self.client.read(cx).call.phase() {
             Phase::Failed(Failure::CertificateChanged { pinned, presented, .. }) => {
                 Some(certificate::dialog(&self.client, pinned, presented, window, cx))
@@ -313,15 +339,39 @@ impl Render for Main {
             .bg(tokens.base)
             .font_family(theme::SANS)
             .text_color(tokens.text)
-            .text_size(theme::TEXT)
+            .typeset(theme::TEXT)
             .track_focus(&self.focus)
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::back))
             .on_action(cx.listener(Self::focus_next))
             .on_action(cx.listener(Self::focus_previous))
             .child(self.render_title_bar(cx))
-            .child(div().flex_1().min_h_0().flex().flex_col().child(content))
+            .child(content)
             .children(dialog);
         chrome::frame(chrome::rounded(main, window), window, cx)
+    }
+}
+
+/// The host of a server's address, without its port: what the title bar names it by.
+fn host(server: &str) -> &str {
+    match server.rsplit_once(':') {
+        // An IPv6 address alone has colons too, but no port after a bracket.
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) && !host.ends_with(':') => {
+            host.trim_start_matches('[').trim_end_matches(']')
+        }
+        _ => server,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_title_bar_names_a_server_by_its_host() {
+        assert_eq!(host("voice.example:9988"), "voice.example");
+        assert_eq!(host("voice.example"), "voice.example");
+        assert_eq!(host("[::1]:9988"), "::1");
+        assert_eq!(host("10.0.0.2:9988"), "10.0.0.2");
     }
 }

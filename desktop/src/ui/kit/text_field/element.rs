@@ -5,7 +5,7 @@
 use gpui::{
     App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, Hitbox, HitboxBehavior,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ShapedLine, SharedString,
-    Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point, px, relative, size,
+    Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point, relative, size,
 };
 
 use super::{Layout, TextField, edit};
@@ -63,7 +63,7 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> (LayoutId, ()) {
         let mut style = Style { flex_grow: 1., flex_shrink: 1., size: size(relative(1.).into(), relative(1.).into()), ..Style::default() };
-        style.min_size.width = px(0.).into();
+        style.min_size.width = Pixels::ZERO.into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -80,6 +80,7 @@ impl Element for TextElement {
         let tokens = cx.tokens();
         let style = window.text_style();
         let line_height = window.line_height();
+        let inset = theme::FIELD_INSET - theme::HAIRLINE;
         let content = field.text.content();
         let masked = field.masked() && !content.is_empty();
         let to_line = |offset: usize| if masked { edit::to_masked(content, offset) } else { offset };
@@ -96,7 +97,7 @@ impl Element for TextElement {
         let runs = match field.text.marked().filter(|_| !content.is_empty()) {
             Some(marked) => {
                 let marked = to_line(marked.start)..to_line(marked.end);
-                let underline = UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false };
+                let underline = UnderlineStyle { color: Some(color), thickness: theme::HAIRLINE, wavy: false };
                 [
                     TextRun { len: marked.start, ..run.clone() },
                     TextRun { len: marked.len(), underline: Some(underline), ..run.clone() },
@@ -112,14 +113,16 @@ impl Element for TextElement {
         let line = window.text_system().shape_line(shown, font_size, &runs, None);
 
         let text = Bounds::new(
-            point(bounds.left() + theme::FIELD_INSET, bounds.center().y - line_height / 2.),
-            size((bounds.size.width - theme::FIELD_INSET * 2.).max(px(0.)), line_height),
+            // Inside the field's edge, which takes room too: the text lies `FIELD_INSET` off the
+            // field's outside.
+            point(bounds.left() + inset, bounds.center().y - line_height / 2.),
+            size((bounds.size.width - inset * 2.).max(Pixels::ZERO), line_height),
         );
         let selection = field.text.selection();
-        let cursor_x = if content.is_empty() { px(0.) } else { line.x_for_index(to_line(field.text.cursor())) };
+        let cursor_x = if content.is_empty() { Pixels::ZERO } else { line.x_for_index(to_line(field.text.cursor())) };
         // Scrolled no further than the line reaches, and far enough that the cursor shows.
-        let most = (line.width + theme::CURSOR - text.size.width).max(px(0.));
-        let scroll = field.scroll.min(most).max(cursor_x + theme::CURSOR - text.size.width).min(cursor_x).max(px(0.));
+        let most = (line.width + theme::CURSOR - text.size.width).max(Pixels::ZERO);
+        let scroll = field.scroll.min(most).max(cursor_x + theme::CURSOR - text.size.width).min(cursor_x).max(Pixels::ZERO);
         let origin = point(text.left() - scroll, text.top());
 
         let focused = field.focus.is_focused(window);

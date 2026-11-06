@@ -1,26 +1,38 @@
-//! The app's look: Geist on every system, the colors of [`Tokens`] for light and dark, and the
-//! sizes, type and motion kept here by hand.
+//! The app's look: Geist on every system, the colors of [`Tokens`] for light and dark, the one
+//! scale every size is on, the depth of surfaces and how things move, all kept here by hand.
 
+pub mod depth;
 mod fonts;
+mod motion;
+mod scale;
 
 pub use fonts::{MONO, SANS};
+pub use motion::*;
+pub use scale::*;
 
-use std::time::Duration;
-
-use gpui::{App, Global, Hsla, Pixels, Window, WindowAppearance, hsla, px, rgb, rgba};
+use gpui::{App, Background, Global, Hsla, Window, WindowAppearance, hsla, linear_color_stop, linear_gradient, rgb, rgba};
 
 /// Adds the fonts and keeps the tokens of both appearances, the system's one active.
 pub fn install(cx: &mut App) {
     fonts::install(cx);
     let dark = is_dark(cx.window_appearance());
-    cx.set_global(Palette { light: Tokens::light(), dark: Tokens::dark(), is_dark: dark });
+    cx.set_global(Palette { light: Tokens::light(), dark: Tokens::dark(), is_dark: dark, forced: None });
+}
+
+/// Draws every window light or dark from now on, whatever the system's mode, as the harness
+/// shows both.
+#[cfg(feature = "harness")]
+pub fn force(dark: bool, cx: &mut App) {
+    let palette = cx.global_mut::<Palette>();
+    (palette.forced, palette.is_dark) = (Some(dark), dark);
+    cx.refresh_windows();
 }
 
 /// Takes on the window's appearance, which follows the system's light or dark mode; every
 /// window is drawn anew once it changes.
 pub fn follow(window: &Window, cx: &mut App) {
-    let dark = is_dark(window.appearance());
     let palette = cx.global_mut::<Palette>();
+    let dark = palette.forced.unwrap_or_else(|| is_dark(window.appearance()));
     if palette.is_dark != dark {
         palette.is_dark = dark;
         cx.refresh_windows();
@@ -36,6 +48,8 @@ struct Palette {
     light: Tokens,
     dark: Tokens,
     is_dark: bool,
+    /// The appearance the harness draws in, whatever the system's.
+    forced: Option<bool>,
 }
 
 impl Global for Palette {}
@@ -53,6 +67,7 @@ impl ActiveTokens for App {
 }
 
 /// The colors of one appearance, by what they are for.
+#[derive(Clone, Copy)]
 pub struct Tokens {
     pub dark: bool,
     /// The window, beneath everything.
@@ -75,8 +90,10 @@ pub struct Tokens {
     pub sheen: Hsla,
     /// A focused field's edge.
     pub focus: Hsla,
-    /// The shadow beneath raised controls and floating surfaces.
+    /// The shadow close beneath a raised control, and the wide soft one beneath what stands
+    /// further off.
     pub shadow: Hsla,
+    pub shadow_soft: Hsla,
     /// What darkens the window behind a dialog.
     pub scrim: Hsla,
 
@@ -94,6 +111,11 @@ pub struct Tokens {
     pub primary_hover: [Hsla; 2],
     pub primary_edge: Hsla,
     pub on_primary: Hsla,
+
+    /// A member's tile, top to bottom.
+    pub tile: [Hsla; 2],
+    /// The dashed edge of a place on the stage nobody sits in.
+    pub seat: Hsla,
 
     /// Someone speaking, a call that is connected.
     pub speaking: Hsla,
@@ -123,6 +145,7 @@ impl Tokens {
             sheen: rgba(0xffffff47).into(),
             focus: rgba(0xffffff3d).into(),
             shadow: rgba(0x00000066).into(),
+            shadow_soft: rgba(0x00000073).into(),
             scrim: rgba(0x00000099).into(),
             text: rgb(0xededef).into(),
             text_muted: rgb(0x9d9da6).into(),
@@ -133,6 +156,8 @@ impl Tokens {
             primary_hover: [rgb(0xffffff).into(), rgb(0xe8e8eb).into()],
             primary_edge: rgb(0xbdbdc3).into(),
             on_primary: rgb(0x0b0b0d).into(),
+            tile: [rgb(0x1a1a1e).into(), rgb(0x141417).into()],
+            seat: rgba(0xffffff1f).into(),
             speaking: rgb(0x3dd68c).into(),
             danger: rgb(0xe5484d).into(),
             danger_fill: [rgb(0xee5f63).into(), rgb(0xdb3d42).into()],
@@ -157,6 +182,7 @@ impl Tokens {
             sheen: rgba(0xffffff4d).into(),
             focus: rgba(0x00000047).into(),
             shadow: rgba(0x0000001a).into(),
+            shadow_soft: rgba(0x00000012).into(),
             scrim: rgba(0x00000040).into(),
             text: rgb(0x18181b).into(),
             text_muted: rgb(0x6b6b73).into(),
@@ -167,6 +193,8 @@ impl Tokens {
             primary_hover: [rgb(0x36363c).into(), rgb(0x232327).into()],
             primary_edge: rgb(0x0b0b0d).into(),
             on_primary: rgb(0xfafafa).into(),
+            tile: [rgb(0xffffff).into(), rgb(0xfafafb).into()],
+            seat: rgba(0x00000024).into(),
             speaking: rgb(0x18a058).into(),
             danger: rgb(0xe5484d).into(),
             danger_fill: [rgb(0xee5f63).into(), rgb(0xdb3d42).into()],
@@ -176,6 +204,11 @@ impl Tokens {
             selection: rgba(0x2563eb40).into(),
         }
     }
+}
+
+/// A fill from its top color to its bottom one.
+pub fn gradient([top, bottom]: [Hsla; 2]) -> Background {
+    linear_gradient(180., linear_color_stop(top, 0.), linear_color_stop(bottom, 1.))
 }
 
 /// The hues a member's avatar takes, one by their name, so a face is told apart at a glance.
@@ -190,114 +223,9 @@ pub fn avatar(name: &str, dark: bool) -> (Hsla, Hsla) {
     if dark { (hsla(hue, 0.3, 0.24, 1.), hsla(hue, 0.7, 0.82, 1.)) } else { (hsla(hue, 0.65, 0.92, 1.), hsla(hue, 0.5, 0.36, 1.)) }
 }
 
-/// The type scale: desktop sizes, read at arm's length.
-pub const TEXT_XS: Pixels = px(11.);
-pub const TEXT_SM: Pixels = px(12.);
-pub const TEXT: Pixels = px(13.);
-pub const TEXT_LG: Pixels = px(14.);
-pub const TEXT_XL: Pixels = px(20.);
-
-/// Corners, each the one around it less the space between: nested edges run alike.
-pub const RADIUS_PANEL: Pixels = px(14.);
-pub const RADIUS_CONTROL: Pixels = px(10.);
-pub const RADIUS_SMALL: Pixels = px(8.);
-pub const RADIUS_TINY: Pixels = px(5.);
-
-/// The space between the window's edge and its panels, and between the panels.
-pub const GAP: Pixels = px(8.);
-/// How far a panel's content lies inside its edge: rows' labels, a head's title.
-pub const PANEL_INSET: Pixels = px(14.);
-/// The space inside a panel around the controls and rows set into it.
-pub const PANEL_PAD: Pixels = px(4.);
-
-/// The window's own title bar, drawn with the content, and how far its content lies off its edges.
-pub const TITLE_BAR: Pixels = px(40.);
-pub const TITLE_INSET: Pixels = px(12.);
-/// On macOS: the window's buttons, `TRAFFIC_LIGHT` high, centered in the title bar as far from
-/// its left edge as from its top, and the room they take with the space after them.
-pub const TRAFFIC_LIGHT: Pixels = px(14.);
-pub const TRAFFIC_LIGHTS: Pixels = px(80.);
-/// On Windows: the width of each of the window's buttons, as the system draws its own.
-pub const CAPTION_BUTTON: Pixels = px(46.);
-/// On Linux, where the app draws the window's edge: its corners' radius, its border, and the
-/// margin around it its shadow falls into, which also takes the drags that resize the window.
-pub const FRAME_RADIUS: Pixels = px(10.);
-pub const FRAME_BORDER: Pixels = px(1.);
-pub const FRAME_SHADOW: Pixels = px(10.);
-/// A panel's head, and a row of a list.
-pub const HEAD: Pixels = px(44.);
-pub const ROW: Pixels = px(42.);
-/// A member in the channel.
-pub const MEMBER: Pixels = px(40.);
-pub const MEMBER_AVATAR: Pixels = px(26.);
-/// The speaking ring's width, and the gap between it and the avatar.
-pub const RING: Pixels = px(2.);
-/// The controls: the main ones, the small ones in bars and rows, and the fields.
-pub const CONTROL: Pixels = px(36.);
-pub const CONTROL_SM: Pixels = px(28.);
-pub const FIELD: Pixels = px(38.);
-pub const FIELD_SM: Pixels = px(30.);
-/// How far a field's text lies inside its edge, and the width of its cursor.
-pub const FIELD_INSET: Pixels = px(12.);
-pub const CURSOR: Pixels = px(1.5);
-/// A switch's track and the knob in it.
-pub const SWITCH_WIDTH: Pixels = px(34.);
-pub const SWITCH_HEIGHT: Pixels = px(20.);
-pub const SWITCH_KNOB: Pixels = px(16.);
-/// A slider: the height that takes its clicks, its rail and its knob.
-pub const SLIDER: Pixels = px(20.);
-pub const SLIDER_RAIL: Pixels = px(4.);
-pub const SLIDER_KNOB: Pixels = px(14.);
-pub const ICON_LG: Pixels = px(18.);
-pub const ICON: Pixels = px(16.);
-pub const ICON_SM: Pixels = px(14.);
-/// A chip's line: a count, and keys on a button.
-pub const CHIP: Pixels = px(18.);
-pub const KEYCAP: Pixels = px(16.);
-/// The dock's line of how the call is.
-pub const STATUS: Pixels = px(30.);
-/// A dialog: its width, and its space inside, the corner around its controls' less it.
-pub const DIALOG: Pixels = px(340.);
-pub const DIALOG_PAD: Pixels = px(6.);
-pub const RADIUS_DIALOG: Pixels = px(16.);
-/// A menu: the least width of one that chooses a device, its items, the space inside it and
-/// its distance from what opened it.
-pub const MENU: Pixels = px(220.);
-pub const MENU_ITEM: Pixels = px(30.);
-pub const MENU_PAD: Pixels = px(4.);
-pub const MENU_GAP: Pixels = px(4.);
-/// The volume's slider, and its value after it.
-pub const VOLUME: Pixels = px(170.);
-pub const VOLUME_VALUE: Pixels = px(40.);
-/// The welcome's column, and its dots of where in it one is.
-pub const WELCOME: Pixels = px(300.);
-pub const STEP_DOT: Pixels = px(6.);
-pub const STEP_DOT_CURRENT: Pixels = px(18.);
-/// The app's mark in the title bar and in the welcome, and one's own avatar there.
-pub const MARK_SM: Pixels = px(20.);
-pub const MARK: Pixels = px(96.);
-pub const AVATAR_LG: Pixels = px(40.);
-pub const AVATAR_XL: Pixels = px(56.);
-/// The microphone's level: its bars, each so wide and high, and so far apart.
-pub const LEVEL_BARS: usize = 5;
-pub const LEVEL_BAR_WIDTH: Pixels = px(3.);
-pub const LEVEL_BAR_HEIGHT: Pixels = px(10.);
-pub const LEVEL_GAP: Pixels = px(2.);
-/// The update window's column, and the bar of how far its download is.
-pub const UPDATE: Pixels = px(220.);
-pub const PROGRESS: Pixels = px(6.);
-
-/// How long a field's cursor shows and hides while it blinks.
-pub const BLINK: Duration = Duration::from_millis(530);
-/// One turn of a spinner.
-pub const SPIN: Duration = Duration::from_millis(800);
-/// The speaking ring, quick enough to follow speech.
-pub const SPEAKING_FADE: Duration = Duration::from_millis(120);
-/// Something coming onto the screen.
-pub const APPEAR: Duration = Duration::from_millis(220);
-/// How far a welcome step slides in from.
-pub const SLIDE: Pixels = px(12.);
 /// Faded while the connection is lost.
 pub const RECONNECTING_OPACITY: f32 = 0.45;
 /// Faded while a control can't be used.
 pub const DISABLED_OPACITY: f32 = 0.5;
+/// Faded: one's own place on the stage before joining.
+pub const WAITING_OPACITY: f32 = 0.4;

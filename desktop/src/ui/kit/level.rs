@@ -1,17 +1,16 @@
-//! How loud the microphone is, as a row of bars that light up from the left.
+//! How loud the microphone is, as a short rail that fills from the left.
 
 use std::time::Duration;
 
 use bukospeak_core::Meter;
-use gpui::{Context, IntoElement, ParentElement, Render, Styled, Task, Window, div};
+use gpui::{Context, IntoElement, ParentElement, Render, Styled, Task, Window, div, relative};
 
-use crate::ui::kit::h_flex;
 use crate::ui::theme::{self, ActiveTokens};
 
-/// How often the bars look at the meter: as often as a level is seen to move.
+/// How often the rail looks at the meter: as often as a level is seen to move.
 const LOOK_EVERY: Duration = Duration::from_millis(33);
 
-/// The bars of a meter, redrawn only when how many are lit changes.
+/// The rail of a meter, redrawn only when how far it is filled changes by a step.
 pub struct InputLevel {
     meter: Meter,
     lit: usize,
@@ -39,21 +38,22 @@ impl InputLevel {
     }
 }
 
-/// How many bars a level lights.
+/// How many of the rail's steps a level fills.
 fn lit(level: f32) -> usize {
-    (level * theme::LEVEL_BARS as f32).round() as usize
+    (level.clamp(0., 1.) * theme::LEVEL_STEPS as f32).round() as usize
 }
 
 impl Render for InputLevel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
-        h_flex().flex_none().gap(theme::LEVEL_GAP).children((0..theme::LEVEL_BARS).map(|bar| {
-            div().w(theme::LEVEL_BAR_WIDTH).h(theme::LEVEL_BAR_HEIGHT).rounded_full().bg(if bar < self.lit {
-                tokens.speaking
-            } else {
-                tokens.hover
-            })
-        }))
+        let filled = self.lit as f32 / theme::LEVEL_STEPS as f32;
+        div()
+            .flex_none()
+            .w(theme::LEVEL.width)
+            .h(theme::LEVEL.height)
+            .rounded_full()
+            .bg(tokens.hover)
+            .child(div().h_full().w(relative(filled)).rounded_full().bg(tokens.speaking))
     }
 }
 
@@ -64,7 +64,8 @@ mod tests {
     #[test]
     fn silence_lights_none_and_full_scale_all() {
         assert_eq!(lit(0.0), 0);
-        assert_eq!(lit(0.5), 3);
-        assert_eq!(lit(1.0), theme::LEVEL_BARS);
+        assert_eq!(lit(0.5), theme::LEVEL_STEPS / 2);
+        assert_eq!(lit(1.0), theme::LEVEL_STEPS);
+        assert_eq!(lit(2.0), theme::LEVEL_STEPS);
     }
 }

@@ -6,8 +6,8 @@ rust = { version = "1.98.1", components = "clippy,rustfmt", targets = "aarch64-a
 description = "Formatting, lints and tests, as CI runs them"
 run = [
   "cargo fmt --all --check",
-  # The feature brings the harness example, which nothing else builds.
-  "cargo clippy --workspace --all-targets --features bukospeak-core/harness --locked -- -D warnings",
+  # The features bring the harnesses, which nothing else builds.
+  "cargo clippy --workspace --all-targets --features bukospeak-core/harness,bukospeak-desktop/harness --locked -- -D warnings",
   "cargo test --workspace --locked",
   # Outside the workspace, as the vendored crates are; its tests check it against the fork.
   "cargo test --manifest-path vendor/deep_filter/Cargo.toml --locked",

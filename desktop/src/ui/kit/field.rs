@@ -4,12 +4,11 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement, Pixels, Refineable, Render, RenderOnce, SharedString, StyleRefinement, Styled, Subscription, Window, actions, div,
+    ParentElement, Refineable, Render, RenderOnce, SharedString, StyleRefinement, Styled, Subscription, Window, actions, div,
 };
 
-use crate::ui::glyph::Glyph;
-use crate::ui::kit::{Button, Icon, TextField, TextFieldEvent, Variant, h_flex};
-use crate::ui::theme::{self, ActiveTokens};
+use crate::ui::kit::{Button, Size, TextField, TextFieldEvent, Variant, h_flex};
+use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 actions!(
     inline_field,
@@ -25,18 +24,18 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Cancel, Some(CONTEXT))]);
 }
 
-/// A text field `height` high, set into the panel it is on; its edge lights up while it has the
-/// focus. Its text takes the text style it is given.
+/// A text field as large as a button of its size, set into the panel it is on; its edge lights
+/// up while it has the focus. Its text takes the text style it is given.
 #[derive(IntoElement)]
 pub struct Field {
     field: Entity<TextField>,
-    height: Pixels,
+    size: Size,
     style: StyleRefinement,
 }
 
 impl Field {
-    pub fn new(field: &Entity<TextField>, height: Pixels) -> Self {
-        Self { field: field.clone(), height, style: StyleRefinement::default() }
+    pub fn new(field: &Entity<TextField>, size: Size) -> Self {
+        Self { field: field.clone(), size, style: StyleRefinement::default() }
     }
 }
 
@@ -50,15 +49,16 @@ impl RenderOnce for Field {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let tokens = cx.tokens();
         let focused = self.field.read(cx).focus_handle(cx).contains_focused(window, cx);
+        let metrics = self.size.metrics();
         let mut field = div()
             .flex_none()
             .w_full()
-            .h(self.height)
-            .rounded(if self.height < theme::FIELD { theme::RADIUS_SMALL } else { theme::RADIUS_CONTROL })
+            .h(metrics.height)
+            .rounded(metrics.radius)
             .bg(tokens.inset)
             .border_1()
             .border_color(if focused { tokens.focus } else { tokens.hairline })
-            .text_size(theme::TEXT)
+            .typeset(metrics.text)
             .text_color(tokens.text);
         field.style().refine(&self.style);
         field.child(self.field)
@@ -68,8 +68,8 @@ impl RenderOnce for Field {
 /// How an inline field shows its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Look {
-    /// Large, as a name heads a card, with a pencil after it.
-    Title,
+    /// At a row's end, quieter than the row's label: a name.
+    Plain,
     /// At a row's end, quieter than the row's label, in the mono font: a server.
     Mono,
     /// At a row's end, but dots: a key, which the field shows while typing only on request.
@@ -178,31 +178,21 @@ impl InlineField {
             (Look::Secret, false) => "••••••••".into(),
             (_, false) => self.value.clone().into(),
         };
-        // A value takes the button's color, which brightens on hover.
-        let color = match (self.look, empty) {
-            (_, true) => Some(tokens.text_faint),
-            (Look::Title, false) => Some(tokens.text),
-            (_, false) => None,
-        };
-        let title = self.look == Look::Title;
         Button::new("value", Variant::Bare)
             .track_focus(&self.focus)
             .w_full()
-            .h(if title { theme::FIELD_SM } else { theme::ROW })
-            .gap_1p5()
-            .when(title, |value| value.justify_start())
-            .when(!title, |value| value.justify_end())
+            .h(theme::ROW)
+            .justify_end()
             .child(
                 div()
                     .min_w_0()
                     .truncate()
-                    .when_some(color, |text, color| text.text_color(color))
-                    .when(title, |text| text.text_size(theme::TEXT_LG).font_weight(FontWeight::SEMIBOLD))
-                    .when(!title, |text| text.font_weight(FontWeight::NORMAL))
-                    .when(self.look == Look::Mono, |text| text.font_family(theme::MONO).text_size(theme::TEXT_SM))
+                    .font_weight(FontWeight::NORMAL)
+                    // A value takes the button's color, which brightens on hover.
+                    .when(empty, |text| text.text_color(tokens.text_faint))
+                    .when(self.look == Look::Mono, |text| text.font_family(theme::MONO).typeset(theme::TEXT_SM))
                     .child(text),
             )
-            .when(title, |value| value.child(Icon::new(Glyph::Edit).size(theme::ICON_SM).color(tokens.text_faint)))
             .on_click(cx.listener(|inline, _, window, cx| inline.edit(window, cx)))
     }
 }
@@ -210,9 +200,8 @@ impl InlineField {
 impl Render for InlineField {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = if self.editing {
-            Field::new(&self.field, theme::FIELD_SM)
-                .when(self.look == Look::Title, |field| field.text_size(theme::TEXT_LG).font_weight(FontWeight::SEMIBOLD))
-                .when(self.look == Look::Mono, |field| field.font_family(theme::MONO).text_size(theme::TEXT_SM))
+            Field::new(&self.field, Size::Small)
+                .when(self.look == Look::Mono, |field| field.font_family(theme::MONO).typeset(theme::TEXT_SM))
                 .into_any_element()
         } else {
             self.render_value(cx).into_any_element()

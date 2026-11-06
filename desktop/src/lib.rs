@@ -1,10 +1,14 @@
-//! What the BukoSpeak desktop app and the terminal client share.
+//! What the BukoSpeak desktop app and the terminal client share, and the app's window.
 
 pub mod audio;
 pub mod call;
+#[cfg(feature = "harness")]
+pub mod harness;
 pub mod known_servers;
 pub mod nvidia;
 pub mod settings;
+pub mod ui;
+pub mod update;
 
 use std::path::{Path, PathBuf};
 use std::{fs, io, process};

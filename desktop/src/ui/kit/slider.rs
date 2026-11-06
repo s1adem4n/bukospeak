@@ -4,10 +4,11 @@
 use gpui::{
     App, Bounds, Context, Corners, CursorStyle, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hitbox,
     HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Render, Role, StatefulInteractiveElement, Style, Styled, Window, actions, div, fill, point, px,
+    MouseUpEvent, ParentElement, Pixels, Render, Role, StatefulInteractiveElement, Style, Styled, Window, actions, div, fill, point,
     relative, size,
 };
 
+use crate::ui::marks::Mark;
 use crate::ui::theme::{self, ActiveTokens};
 
 actions!(
@@ -96,6 +97,7 @@ impl Render for Slider {
         let tokens = cx.tokens();
         div()
             .id("slider")
+            .mark(self.label)
             .role(Role::Slider)
             .aria_label(self.label)
             .aria_numeric_value(f64::from(self.value))
@@ -186,7 +188,10 @@ impl Element for Rail {
         window.paint_quad(fill(Bounds::from_corners(rail.origin, point(x, rail.bottom())), tokens.text).corner_radii(round));
         let knob_bounds = Bounds::new(point(x - knob / 2., bounds.center().y - knob / 2.), size(knob, knob));
         window.paint_quad(
-            fill(knob_bounds, tokens.primary[0]).corner_radii(Corners::all(knob / 2.)).border_widths(px(1.)).border_color(tokens.edge),
+            fill(knob_bounds, tokens.primary[0])
+                .corner_radii(Corners::all(knob / 2.))
+                .border_widths(theme::HAIRLINE)
+                .border_color(tokens.edge),
         );
         window.set_cursor_style(CursorStyle::PointingHand, hitbox);
 

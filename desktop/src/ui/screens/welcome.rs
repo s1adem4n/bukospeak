@@ -3,13 +3,13 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Animation, AnimationExt, App, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, ease_out_quint,
+    Animation, AnimationExt, AnyElement, App, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, ease_out_quint,
 };
 
 use crate::ui::client::{Client, Missing};
-use crate::ui::kit::{self, Avatar, Button, Field, TextField, TextFieldEvent, Variant, h_flex, v_flex};
-use crate::ui::theme::{self, ActiveTokens};
+use crate::ui::kit::{self, Avatar, Button, Field, Size, TextField, TextFieldEvent, Variant, h_flex, v_flex};
+use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 /// The welcome is through: what it asked for is kept, and the window may join.
 pub struct WelcomeEvent;
@@ -128,7 +128,7 @@ impl Welcome {
     /// place once there is a name.
     fn render_steps(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
-        let (current, other, hovered) = (tokens.text_muted, tokens.hover, tokens.text_faint);
+        let (current, other, hovered) = (tokens.text_muted, tokens.text_faint, tokens.text_muted);
         let step = self.step;
         let dot = |shown: Missing, cx: &mut Context<Self>| {
             let (width, color) = if shown == step { (theme::STEP_DOT_CURRENT, current) } else { (theme::STEP_DOT, other) };
@@ -140,7 +140,7 @@ impl Welcome {
                 .cursor_pointer()
                 .child(
                     div()
-                        .h_1p5()
+                        .h(theme::STEP_DOT)
                         .w(width)
                         .rounded_full()
                         .bg(color)
@@ -167,41 +167,32 @@ impl Render for Welcome {
                 .child(kit::mark(theme::MARK))
                 .child(headline("Willkommen bei BukoSpeak"))
                 .child(subline("Wie sollen dich die anderen nennen?", cx))
-                .child(
-                    v_flex().w_full().mt_6().gap_2().child(Field::new(&self.name, theme::FIELD)).child(
-                        Button::new("next", Variant::Primary)
-                            .w_full()
-                            .h(theme::FIELD)
-                            .label("Weiter")
-                            .disabled(name.is_empty())
-                            .on_click(cx.listener(|welcome, _, window, cx| welcome.next(window, cx))),
-                    ),
-                ),
+                .child(form(
+                    [Field::new(&self.name, Size::Large).into_any_element()],
+                    Button::new("next", Variant::Primary)
+                        .label("Weiter")
+                        .disabled(name.is_empty())
+                        .on_click(cx.listener(|welcome, _, window, cx| welcome.next(window, cx))),
+                )),
             Missing::Place => {
                 let complete = [&self.server, &self.room_key].iter().all(|field| !value(field, cx).is_empty());
                 v_flex()
                     .w_full()
                     .items_center()
+                    // As high as the mark it takes the place of, so the step's lines stay where they were.
                     .child(Avatar::new(name.clone(), theme::AVATAR_XL))
                     .child(headline(format!("Hallo, {name}")))
                     .child(subline("Wo trefft ihr euch?", cx))
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .mt_6()
-                            .gap_2()
-                            .child(Field::new(&self.server, theme::FIELD).font_family(theme::MONO).text_size(theme::TEXT_SM))
-                            .child(Field::new(&self.room_key, theme::FIELD))
-                            .child(
-                                Button::new("finish", Variant::Primary)
-                                    .w_full()
-                                    .h(theme::FIELD)
-                                    .mt_2()
-                                    .label("Beitreten")
-                                    .disabled(!complete)
-                                    .on_click(cx.listener(|welcome, _, window, cx| welcome.finish(window, cx))),
-                            ),
-                    )
+                    .child(form(
+                        [
+                            Field::new(&self.server, Size::Large).font_family(theme::MONO).typeset(theme::TEXT).into_any_element(),
+                            Field::new(&self.room_key, Size::Large).into_any_element(),
+                        ],
+                        Button::new("finish", Variant::Primary)
+                            .label("Beitreten")
+                            .disabled(!complete)
+                            .on_click(cx.listener(|welcome, _, window, cx| welcome.finish(window, cx))),
+                    ))
             }
         };
         // Forward slides in from the right, back from the left.
@@ -214,17 +205,22 @@ impl Render for Welcome {
             .min_h_0()
             .relative()
             .items_center()
-            .justify_center()
             .px_6()
-            // The column sits a little above the middle, as the eye expects it.
-            .pb(theme::TITLE_BAR)
+            // The column hangs from the same height in every step, so going on moves nothing but
+            // what changes; the space above gives way first to a short window.
+            .child(div().flex_1().max_h(theme::WELCOME_TOP))
             .child(div().w_full().max_w(theme::WELCOME).relative().child(content).with_animation(
                 ("step", self.step as usize),
                 Animation::new(theme::APPEAR).with_easing(ease_out_quint()),
-                move |content, delta| content.left(theme::SLIDE * from * (1. - delta)).opacity(delta),
+                move |content, delta| content.left(theme::RISE * from * (1. - delta)).opacity(delta),
             ))
             .child(self.render_steps(cx))
     }
+}
+
+/// A step's fields, close together, and the button that takes them, further off.
+fn form(fields: impl IntoIterator<Item = AnyElement>, button: Button) -> impl IntoElement {
+    v_flex().w_full().mt_6().gap_4().child(v_flex().gap_2().children(fields)).child(button.size(Size::Large).w_full())
 }
 
 fn value(input: &Entity<TextField>, cx: &App) -> String {
@@ -232,7 +228,7 @@ fn value(input: &Entity<TextField>, cx: &App) -> String {
 }
 
 fn headline(text: impl Into<SharedString>) -> impl IntoElement {
-    div().mt_5().text_size(theme::TEXT_XL).font_weight(FontWeight::SEMIBOLD).text_center().child(text.into())
+    div().mt_5().typeset(theme::TEXT_XL).font_weight(FontWeight::SEMIBOLD).text_center().child(text.into())
 }
 
 fn subline(text: &'static str, cx: &App) -> impl IntoElement {

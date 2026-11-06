@@ -32,8 +32,10 @@ global-hotkey = "0.9.0"
 # GPUI, Zed's UI framework, as gpui-pre publishes it: weekly snapshots of Zed's main, whose API
 # changes, so the versions are exact and an upgrade is a step of its own.
 gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.10" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "wayland", "x11"] }
 hound = "3.5.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 interprocess = "2.4.7"
 keyring = "4.2.0"
 libloading = "0.9.0"

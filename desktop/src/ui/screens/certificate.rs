@@ -10,22 +10,23 @@ use gpui::{
 use crate::ui::chrome;
 use crate::ui::client::Client;
 use crate::ui::glyph::Glyph;
-use crate::ui::kit::{Button, Icon, Variant, h_flex, v_flex};
-use crate::ui::theme::{self, ActiveTokens};
+use crate::ui::kit::{self, Button, Icon, Size, Variant, h_flex, v_flex};
+use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 pub fn dialog(client: &Entity<Client>, pinned: Fingerprint, presented: Fingerprint, window: &Window, cx: &App) -> AnyElement {
     let tokens = cx.tokens();
     let fingerprint = |label: &'static str, fingerprint: Fingerprint| {
         v_flex()
             .gap_1()
-            .px_3()
+            // Its text on the dialog's inset, inside the dialog's padding and both edges.
+            .px(theme::PANEL_INSET - theme::DIALOG_PAD - theme::HAIRLINE * 2.)
             .py_2p5()
-            .rounded(theme::RADIUS_CONTROL)
+            .rounded(theme::RADIUS_CONTROL_LG)
             .bg(tokens.inset)
             .border_1()
             .border_color(tokens.hairline)
-            .child(div().text_size(theme::TEXT_SM).font_weight(FontWeight::MEDIUM).text_color(tokens.text_faint).child(label))
-            .child(v_flex().font_family(theme::MONO).text_size(theme::TEXT_XS).children(lines(fingerprint).into_iter().map(|line| {
+            .child(div().typeset(theme::TEXT_SM).font_weight(FontWeight::MEDIUM).text_color(tokens.text_faint).child(label))
+            .child(v_flex().font_family(theme::MONO).typeset(theme::TEXT_XS).children(lines(fingerprint).into_iter().map(|line| {
                 // The ends of a fingerprint are where the eye compares it first.
                 let edge = matches!(line.position, Position::First | Position::Last);
                 h_flex()
@@ -59,29 +60,14 @@ pub fn dialog(client: &Entity<Client>, pinned: Fingerprint, presented: Fingerpri
                 .bg(tokens.raised)
                 .border_1()
                 .border_color(tokens.edge)
-                .shadow_xl()
+                .shadow(theme::depth::overlay(tokens))
                 .occlude()
                 .child(
-                    h_flex()
-                        .gap_2p5()
-                        .px_2p5()
-                        .pt_2p5()
-                        .pb_1()
-                        .text_size(theme::TEXT_LG)
+                    kit::led(Icon::new(Glyph::Warning).size(theme::ICON_SM).color(tokens.warning))
+                        .h(theme::CONTROL)
+                        .px(theme::PANEL_INSET - theme::DIALOG_PAD - theme::HAIRLINE)
+                        .typeset(theme::TEXT_MD)
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(
-                            div()
-                                .size(theme::CONTROL_SM)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(theme::RADIUS_SMALL)
-                                .bg(tokens.warning.opacity(0.12))
-                                .border_1()
-                                .border_color(tokens.warning.opacity(0.25))
-                                .text_color(tokens.warning)
-                                .child(Icon::new(Glyph::Warning).size(theme::ICON_SM)),
-                        )
                         .child("Zertifikat geändert"),
                 )
                 .child(fingerprint("Bisher", pinned))
@@ -91,19 +77,21 @@ pub fn dialog(client: &Entity<Client>, pinned: Fingerprint, presented: Fingerpri
                         .gap(theme::DIALOG_PAD)
                         .child(
                             Button::new("cancel", Variant::Raised)
+                                .size(Size::Large)
                                 .flex_1()
                                 .label("Abbrechen")
                                 .on_click(move |_, _, cx| dismiss.update(cx, |client, cx| client.dismiss(cx))),
                         )
                         .child(
                             Button::new("trust", Variant::Danger)
+                                .size(Size::Large)
                                 .flex_1()
                                 .label("Vertrauen")
                                 .on_click(move |_, _, cx| trust.update(cx, |client, cx| client.trust(cx))),
                         ),
                 )
                 .with_animation("certificate", Animation::new(theme::APPEAR).with_easing(ease_out_quint()), |card, delta| {
-                    card.opacity(delta).top(theme::SLIDE * (1. - delta))
+                    card.opacity(delta).top(theme::RISE * (1. - delta))
                 }),
         )
         .into_any_element()

@@ -33,6 +33,19 @@ unicode-segmentation.workspace = true
 velopack.workspace = true
 zstd.workspace = true
 
+# The harness's: GPUI drawing offscreen, and the PNGs of what it drew.
+gpui_wgpu = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+
+[features]
+# `bukospeak-ui`, which draws the window offscreen against staged calls and drives it as a user
+# would, for looking at the UI without a display.
+harness = ["gpui/test-support", "gpui_platform/test-support", "dep:gpui_wgpu", "dep:image"]
+
+[[bin]]
+name = "bukospeak-ui"
+required-features = ["harness"]
+
 # On Linux the sound server's devices, named as the system names them and following its default;
 # ALSA lists every plug and alias of each card instead.
 [target.'cfg(target_os = "linux")'.dependencies]

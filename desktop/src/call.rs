@@ -206,7 +206,74 @@ pub struct Call {
     notice: Option<Notice>,
 }
 
+/// A call as the harness shows it: who is in it, and where it stands.
+#[cfg(feature = "harness")]
+#[derive(Clone, Debug)]
+pub struct Stage {
+    pub phase: Phase,
+    /// This member, while in the call.
+    pub you: Option<MemberId>,
+    /// Everyone in the call, this member included.
+    pub members: Vec<Member>,
+    pub speaking: Vec<MemberId>,
+    /// Who is in the channel, watched from outside it.
+    pub present: Vec<Member>,
+    pub muted: bool,
+    pub notice: Option<Notice>,
+    /// How long the call has been up.
+    pub up_for: Option<std::time::Duration>,
+}
+
 impl Call {
+    /// A call as `stage` says, for the harness: it has no worker, so it joins, watches and plays
+    /// nothing, and stays where it is staged until staged anew.
+    #[cfg(feature = "harness")]
+    pub fn staged(known: KnownServers, stage: Stage) -> io::Result<(Self, UnboundedReceiver<Happening>)> {
+        let (happenings, received) = unbounded();
+        let engine = Arc::new(Engine::new(Conditioning::Engine, Arc::new(Forward(happenings)))?);
+        let mut call = Self {
+            engine,
+            known,
+            commands: None,
+            worker: None,
+            current: Arc::new(AtomicU64::new(0)),
+            numbers: 0,
+            call: None,
+            joined: false,
+            asked: Instant::now(),
+            since: None,
+            leaves: 0,
+            left_call: 0,
+            watched: None,
+            meter: Meter::default(),
+            listening: false,
+            channel: Channel::default(),
+            phase: Phase::Idle,
+            present: Vec::new(),
+            muted: false,
+            notice: None,
+        };
+        call.stage(stage);
+        Ok((call, received))
+    }
+
+    /// Takes on what `stage` says.
+    #[cfg(feature = "harness")]
+    pub fn stage(&mut self, stage: Stage) {
+        let state = match stage.phase {
+            Phase::Connected => State::Connected,
+            Phase::Reconnecting => State::Reconnecting,
+            Phase::Idle | Phase::Joining | Phase::Failed(_) => State::Out,
+        };
+        self.channel = Channel::shown(state, stage.you, stage.members, stage.speaking);
+        self.joined = matches!(stage.phase, Phase::Connected | Phase::Reconnecting);
+        self.phase = stage.phase;
+        self.present = stage.present;
+        self.muted = stage.muted;
+        self.notice = stage.notice;
+        self.since = stage.up_for.map(|up_for| Instant::now() - up_for);
+    }
+
     /// A call with no one in it yet, which pins servers in `known` and plays through `player`;
     /// what happens comes on the receiver.
     pub fn new(known: KnownServers, player: impl Player) -> io::Result<(Self, UnboundedReceiver<Happening>)> {
@@ -509,9 +576,11 @@ impl Call {
     }
 
     fn send(&self, command: Command) {
-        let commands = self.commands.as_ref().expect("the commands close only on drop");
-        // The worker runs until the commands close.
-        commands.send(command).expect("the worker runs while the call is there");
+        // A staged call has no worker: what it would do is left undone.
+        if let Some(commands) = &self.commands {
+            // The worker runs until the commands close, which they do only on drop.
+            commands.send(command).expect("the worker runs while the call is there");
+        }
     }
 }
 

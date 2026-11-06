@@ -6,10 +6,9 @@
 mod hotkey;
 mod instance;
 mod tray;
-mod ui;
-mod update;
 
 use std::io::IsTerminal;
+use std::sync::Arc;
 
 use bukospeak_desktop::call::{Call, DesktopPlayer};
 use bukospeak_desktop::known_servers::KnownServers;
@@ -21,8 +20,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::hotkey::{self as keys, Hotkey};
 use crate::tray::Tray;
-use crate::ui::{Client, Trouble};
-use crate::update::Updater;
+use bukospeak_desktop::ui::{self, Client, Desktop, Trouble};
+use bukospeak_desktop::update::{self, Updater};
 
 /// What the tray, the hotkey or a later start asks the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +69,7 @@ fn main() {
         // Wayland has no keys for every app; GPUI on X11 or another system says something else.
         let hotkey = (cx.compositor_name() != "Wayland").then(|| Hotkey::new(actions.clone())).flatten();
         let mute_keys = hotkey.as_ref().map(|_| keys::KEYS);
-        let client = cx.new(|cx| Client::new(call, happenings, settings, settings_path, trouble, mute_keys, cx));
+        let client = cx.new(|cx| Client::new(call, happenings, Arc::new(Desktop::new(settings_path)), settings, trouble, mute_keys, cx));
         let updater = Updater::new(client.clone(), cx);
         let tray = show_tray(&client, actions.clone(), cx);
         // Without a tray the app is its window: closing it leaves the call and quits. With one,

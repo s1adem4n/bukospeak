@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use bukospeak_desktop::call::Phase;
+use crate::call::Phase;
 use futures::StreamExt;
 use gpui::{App, AppContext, AsyncApp, Context, Entity, Subscription, Task, WeakEntity};
 use velopack::sources::GithubSource;
@@ -203,6 +203,6 @@ mod tests {
         assert!(waits(&Phase::Joining));
         assert!(waits(&Phase::Connected));
         assert!(waits(&Phase::Reconnecting));
-        assert!(!waits(&Phase::Failed(bukospeak_desktop::call::Failure::NoAnswer)));
+        assert!(!waits(&Phase::Failed(crate::call::Failure::NoAnswer)));
     }
 }

@@ -6,14 +6,15 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, AnchoredPositionMode, App, AppContext, BoxShadow, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Pixels, Point, Render, RenderOnce, Role, SharedString,
-    StatefulInteractiveElement, Styled, Window, actions, anchored, deferred, div, px,
+    Anchor, AnchoredPositionMode, Animation, AnimationExt, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Pixels, Point, Render, RenderOnce,
+    Role, SharedString, StatefulInteractiveElement, Styled, Window, actions, anchored, deferred, div, ease_out_quint,
 };
 
 use crate::ui::glyph::Glyph;
 use crate::ui::kit::{Icon, h_flex, v_flex};
-use crate::ui::theme::{self, ActiveTokens};
+use crate::ui::marks::Mark;
+use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 actions!(
     menu,
@@ -70,6 +71,8 @@ impl Item {
 enum Entry {
     Item(Item),
     Separator,
+    /// The title of the items after it, which aren't the menu's own: a vendor's.
+    Heading(SharedString),
 }
 
 pub struct Menu {
@@ -116,6 +119,12 @@ impl Menu {
 
     pub fn separator(mut self) -> Self {
         self.entries.push(Entry::Separator);
+        self
+    }
+
+    /// Titles the items that follow, lined up with their labels.
+    pub fn heading(mut self, title: impl Into<SharedString>) -> Self {
+        self.entries.push(Entry::Heading(title.into()));
         self
     }
 
@@ -178,16 +187,28 @@ impl Render for Menu {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
         let entries = self.entries.iter().enumerate().map(|(index, entry)| match entry {
-            Entry::Separator => div().my_1().mx_2().h(px(1.)).bg(tokens.hairline).into_any_element(),
+            Entry::Separator => div().my_1().mx_2().h(theme::HAIRLINE).bg(tokens.hairline).into_any_element(),
+            Entry::Heading(title) => h_flex()
+                .px_2()
+                .pt_1()
+                .gap_2()
+                .h(theme::MENU_ITEM)
+                .typeset(theme::TEXT_XS)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(tokens.text_faint)
+                .when(self.checks, |heading| heading.child(div().flex_none().size(theme::ICON_SM)))
+                .child(title.clone())
+                .into_any_element(),
             Entry::Item(item) => {
                 let highlighted = self.highlighted == Some(index);
                 h_flex()
                     .id(index)
+                    .mark(item.label.clone())
                     .role(Role::MenuItem)
                     .h(theme::MENU_ITEM)
                     .px_2()
                     .gap_2()
-                    .rounded(theme::RADIUS_SMALL)
+                    .rounded(theme::RADIUS_CONTROL_SM)
                     .when(self.checks, |row| {
                         row.child(div().size(theme::ICON_SM).children(item.checked.then(|| Icon::new(Glyph::Check).size(theme::ICON_SM))))
                     })
@@ -207,6 +228,8 @@ impl Render for Menu {
         });
         v_flex()
             .id("menu")
+            // Above its backdrop, which closes it on a press: a press on an item is the item's.
+            .occlude()
             .role(Role::Menu)
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -214,16 +237,21 @@ impl Render for Menu {
             .on_action(cx.listener(Self::previous))
             .on_action(cx.listener(Self::choose))
             .on_action(cx.listener(Self::close_action))
+            .relative()
             .min_w(theme::MENU)
             .p(theme::MENU_PAD)
-            .rounded(theme::RADIUS_CONTROL)
+            .rounded(theme::RADIUS_MENU)
             .bg(tokens.floating)
             .border_1()
             .border_color(tokens.edge)
-            .shadow(vec![BoxShadow::new(px(0.), px(4.), tokens.shadow).blur_radius(px(12.))])
-            .text_size(theme::TEXT)
+            .shadow(theme::depth::floating(tokens))
+            .typeset(theme::TEXT)
             .text_color(tokens.text)
             .children(entries)
+            // Comes on from what opened it, settling the last of the gap between.
+            .with_animation("pop", Animation::new(theme::POP).with_easing(ease_out_quint()), |menu, delta| {
+                menu.opacity(delta).top(-theme::MENU_GAP * (1. - delta))
+            })
     }
 }
 
@@ -270,7 +298,7 @@ impl RenderOnce for Popover {
             ),
         )
         .with_priority(1);
-        let margin = anchored().snap_to_window_with_margin(theme::GAP);
+        let margin = anchored().snap_to_window_with_margin(theme::GUTTER);
         let menu = match self.place {
             Place::BelowEnd => margin.anchor(Anchor::TopRight).child(div().mt(theme::MENU_GAP).child(self.menu)),
             Place::At(point) => margin.position_mode(AnchoredPositionMode::Window).position(point).child(self.menu),

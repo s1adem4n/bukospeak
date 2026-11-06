@@ -3,14 +3,14 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Background, BoxShadow, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Pixels, Refineable, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
-    Window, div, linear_color_stop, linear_gradient, px,
+    AnyElement, App, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Refineable, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
 };
 
 use crate::ui::glyph::Glyph;
 use crate::ui::kit::{Icon, Spinner, Tooltip};
-use crate::ui::theme::{self, ActiveTokens, Tokens};
+use crate::ui::marks::Mark;
+use crate::ui::theme::{self, ActiveTokens, Tokens, Type, Typeset};
 
 /// What a button is for, which its looks tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,8 +31,49 @@ pub enum Variant {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Size {
-    Medium,
+    /// In bars and rows.
     Small,
+    Medium,
+    /// What a screen is for: the dock's, the welcome's, a dialog's.
+    Large,
+}
+
+/// A size's height, corners, inset of its content, icon and type: of buttons, and of the fields
+/// beside them.
+pub(super) struct Metrics {
+    pub height: Pixels,
+    pub radius: Pixels,
+    pub inset: Pixels,
+    pub icon: Pixels,
+    pub text: Type,
+}
+
+impl Size {
+    pub(super) fn metrics(self) -> Metrics {
+        match self {
+            Self::Small => Metrics {
+                height: theme::CONTROL_SM,
+                radius: theme::RADIUS_CONTROL_SM,
+                inset: theme::CONTROL_SM_INSET,
+                icon: theme::ICON_SM,
+                text: theme::TEXT,
+            },
+            Self::Medium => Metrics {
+                height: theme::CONTROL,
+                radius: theme::RADIUS_CONTROL,
+                inset: theme::CONTROL_INSET,
+                icon: theme::ICON,
+                text: theme::TEXT,
+            },
+            Self::Large => Metrics {
+                height: theme::CONTROL_LG,
+                radius: theme::RADIUS_CONTROL_LG,
+                inset: theme::CONTROL_LG_INSET,
+                icon: theme::ICON_LG,
+                text: theme::TEXT_MD,
+            },
+        }
+    }
 }
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -53,7 +94,6 @@ pub struct Button {
     tooltip: Option<SharedString>,
     loading: bool,
     disabled: bool,
-    selected: bool,
     /// The focus it takes, if not one of its own.
     focus: Option<FocusHandle>,
     /// Whether Tab and a click give it the focus.
@@ -76,7 +116,6 @@ impl Button {
             tooltip: None,
             loading: false,
             disabled: false,
-            selected: false,
             focus: None,
             focusable: true,
             on_click: None,
@@ -126,12 +165,6 @@ impl Button {
         self
     }
 
-    /// Shows what it opened as open: a ghost button keeps its hovered surface.
-    pub fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
     /// Takes the focus by `focus`, so it can be given the focus.
     pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
         self.focus = Some(focus.clone());
@@ -163,25 +196,16 @@ impl ParentElement for Button {
     }
 }
 
-/// A fill from its top color to its bottom one.
-fn gradient([top, bottom]: [Hsla; 2]) -> Background {
-    linear_gradient(180., linear_color_stop(top, 0.), linear_color_stop(bottom, 1.))
-}
-
-/// The light on a raised surface's top edge, `highlight`, and its shadow beneath.
-fn lifted(highlight: Hsla, tokens: &Tokens) -> Vec<BoxShadow> {
-    vec![BoxShadow::new(px(0.), px(1.), highlight).inset(), BoxShadow::new(px(0.), px(1.), tokens.shadow).blur_radius(px(2.))]
-}
-
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let tokens = cx.tokens();
-        let (height, radius, padding, icon) = match self.size {
-            Size::Medium => (theme::CONTROL, theme::RADIUS_CONTROL, px(14.), theme::ICON),
-            Size::Small => (theme::CONTROL_SM, theme::RADIUS_SMALL, px(10.), theme::ICON_SM),
-        };
+        let Metrics { height, radius, inset, icon, text: kind } = self.size.metrics();
         let inert = self.disabled || self.loading;
+        // A disabled fill would still call for the click it doesn't take: it gives the fill up
+        // and lies flat, without an edge, which would make it a field; its text faint.
+        let given_up = self.disabled && matches!(self.variant, Variant::Primary | Variant::Danger);
         let text = match self.variant {
+            _ if given_up => tokens.text_faint,
             Variant::Raised => tokens.text,
             Variant::Primary => tokens.on_primary,
             Variant::Danger => tokens.primary[0],
@@ -194,8 +218,10 @@ impl RenderOnce for Button {
             (false, None) => None,
         };
         let name = self.label.clone().or_else(|| self.tooltip.clone());
+        let mark = self.id.to_string();
         let mut button = div()
             .id(self.id)
+            .mark(mark)
             .role(Role::Button)
             .when_some(name, |button, name| button.aria_label(name))
             .h(height)
@@ -204,20 +230,25 @@ impl RenderOnce for Button {
             .justify_center()
             .gap_2()
             .rounded(radius)
-            .border_1()
-            .border_color(tokens.base.opacity(0.))
-            .text_size(theme::TEXT)
+            // A bare button is its content alone, lined up as text is; the others keep an edge
+            // that focus colors.
+            .when(self.variant != Variant::Bare, |button| button.border_1().border_color(tokens.base.opacity(0.)))
+            .typeset(kind)
             .font_weight(FontWeight::MEDIUM)
             .text_color(text)
             .map(|button| match (self.square, self.variant) {
                 (true, _) => button.w(height),
                 (false, Variant::Bare) => button,
-                (false, _) => button.px(padding),
+                // Inside its edge, which takes room too: the content lies `inset` off the outside.
+                (false, _) => button.px(inset - theme::HAIRLINE),
             })
-            .map(|button| surface(button, self.variant, self.selected, tokens));
+            .map(|button| match given_up {
+                true => button.bg(tokens.hover),
+                false => surface(button, self.variant, self.size, tokens),
+            });
         if inert {
-            // A loading button shows its spinner in full; a disabled one fades.
-            button = button.when(self.disabled, |button| button.opacity(theme::DISABLED_OPACITY));
+            // A loading button shows its spinner in full; a disabled one without a fill fades.
+            button = button.when(self.disabled && !given_up, |button| button.opacity(theme::DISABLED_OPACITY));
         } else {
             button = button
                 .cursor_pointer()
@@ -227,7 +258,12 @@ impl RenderOnce for Button {
                         Some(focus) => button.track_focus(focus),
                         None => button.tab_index(0),
                     };
-                    button.focus_visible(|style| style.border_color(tokens.focus))
+                    // What has no surface shows the focus as it shows the pointer; the rest by its edge.
+                    match self.variant {
+                        Variant::Ghost => button.focus_visible(|style| style.bg(tokens.inset).text_color(tokens.text)),
+                        Variant::Bare => button.focus_visible(|style| style.text_color(tokens.text)),
+                        _ => button.focus_visible(|style| style.border_color(tokens.focus)),
+                    }
                 })
                 .when_some(self.on_click, |button, handler| button.on_click(handler))
                 .when_some(self.tooltip, |button, tooltip| button.tooltip(Tooltip::text(tooltip)));
@@ -237,25 +273,30 @@ impl RenderOnce for Button {
     }
 }
 
-/// The surface of a variant at rest, or selected.
-fn surface(button: Stateful<gpui::Div>, variant: Variant, selected: bool, tokens: &Tokens) -> Stateful<gpui::Div> {
+/// The surface of a variant at rest.
+fn surface(button: Stateful<gpui::Div>, variant: Variant, size: Size, tokens: &Tokens) -> Stateful<gpui::Div> {
+    // A large button stands further off what it is on.
+    let lifted = |light| if size == Size::Large { theme::depth::control_lg(light, tokens) } else { theme::depth::control(light, tokens) };
     match variant {
-        Variant::Raised => button.bg(gradient(tokens.control)).border_color(tokens.edge).shadow(lifted(tokens.highlight, tokens)),
-        Variant::Primary => button.bg(gradient(tokens.primary)).border_color(tokens.primary_edge).shadow(lifted(tokens.highlight, tokens)),
-        Variant::Danger => button.bg(gradient(tokens.danger_fill)).border_color(tokens.danger_edge).shadow(lifted(tokens.sheen, tokens)),
+        Variant::Raised => button.bg(theme::gradient(tokens.control)).border_color(tokens.edge).shadow(lifted(tokens.highlight)),
+        Variant::Primary => button.bg(theme::gradient(tokens.primary)).border_color(tokens.primary_edge).shadow(lifted(tokens.highlight)),
+        Variant::Danger => button.bg(theme::gradient(tokens.danger_fill)).border_color(tokens.danger_edge).shadow(lifted(tokens.sheen)),
         Variant::Off => button.bg(tokens.danger.opacity(0.14)).border_color(tokens.danger.opacity(0.35)),
-        Variant::Ghost => button.when(selected, |button| button.bg(tokens.inset).text_color(tokens.text)),
-        Variant::Bare => button,
+        Variant::Ghost | Variant::Bare => button,
     }
 }
 
 /// How a variant answers the pointer: hovered, and pressed.
 fn hovered(button: Stateful<gpui::Div>, variant: Variant, tokens: &Tokens) -> Stateful<gpui::Div> {
     match variant {
-        Variant::Raised => button.hover(|style| style.bg(gradient(tokens.control_hover))).active(|style| style.bg(tokens.control[1])),
-        Variant::Primary => button.hover(|style| style.bg(gradient(tokens.primary_hover))).active(|style| style.bg(tokens.primary[1])),
+        Variant::Raised => {
+            button.hover(|style| style.bg(theme::gradient(tokens.control_hover))).active(|style| style.bg(tokens.control[1]))
+        }
+        Variant::Primary => {
+            button.hover(|style| style.bg(theme::gradient(tokens.primary_hover))).active(|style| style.bg(tokens.primary[1]))
+        }
         Variant::Danger => {
-            button.hover(|style| style.bg(gradient(tokens.danger_fill_hover))).active(|style| style.bg(tokens.danger_fill[1]))
+            button.hover(|style| style.bg(theme::gradient(tokens.danger_fill_hover))).active(|style| style.bg(tokens.danger_fill[1]))
         }
         Variant::Off => button.hover(|style| style.bg(tokens.danger.opacity(0.2))).active(|style| style.bg(tokens.danger.opacity(0.26))),
         Variant::Ghost => button.hover(|style| style.bg(tokens.inset).text_color(tokens.text)).active(|style| style.bg(tokens.hover)),
@@ -267,11 +308,11 @@ fn hovered(button: Stateful<gpui::Div>, variant: Variant, tokens: &Tokens) -> St
 fn keycap(keys: &'static str, color: Hsla) -> impl IntoElement {
     div()
         .px_1p5()
-        .rounded(theme::RADIUS_TINY)
+        .rounded(theme::RADIUS_XS)
         .border_1()
         .border_color(color.opacity(0.2))
         .font_family(theme::MONO)
-        .text_size(theme::TEXT_XS)
+        .typeset(theme::TEXT_XS)
         .line_height(theme::KEYCAP)
         .text_color(color.opacity(0.65))
         .child(keys)
@@ -280,8 +321,6 @@ fn keycap(keys: &'static str, color: Hsla) -> impl IntoElement {
 /// How far a square button's edge lies outside its icon: pulled out by it, the icon lines up
 /// with what is above or beside the button.
 pub fn icon_inset(size: Size) -> Pixels {
-    match size {
-        Size::Medium => (theme::CONTROL - theme::ICON) / 2.,
-        Size::Small => (theme::CONTROL_SM - theme::ICON_SM) / 2.,
-    }
+    let Metrics { height, icon, .. } = size.metrics();
+    (height - icon) / 2.
 }

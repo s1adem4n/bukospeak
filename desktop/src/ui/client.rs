@@ -1,15 +1,15 @@
 //! What outlives the window: the call, the settings and the room key. The window shows them
 //! and the tray and the hotkey act on them, with or without a window open.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::audio::Direction;
+use crate::call::{Call, Happening, Phase};
+use crate::nvidia::{self, Architecture, Effects, Progress};
+use crate::settings::{self as stored, Settings, Suppression};
+use crate::ui::host::Host;
 use bukospeak_core::Error;
 use bukospeak_core::proto::control::Rejection;
-use bukospeak_desktop::audio::Direction;
-use bukospeak_desktop::call::{Call, Happening, Phase};
-use bukospeak_desktop::nvidia::{self, Architecture, Effects, Progress};
-use bukospeak_desktop::settings::{self as stored, Settings, Suppression};
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{AppContext, Context, EventEmitter, Task};
@@ -59,7 +59,7 @@ enum Installing {
 pub struct Client {
     pub call: Call,
     pub settings: Settings,
-    settings_path: PathBuf,
+    host: Arc<dyn Host>,
     /// None until the keyring answered, or a key is given before.
     room_key: Option<String>,
     pub trouble: Option<Trouble>,
@@ -78,8 +78,8 @@ impl Client {
     pub fn new(
         call: Call,
         mut happenings: UnboundedReceiver<Happening>,
+        host: Arc<dyn Host>,
         settings: Settings,
-        settings_path: PathBuf,
         trouble: Option<Trouble>,
         mute_keys: Option<&'static str>,
         cx: &mut Context<Self>,
@@ -102,14 +102,16 @@ impl Client {
             }
         });
         // The keyring may ask the system, and the system the user: not on the app's thread.
+        let keyring = Arc::clone(&host);
         let room_key = cx.spawn(async move |this, cx| {
-            let read = cx.background_spawn(async { stored::room_key() }).await;
+            let read = cx.background_spawn(async move { keyring.room_key() }).await;
             // The app may be quitting before the keyring answered.
             let _ = this.update(cx, |client, cx| client.read_room_key(read, cx));
         });
         // CUDA takes a moment to tell the card.
+        let system = Arc::clone(&host);
         let card = cx.spawn(async move |this, cx| {
-            if let Some(architecture) = cx.background_spawn(async { nvidia::card() }).await {
+            if let Some(architecture) = cx.background_spawn(async move { system.card() }).await {
                 // The app may be quitting before the card was found.
                 let _ = this.update(cx, |client, cx| client.found(architecture, cx));
             }
@@ -117,7 +119,7 @@ impl Client {
         Self {
             call,
             settings,
-            settings_path,
+            host,
             room_key: None,
             trouble,
             mute_keys,
@@ -175,13 +177,14 @@ impl Client {
         if let Some(nvidia) = &mut self.nvidia {
             nvidia.installing = Some(Progress::Preparing { done: 0, total: 0 });
         }
+        let host = Arc::clone(&self.host);
         let (tell, mut told) = mpsc::unbounded();
         let progress = tell.clone();
         std::thread::Builder::new()
             .name("bukospeak-nvidia".into())
             .spawn(move || {
                 let mut shown = None;
-                let installed = nvidia::install(&server, room_key, &known, architecture, |now| {
+                let installed = host.install(&server, room_key, &known, architecture, &mut |now| {
                     // Each percent, not each chunk: the window redraws for each.
                     let percent = match now {
                         Progress::Preparing { done, total } | Progress::Fetching { done, total } => (done * 100).checked_div(total),
@@ -248,6 +251,11 @@ impl Client {
             cx.emit(RoomKeyRead);
             cx.notify();
         }
+    }
+
+    /// What the window asks of the system.
+    pub fn host(&self) -> &Arc<dyn Host> {
+        &self.host
     }
 
     /// The room key; empty until the keyring answered.
@@ -328,8 +336,9 @@ impl Client {
         self.room_key = Some(room_key.clone());
         self.watch();
         cx.notify();
+        let host = Arc::clone(&self.host);
         cx.spawn(async move |this, cx| {
-            let kept = cx.background_spawn(async move { stored::set_room_key(&room_key) }).await;
+            let kept = cx.background_spawn(async move { host.set_room_key(&room_key) }).await;
             if let Err(error) = kept {
                 tracing::warn!("the room key isn't kept: {error}");
                 // The app may be quitting before the keyring answered.
@@ -345,7 +354,7 @@ impl Client {
     /// Changes the settings and keeps them.
     fn change(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         edit(&mut self.settings);
-        if let Err(error) = self.settings.save(&self.settings_path) {
+        if let Err(error) = self.host.save_settings(&self.settings) {
             tracing::warn!("{error}");
             self.trouble = Some(Trouble::NotSaved);
         }

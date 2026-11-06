@@ -12,7 +12,7 @@ use gpui::{
 use crate::ui::chrome;
 use crate::ui::client::Client;
 use crate::ui::kit::{self, Spinner, v_flex};
-use crate::ui::theme::{self, ActiveTokens};
+use crate::ui::theme::{self, ActiveTokens, Typeset};
 use crate::update::{State, Updater};
 
 /// How long the start waits for the updater to learn whether there is a newer release; one it
@@ -86,15 +86,15 @@ impl Render for Update {
             .bg(tokens.base)
             .font_family(theme::SANS)
             .text_color(tokens.text)
-            .text_size(theme::TEXT)
+            .typeset(theme::TEXT)
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .child(kit::mark(theme::MARK))
             .child(
                 v_flex()
                     .items_center()
                     .gap_1()
-                    .child(div().text_size(theme::TEXT_LG).font_weight(FontWeight::MEDIUM).child(headline))
-                    .child(div().font_family(theme::MONO).text_size(theme::TEXT_SM).text_color(tokens.text_faint).child(versions)),
+                    .child(div().typeset(theme::TEXT_MD).font_weight(FontWeight::MEDIUM).child(headline))
+                    .child(div().font_family(theme::MONO).typeset(theme::TEXT_SM).text_color(tokens.text_faint).child(versions)),
             )
             .child(v_flex().w(theme::UPDATE).h(theme::ICON).items_center().justify_center().child(progress));
         chrome::frame(chrome::rounded(content, window), window, cx)

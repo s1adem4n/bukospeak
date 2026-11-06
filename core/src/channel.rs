@@ -68,6 +68,12 @@ pub struct Channel {
 }
 
 impl Channel {
+    /// A channel as given rather than as the engine's events made it, to show one without a
+    /// call: `you`, if in it, among `members`, and `speaking` of them speaking.
+    pub fn shown(state: State, you: Option<MemberId>, members: Vec<Member>, speaking: Vec<MemberId>) -> Self {
+        Self { call: 0, state, you, members, speaking, present: Vec::new() }
+    }
+
     /// Which of the engine's joins the call is, counting from 1; 0 before the first. It stays
     /// once the call is over, so that its last updates tell it too.
     pub fn call(&self) -> u64 {

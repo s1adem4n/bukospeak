@@ -29,7 +29,15 @@ BUKOSPEAK_ROOM_KEY=dev cargo run -p bukospeak-server            # a server on [:
 cargo run --bin bukospeak-desktop                               # the desktop app
 cargo run --bin bukospeak -- devices                            # the audio devices and their ids
 cargo run --bin bukospeak -- join localhost:9988 --name first --room-key dev
+cargo run -F bukospeak-desktop/harness --bin bukospeak-ui -- list  # the desktop app's window, headless
 ```
+
+`bukospeak-ui` draws the desktop app's window offscreen in a scene, a staged call and system, and
+drives it by the names of its elements (`.mark(name)`): `snap call-muted --theme light`,
+`snap settings --steps "click suppression"`, `film settings --steps "click suppression"` for the
+frames of the motion a step starts, `marks lobby` for what there is to click, `gallery` for every
+scene, light and dark. It draws motions finished and moves timers only as the script says, so a
+picture is the same on every run; a film plays motions on the wall clock, as GPUI does.
 
 On Linux, cpal needs ALSA's headers (`alsa-lib` on Arch, `libasound2-dev` on Debian), and the
 desktop app those of fontconfig, freetype, wayland and xkbcommon (CI's Linux job lists Debian's).
