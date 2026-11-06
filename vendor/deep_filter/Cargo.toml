@@ -18,3 +18,7 @@ thiserror = "2.0.21"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# The tests run the networks over seconds of audio, too slow in a debug build.
+[profile.dev]
+opt-level = 3

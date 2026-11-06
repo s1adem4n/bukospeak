@@ -376,6 +376,7 @@ impl EchoCanceller {
 #[cfg(test)]
 mod tests {
     use std::f32::consts::TAU;
+    use std::thread;
     use std::time::Duration;
 
     use super::*;
@@ -614,6 +615,10 @@ mod tests {
     #[test]
     fn the_echo_is_cancelled_while_the_clocks_drift_apart() {
         assert_cancelled(&Room { output_drift_ppm: 300.0, input_drift_ppm: -200.0, ..Room::default() }, 40.0, 0);
+    }
+
+    #[test]
+    fn the_echo_is_cancelled_while_the_clocks_drift_apart_in_buffers_of_a_frame() {
         // A buffer each per 10 ms, as on Windows, close to the echo.
         assert_cancelled(
             &Room {
@@ -666,8 +671,12 @@ mod tests {
     #[test]
     fn the_voice_passes_while_both_ends_talk() {
         let near: Vec<f32> = [vec![0.0; 30 * SECOND], near(20, 0.2)].concat();
-        let with_echo = cancel(&Room::default(), &far(50), &near, 50 * SECOND_US);
-        let without = cancel(&Room { echo: &[], ..Room::default() }, &far(50), &near, 50 * SECOND_US);
+        let far = far(50);
+        let cancel = |room: Room| cancel(&room, &far, &near, 50 * SECOND_US);
+        let (with_echo, without) = thread::scope(|scope| {
+            let without = scope.spawn(|| cancel(Room { echo: &[], ..Room::default() }));
+            (cancel(Room::default()), without.join().unwrap())
+        });
         let loss = quieter_db(&without.cancelled, &with_echo.cancelled, 30, 50);
         assert!(loss <= 6.0, "the voice lost {loss:.1} dB to the echo's cancellation");
     }

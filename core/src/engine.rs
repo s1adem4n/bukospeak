@@ -46,6 +46,9 @@ const LOOK_EVERY: Duration = Duration::from_millis(50);
 /// How long a watch that failed or broke waits before it starts again.
 const WATCH_AGAIN_AFTER: Duration = Duration::from_secs(5);
 
+/// How long a join again that failed waits before it tries anew.
+const REJOIN_AGAIN_AFTER: Duration = Duration::from_millis(250);
+
 /// Receives the channel after each change, in order, on a thread of its own, so it may call
 /// the engine; but not drop it, since dropping waits for that thread.
 pub trait Listener: Send + Sync {
@@ -348,8 +351,8 @@ async fn run(
             _ = &mut stop => return tell(Event::Ended),
             // In its own place, if the server still holds it: the others see it come back, not
             // leave and join.
-            rejoined = Session::join(
-                link.rejoin.clone(),
+            rejoined = rejoin(
+                &link.rejoin,
                 Entry { muted: *link.muted.borrow_and_update(), resume: Some(link.session.resume()) },
             ) => rejoined,
         };
@@ -370,6 +373,23 @@ async fn run(
     }
     link.session.leave().await;
     tell(Event::Ended);
+}
+
+/// Joins again after the connection was lost, trying anew for up to [`session::JOIN_TIMEOUT`]
+/// while the server can't take the join yet: one that stops closes its connections, and turns
+/// joins away until it is gone and up again.
+async fn rejoin(config: &JoinConfig, entry: Entry) -> Result<Session, Error> {
+    let deadline = Instant::now() + session::JOIN_TIMEOUT;
+    loop {
+        match tokio::time::timeout_at(deadline, Session::join(config.clone(), entry)).await {
+            Ok(Ok(session)) => return Ok(session),
+            // Answers that trying again won't change.
+            Ok(Err(error @ (Error::FingerprintChanged { .. } | Error::Rejected(_)))) => return Err(error),
+            Ok(Err(error)) if Instant::now() + REJOIN_AGAIN_AFTER >= deadline => return Err(error),
+            Ok(Err(_)) => tokio::time::sleep(REJOIN_AGAIN_AFTER).await,
+            Err(_) => return Err(Error::TimedOut),
+        }
+    }
 }
 
 /// Tells the listener who is in the channel, watched from outside, until it is stopped; a watch
@@ -704,6 +724,24 @@ mod tests {
         relay.cut(false);
         let back = announced(&updates, Announcement::Reconnected);
         assert_eq!((back.state(), back.you()), (State::Connected, Some(you)));
+    }
+
+    #[test]
+    fn a_server_that_restarts_is_joined_again_once_it_is_up() {
+        let server = Runtime::new().unwrap();
+        let identity = Identity::generate().unwrap();
+        let old = serve(&server, &identity);
+        let relay = Relay::new(&server, old.local_addr().unwrap());
+        let (engine, updates) = engine();
+        let _joined = engine.join(config(relay.address, &identity, "first")).unwrap();
+        entered(&updates);
+        // It stops as the server does, and turns away joins while it closes.
+        old.close(0u32.into(), b"server stopped");
+        announced(&updates, Announcement::Reconnecting);
+        thread::sleep(Duration::from_millis(500));
+        relay.turn_to(serve(&server, &identity).local_addr().unwrap());
+
+        assert_eq!(announced(&updates, Announcement::Reconnected).state(), State::Connected);
     }
 
     #[test]

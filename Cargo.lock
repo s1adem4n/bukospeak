@@ -851,6 +851,7 @@ dependencies = [
  "interprocess",
  "keyring",
  "ksni",
+ "quinn",
  "rubato",
  "serde",
  "serde_json",

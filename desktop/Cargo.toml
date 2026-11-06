@@ -44,6 +44,7 @@ embed-resource.workspace = true
 
 [dev-dependencies]
 bukospeak-server.workspace = true
+quinn.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]

@@ -80,10 +80,21 @@ opus = { path = "vendor/opus" }
 sonora = { path = "vendor/sonora" }
 sonora-aec3 = { path = "vendor/sonora-aec3" }
 
-# AEC3 in a debug build is too slow for the tests' minutes of simulated audio.
+# AEC3 and AGC2 in a debug build, with the FFTs and vector arithmetic under them, are too slow
+# for the tests' minutes of simulated audio.
 [profile.dev.package.sonora]
 opt-level = 3
 [profile.dev.package.sonora-aec3]
+opt-level = 3
+[profile.dev.package.sonora-agc2]
+opt-level = 3
+[profile.dev.package.sonora-ns]
+opt-level = 3
+[profile.dev.package.sonora-common-audio]
+opt-level = 3
+[profile.dev.package.sonora-fft]
+opt-level = 3
+[profile.dev.package.sonora-simd]
 opt-level = 3
 # Nor can DeepFilterNet3 keep up with the audio in a debug build.
 [profile.dev.package.deep_filter]

@@ -19,13 +19,23 @@ use tokio::runtime::Runtime;
 const ROOM_KEY: &str = "room-key";
 
 /// How long a call may take to get where a test waits for it: a lost connection is told after
-/// QUIC's idle timeout and a join again that fails.
+/// a join again that fails.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// A server, which stops when dropped as the real one does: it closes its connections, so
+/// clients learn at once that it went.
 struct Server {
-    _runtime: Runtime,
+    runtime: Runtime,
+    endpoint: quinn::Endpoint,
     address: String,
     fingerprint: Fingerprint,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.endpoint.close(0u32.into(), b"server stopped");
+        self.runtime.block_on(self.endpoint.wait_idle());
+    }
 }
 
 fn serve() -> Server {
@@ -38,8 +48,8 @@ fn serve_at(address: &str) -> Server {
     let identity = Identity::generate().unwrap();
     let endpoint = runtime.block_on(async { bukospeak_server::endpoint(&identity, address.parse().unwrap()) }).unwrap();
     let address = endpoint.local_addr().unwrap().to_string();
-    runtime.spawn(Room::new(ROOM_KEY.into()).serve(endpoint));
-    Server { _runtime: runtime, address, fingerprint: identity.fingerprint() }
+    runtime.spawn(Room::new(ROOM_KEY.into()).serve(endpoint.clone()));
+    Server { runtime, endpoint, address, fingerprint: identity.fingerprint() }
 }
 
 /// Plays nothing, but holds the call's ends as the devices would, and counts the calls played
@@ -323,7 +333,7 @@ fn a_dropout_shows_reconnecting_and_a_lost_connection_ends_the_call_and_its_audi
     app.join(&server, "first", ROOM_KEY);
     app.until("the call", connected);
     drop(server);
-    // Nothing comes for a few seconds: the call shows it, and plays on, long before it is lost.
+    // The call shows it, and plays on while it joins again, until that fails.
     let since = app.call.since();
     app.until("reconnecting", |call| *call.phase() == Phase::Reconnecting);
     // Joining again is still the same call.
