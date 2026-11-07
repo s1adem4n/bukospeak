@@ -12,17 +12,14 @@ use bukospeak_server::{Device, Downloads, Room, Tailnet, endpoint};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-/// A tailnet in which each connection is a device of its own.
 fn own(peer: SocketAddr) -> Option<Device> {
     Some(Device { id: peer.to_string(), name: format!("member {}", peer.port()) })
 }
 
-/// A tailnet in which every connection is the same phone.
 fn phone(_: SocketAddr) -> Option<Device> {
     Some(Device { id: "phone".into(), name: "Phone Owner".into() })
 }
 
-/// A tailnet whose tailscaled doesn't answer.
 struct Down;
 
 impl Tailnet for Down {
@@ -31,7 +28,6 @@ impl Tailnet for Down {
     }
 }
 
-/// A room on localhost whose members `tailnet` tells; its address.
 fn serve(tailnet: impl Tailnet) -> String {
     let endpoint = endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = endpoint.local_addr().unwrap();
@@ -39,7 +35,6 @@ fn serve(tailnet: impl Tailnet) -> String {
     address.to_string()
 }
 
-/// Joins unmuted.
 async fn join(server: &str) -> Result<Session, Error> {
     Session::join(server, false).await
 }
@@ -109,7 +104,6 @@ async fn a_server_that_cant_ask_its_tailnet_turns_everyone_away() {
 async fn a_server_that_never_answers_times_the_join_out() {
     let silent = endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let server = silent.local_addr().unwrap().to_string();
-    // It completes the handshake but never reads the Hello.
     tokio::spawn(async move {
         let connection = silent.accept().await.unwrap().await.unwrap();
         connection.closed().await;
@@ -127,7 +121,6 @@ async fn a_watcher_sees_who_comes_and_goes_without_joining() {
     let second = join(&server).await.unwrap();
     changed(&mut watch).await;
     assert_eq!(ids(watch.members()), [first.you(), second.you()]);
-    // The watcher isn't in the channel.
     assert_eq!(ids(second.members()), [first.you(), second.you()]);
 
     first.leave().await;
@@ -162,7 +155,6 @@ async fn a_device_that_joins_again_takes_its_place_and_its_old_connection_is_rep
     let new = Session::join(&server, true).await.unwrap();
     assert_eq!(new.you(), old.you());
     assert_eq!(ids(new.members()), [old.you()]);
-    // The others see it change, not leave and join.
     changed(&mut watch).await;
     assert_eq!((ids(watch.members()), watch.members()[0].muted), (vec![old.you()], true));
     assert!(matches!(timeout(Duration::from_secs(2), old.next_event()).await.unwrap(), Err(Error::Replaced)));
@@ -185,7 +177,6 @@ async fn a_lost_member_keeps_its_place_for_a_while_and_its_device_comes_back_or_
         relay.cut.store(true, Ordering::Relaxed);
         changed_within(&mut watch, Duration::from_secs(5)).await;
         assert_eq!((ids(watch.members()), watch.members()[0].reconnecting), (vec![id], true));
-        // The connection times out meanwhile, and the server holds the place on.
         assert!(timeout(IDLE_TIMEOUT + Duration::from_secs(5), watch.changed()).await.is_err());
         if comes_back {
             let back = join(&server).await.unwrap();
@@ -196,7 +187,6 @@ async fn a_lost_member_keeps_its_place_for_a_while_and_its_device_comes_back_or_
         } else {
             changed_within(&mut watch, Duration::from_secs(60)).await;
             assert!(watch.members().is_empty());
-            // Once the place is given up, the device joins as a new member.
             let late = join(&server).await.unwrap();
             assert_ne!(late.you(), id);
             changed(&mut watch).await;
@@ -215,7 +205,6 @@ async fn a_member_nothing_comes_from_shows_reconnecting_until_it_is_heard_again(
     let second = join(&relay.address.to_string()).await.unwrap();
     assert!(matches!(next(&mut first).await, Event::Joined(_)));
 
-    // Well before the connection would time out.
     let soon = Duration::from_secs(5);
     relay.cut.store(true, Ordering::Relaxed);
     let Event::Changed(silent) = next_within(&mut first, soon).await else { panic!("the second member leaves") };
@@ -225,8 +214,6 @@ async fn a_member_nothing_comes_from_shows_reconnecting_until_it_is_heard_again(
     assert_eq!((heard.id, heard.reconnecting), (second.you(), false));
 }
 
-/// A UDP relay in front of the server whose path can be cut, as a phone's is when it loses
-/// the network.
 struct Relay {
     address: SocketAddr,
     cut: Arc<AtomicBool>,
@@ -240,7 +227,6 @@ impl Relay {
         let address = front.local_addr().unwrap();
         let cut = Arc::new(AtomicBool::new(false));
         let client = Arc::new(Mutex::new(None));
-        // Datagrams the relay can't pass on are lost, as on any path.
         tokio::spawn({
             let (front, back, cut, client) = (Arc::clone(&front), Arc::clone(&back), Arc::clone(&cut), Arc::clone(&client));
             async move {

@@ -7,24 +7,21 @@ use bukospeak_server::{Downloads, LocalApi, Ngc, Room, Sounds, Source, endpoint}
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-/// The BukoSpeak voice server.
 #[derive(Parser)]
-#[command(version)]
+#[command(version, about)]
 struct Args {
-    /// The UDP address to listen on.
-    #[arg(long, env = "BUKOSPEAK_LISTEN", default_value = "[::]:9988")]
+    #[arg(long, env = "BUKOSPEAK_LISTEN", default_value = "[::]:9988", help = "The UDP address to listen on")]
     listen: SocketAddr,
-    /// Where the server keeps the downloads it offers, and finds the call's sounds it offers, in
-    /// `sounds`.
-    #[arg(long, env = "BUKOSPEAK_DATA", default_value = "data")]
+    #[arg(long, env = "BUKOSPEAK_DATA", default_value = "data", help = "The folder of the downloads and, in `sounds`, the call's sounds")]
     data: PathBuf,
-    /// The LocalAPI socket of the tailscaled the server runs beside, which tells who connects:
-    /// whoever is on its tailnet may join.
-    #[arg(long, env = "BUKOSPEAK_TAILSCALED", default_value = LocalApi::DEFAULT_SOCKET)]
+    #[arg(
+        long,
+        env = "BUKOSPEAK_TAILSCALED",
+        default_value = LocalApi::DEFAULT_SOCKET,
+        help = "The LocalAPI socket of the tailscaled beside the server; whoever is on its tailnet may join"
+    )]
     tailscaled: PathBuf,
-    /// An API key of NGC, NVIDIA's catalogue, with which the server offers its members NVIDIA's
-    /// effects for their cards, downloading them from NGC the first time each is asked for.
-    #[arg(long, env = "BUKOSPEAK_NGC_KEY", hide_env_values = true)]
+    #[arg(long, env = "BUKOSPEAK_NGC_KEY", hide_env_values = true, help = "An NGC API key, with which the server offers NVIDIA's effects")]
     ngc_key: Option<String>,
 }
 
@@ -52,10 +49,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ctrl-C, or on Unix the SIGTERM a container stop sends.
 async fn shutdown() {
     #[cfg(unix)]
     {
+        // A container stop sends SIGTERM.
         use tokio::signal::unix::{SignalKind, signal};
         let mut terminate = signal(SignalKind::terminate()).expect("installing the SIGTERM handler");
         tokio::select! {

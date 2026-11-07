@@ -1,12 +1,3 @@
-//! Downloads the server offers its members, as NVIDIA's effects for their cards and the call's
-//! sounds. A [`Source`] prepares a download once it is first asked for; the server keeps its
-//! files in a folder of its own, each compressed with zstd, and sends them to whoever is on
-//! the tailnet.
-//!
-//! A download is ready once its folder holds the list of its files, which is written last, and
-//! what it was prepared from is what its source has now: a download prepared in part, as when
-//! the server stopped meanwhile, or from what has changed since, is prepared anew.
-
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, ErrorKind, Read, SeekFrom};
@@ -23,27 +14,20 @@ use tokio::sync::watch;
 
 use crate::room::reject;
 
-/// The list of a ready download's files, in its folder.
+// Written last, so a folder that holds it was prepared whole.
 const LIST: &str = ".files.json";
 
-/// How often a client waiting for a download hears how far preparing it got.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
-/// The zstd level the files are compressed at: as quick as it is good.
-const LEVEL: i32 = 3;
+const ZSTD_LEVEL: i32 = 3;
 
-/// What prepares the downloads the server offers.
 pub trait Source: Send + Sync + 'static {
-    /// What it would prepare the download `name` from, as a stamp that changes when that
-    /// does; None if it doesn't offer the download. A name it offers is safe as a folder's.
+    // A name a source offers must be safe as a folder's name.
     fn offers(&self, name: &str) -> anyhow::Result<Option<String>>;
 
-    /// Puts the files of the download `name` into `folder`, each by [`compress`], telling
-    /// `progress` how many of how many bytes it has so far.
     fn prepare(&self, name: &str, folder: &Path, progress: &dyn Fn(u64, u64)) -> anyhow::Result<()>;
 }
 
-/// Where a download stands.
 #[derive(Clone, Debug)]
 enum State {
     Preparing { done: u64, total: u64 },
@@ -51,38 +35,27 @@ enum State {
     Failed,
 }
 
-/// A ready download's list, in its folder.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Prepared {
-    /// What its source prepared it from.
     stamp: String,
     files: Vec<File>,
 }
 
-/// The downloads the server offers, in their folder.
 pub struct Downloads {
     folder: PathBuf,
     sources: Vec<Arc<dyn Source>>,
-    /// The downloads asked for since the server started: what each is prepared from, and where
-    /// it stands.
     states: Mutex<HashMap<String, (String, watch::Receiver<State>)>>,
 }
 
 impl Downloads {
-    /// The downloads `sources` prepare, kept in `folder`; a download is the first's that offers
-    /// it.
     pub fn new(folder: PathBuf, sources: Vec<Arc<dyn Source>>) -> Self {
         Self { folder, sources, states: Mutex::default() }
     }
 
-    /// Offering nothing.
     pub fn none() -> Self {
         Self::new(PathBuf::new(), Vec::new())
     }
 
-    /// Answers a client that asked for the download `name` on the control stream `send`: tells it
-    /// how far preparing it got, then its files, and sends each it asks for, until it closes the
-    /// connection.
     pub(crate) async fn serve(&self, name: &str, connection: &Connection, mut send: SendStream) -> anyhow::Result<()> {
         let mut state = match self.state(name) {
             Ok(Some(state)) => state,
@@ -100,7 +73,7 @@ impl Downloads {
                 State::Failed => return reject(send, connection, Rejection::Unavailable).await,
             }
             tokio::time::sleep(PROGRESS_EVERY).await;
-            // The preparation ends by telling it ready or failed, so it can't end unseen.
+            // The preparation tells it ready or failed before it drops the sender.
             state.changed().await?;
         };
         control::write(&mut send, &ServerMessage::Files { files: files.to_vec() }).await?;
@@ -121,8 +94,6 @@ impl Downloads {
         }
     }
 
-    /// Where the download `name` stands, preparing it if it isn't ready yet, from what its
-    /// source has now, nor being prepared; None if no source offers it.
     fn state(&self, name: &str) -> anyhow::Result<Option<watch::Receiver<State>>> {
         let mut offered = None;
         for source in &self.sources {
@@ -133,12 +104,11 @@ impl Downloads {
         }
         let Some((source, stamp)) = offered else { return Ok(None) };
         let mut states = self.states.lock().expect("the states lock is never poisoned");
-        if let Some((prepared, state)) = states.get(name) {
+        if let Some((prepared_from, state)) = states.get(name) {
             match *state.borrow() {
-                // Being prepared, it is told when ready, from what it was then; the next ask
-                // after prepares it anew if that changed meanwhile.
+                // Even if its source changed meanwhile: the first ask once it is ready prepares it anew.
                 State::Preparing { .. } => return Ok(Some(state.clone())),
-                State::Ready(_) if *prepared == stamp => return Ok(Some(state.clone())),
+                State::Ready(_) if *prepared_from == stamp => return Ok(Some(state.clone())),
                 State::Ready(_) | State::Failed => {}
             }
         }
@@ -172,9 +142,6 @@ impl Downloads {
     }
 }
 
-/// Has `source` put the files of the download `name` into a folder of their own beside where
-/// they go, lists them there with the `stamp` of what they were prepared from, and moves the
-/// folder in place.
 fn prepare(source: &dyn Source, name: &str, stamp: String, folder: &Path, progress: &dyn Fn(u64, u64)) -> anyhow::Result<Vec<File>> {
     let preparing = folder.join(format!(".{name}"));
     remove_folder(&preparing)?;
@@ -191,8 +158,6 @@ fn prepare(source: &dyn Source, name: &str, stamp: String, folder: &Path, progre
     Ok(prepared.files)
 }
 
-/// Adds the files in `folder`, named relative to the download's folder as `prefix` is, with
-/// their sizes and digests.
 fn list(folder: &Path, prefix: &str, files: &mut Vec<File>) -> anyhow::Result<()> {
     let mut entries = fs::read_dir(folder)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(fs::DirEntry::file_name);
@@ -209,7 +174,6 @@ fn list(folder: &Path, prefix: &str, files: &mut Vec<File>) -> anyhow::Result<()
     Ok(())
 }
 
-/// The list of the download's files in `folder`, if the download is ready.
 fn read_list(folder: &Path) -> anyhow::Result<Option<Prepared>> {
     let text = match fs::read_to_string(folder.join(LIST)) {
         Ok(text) => text,
@@ -218,7 +182,6 @@ fn read_list(folder: &Path) -> anyhow::Result<Option<Prepared>> {
     };
     match serde_json::from_str(&text) {
         Ok(prepared) => Ok(Some(prepared)),
-        // The list of a server before stamps: what it lists is prepared anew.
         Err(error) => {
             tracing::info!("{} isn't this server's list of files, so it is prepared anew: {error}", folder.display());
             Ok(None)
@@ -233,25 +196,21 @@ fn remove_folder(folder: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Writes what `from` reads into a new file at `to`, compressed as the server sends it, and its
-/// folders with it.
 pub fn compress(from: &mut (impl Read + ?Sized), to: &Path) -> io::Result<()> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)?;
     }
-    zstd::stream::copy_encode(from, fs::File::create(to)?, LEVEL)
+    zstd::stream::copy_encode(from, fs::File::create(to)?, ZSTD_LEVEL)
 }
 
-/// Sends the file of the download that the request on the stream asks for, from where it asks.
 async fn send_file(folder: &Path, files: &[File], mut send: SendStream, mut recv: RecvStream) -> anyhow::Result<()> {
     let request: FileRequest = control::read(&mut recv).await?.context("the stream ended before a request")?;
-    // Only a file the list has: the request's path never reaches the file system unchecked.
+    // Only a listed path reaches the file system.
     let file = files.iter().find(|file| file.path == request.path).context("the download has no such file")?;
     let mut opened = tokio::fs::File::open(folder.join(&file.path)).await?;
     opened.seek(SeekFrom::Start(request.from)).await?;
     tokio::io::copy(&mut opened, &mut send).await?;
     send.finish()?;
-    // Sent once the client has it all, or gave up.
     send.stopped().await?;
     Ok(())
 }
@@ -260,7 +219,6 @@ async fn send_file(folder: &Path, files: &[File], mut send: SendStream, mut recv
 mod tests {
     use super::*;
 
-    /// Offers `first`, of two files.
     struct Two;
 
     impl Source for Two {
@@ -279,7 +237,7 @@ mod tests {
 
     fn folder(name: &str) -> PathBuf {
         let folder = std::env::temp_dir().join(format!("bukospeak-downloads-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&folder); // Left over from an earlier run, if at all.
+        let _ = fs::remove_dir_all(&folder);
         folder
     }
 

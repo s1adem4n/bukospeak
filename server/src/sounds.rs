@@ -1,6 +1,3 @@
-//! The call's sounds the server offers its members, which replace the app's own: the WAV files
-//! in a folder of the server's, each named after what it tells, as `joined.wav`.
-
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -10,7 +7,6 @@ use bukospeak_proto::control::{self, SOUNDS};
 
 use crate::downloads::{Source, compress};
 
-/// The sounds in a folder, offered as [`SOUNDS`] while it has any.
 pub struct Sounds {
     folder: PathBuf,
 }
@@ -20,7 +16,6 @@ impl Sounds {
         Self { folder }
     }
 
-    /// The folder's WAV files, by name.
     fn files(&self) -> anyhow::Result<Vec<(String, PathBuf)>> {
         let entries = match fs::read_dir(&self.folder) {
             Ok(entries) => entries,
@@ -44,8 +39,6 @@ impl Sounds {
 }
 
 impl Source for Sounds {
-    /// Stamped with the names and digests of its files, so it is prepared anew when one is put
-    /// there, changed or taken away.
     fn offers(&self, name: &str) -> anyhow::Result<Option<String>> {
         if name != SOUNDS {
             return Ok(None);
@@ -80,7 +73,7 @@ mod tests {
 
     fn folder(name: &str) -> PathBuf {
         let folder = std::env::temp_dir().join(format!("bukospeak-sounds-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&folder); // Left over from an earlier run, if at all.
+        let _ = fs::remove_dir_all(&folder);
         folder
     }
 

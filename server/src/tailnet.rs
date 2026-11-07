@@ -1,7 +1,3 @@
-//! Who connects to the server, as the tailnet tells it: the tailnet carries only what its
-//! devices send, from their own addresses, so the address a connection comes from names the
-//! device, and tailscaled knows whose it is.
-
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -9,43 +5,32 @@ use std::path::PathBuf;
 use anyhow::Context;
 use serde::Deserialize;
 
-/// The most of a LocalAPI answer the server reads; a whois is a few kilobytes.
 const MAX_ANSWER: u64 = 1 << 20;
 
-/// The Host tailscaled's LocalAPI insists on, so that no web page can ask it through a
-/// browser.
+// tailscaled's LocalAPI insists on this Host, so that no web page can ask it through a browser.
 const LOCAL_API_HOST: &str = "local-tailscaled.sock";
 
-/// A device on the tailnet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
-    /// What tells the device from every other, for as long as it stays on the tailnet.
     pub id: String,
-    /// Whom the device belongs to, as members see it.
     pub name: String,
 }
 
-/// What tells the server who connects.
 pub trait Tailnet: Send + Sync + 'static {
-    /// The device that connects from `peer`, or None if the tailnet doesn't know it. It may
-    /// block, and runs where blocking is fine.
     fn whois(&self, peer: SocketAddr) -> anyhow::Result<Option<Device>>;
 }
 
-/// A tailnet in which the function tells who connects, as a fixed one does for tests.
 impl<F: Fn(SocketAddr) -> Option<Device> + Send + Sync + 'static> Tailnet for F {
     fn whois(&self, peer: SocketAddr) -> anyhow::Result<Option<Device>> {
         Ok(self(peer))
     }
 }
 
-/// The tailnet of the tailscaled the server runs beside, asked through its LocalAPI socket.
 pub struct LocalApi {
     socket: PathBuf,
 }
 
 impl LocalApi {
-    /// Where tailscaled's LocalAPI listens unless it is told otherwise.
     #[cfg(unix)]
     pub const DEFAULT_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
     #[cfg(windows)]
@@ -55,7 +40,6 @@ impl LocalApi {
         Self { socket }
     }
 
-    /// Asks tailscaled for `path`: its status code and body.
     fn get(&self, path: &str) -> anyhow::Result<(u16, Vec<u8>)> {
         let mut stream = connect(&self.socket).with_context(|| format!("connecting to tailscaled at {}", self.socket.display()))?;
         // HTTP/1.0: the answer ends with the connection, which needs no chunking read.
@@ -69,8 +53,8 @@ impl LocalApi {
 
 impl Tailnet for LocalApi {
     fn whois(&self, peer: SocketAddr) -> anyhow::Result<Option<Device>> {
-        // The address alone, as IPv4 if it is one mapped into IPv6: tailscaled carries the
-        // connection in the kernel, so the address names the device whatever the port.
+        // tailscaled carries the connection in the kernel, so the address names the device
+        // whatever the port.
         let (status, body) = self.get(&format!("/localapi/v0/whois?addr={}", peer.ip().to_canonical()))?;
         match status {
             200 => Ok(Some(serde_json::from_slice::<WhoIs>(&body).context("tailscaled's whois")?.device())),
@@ -85,13 +69,11 @@ fn connect(socket: &std::path::Path) -> io::Result<impl Read + Write> {
     std::os::unix::net::UnixStream::connect(socket)
 }
 
-/// On Windows, the LocalAPI is a named pipe, which opens as a file does.
 #[cfg(windows)]
 fn connect(socket: &std::path::Path) -> io::Result<impl Read + Write> {
     std::fs::OpenOptions::new().read(true).write(true).open(socket)
 }
 
-/// An HTTP answer's status code and body.
 fn parse(answer: &[u8]) -> anyhow::Result<(u16, Vec<u8>)> {
     let end = answer.windows(4).position(|window| window == b"\r\n\r\n").context("tailscaled's answer has no end of its head")?;
     let head = std::str::from_utf8(&answer[..end]).context("tailscaled's answer's head isn't text")?;
@@ -100,7 +82,6 @@ fn parse(answer: &[u8]) -> anyhow::Result<(u16, Vec<u8>)> {
     Ok((status, answer[end + 4..].to_vec()))
 }
 
-/// What tailscaled's whois answers, as far as the server needs it.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct WhoIs {
@@ -113,11 +94,15 @@ struct WhoIs {
 struct Node {
     #[serde(rename = "StableID")]
     stable_id: String,
-    /// The device's name on the tailnet, as `laptop.example.ts.net.`.
     name: String,
-    /// Tags, if the device is a tagged one: then it belongs to the tailnet, not to a person.
     #[serde(default)]
     tags: Vec<String>,
+}
+
+impl Node {
+    fn host_name(&self) -> &str {
+        self.name.split('.').next().unwrap_or_default()
+    }
 }
 
 #[derive(Deserialize)]
@@ -128,11 +113,10 @@ struct UserProfile {
 }
 
 impl WhoIs {
-    /// The device, named after its owner, or after itself if it is a tagged one, whose owner
-    /// is the tailnet.
     fn device(self) -> Device {
+        // A tagged device belongs to the tailnet, whose profile names no person.
         let name = if !self.node.tags.is_empty() {
-            self.node.name.split('.').next().unwrap_or_default().to_owned()
+            self.node.host_name().to_owned()
         } else if self.user_profile.display_name.trim().is_empty() {
             self.user_profile.login_name
         } else {
@@ -184,22 +168,18 @@ mod tests {
         assert!(parse(b"HTTP/1.0 200 OK\r\n").is_err());
     }
 
-    /// A LocalAPI on a socket of its own that answers one request as `answer` says, and hands
-    /// back what it was asked.
     #[cfg(unix)]
     fn local_api(name: &str, answer: String) -> (LocalApi, std::thread::JoinHandle<String>) {
         use std::io::BufRead;
 
         let socket = std::env::temp_dir().join(format!("bukospeak-tailscaled-{name}-{}.sock", std::process::id()));
-        // Left over from an earlier run, if at all.
         let _ = std::fs::remove_file(&socket);
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let asked = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = String::new();
             let mut reader = io::BufReader::new(&mut stream);
-            // Up to the empty line that ends the head.
-            while reader.read_line(&mut request).unwrap() > 2 {}
+            while reader.read_line(&mut request).unwrap() > "\r\n".len() {}
             stream.write_all(answer.as_bytes()).unwrap();
             request
         });

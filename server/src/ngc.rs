@@ -1,7 +1,3 @@
-//! NVIDIA's effects for a card generation, from NGC, NVIDIA's catalogue: the runtime out of the
-//! SDK, the effects' libraries and their models for the generation, and NVIDIA's licences, laid
-//! out as `bukospeak_maxine` loads them.
-
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -18,16 +14,12 @@ use crate::downloads::{Source, compress};
 
 const API: &str = "https://api.ngc.nvidia.com/v2/org/nvidia/team/maxine";
 
-/// The version of the SDK and its effects the downloads hold.
 const VERSION: &str = "3.0.0";
 
-/// The SDK whose runtime the downloads hold.
 const SDK: &str = "maxine_windows_audio_effects_sdk";
 
-/// How long a download from NGC may stall before it is given up.
 const STALLED: Duration = Duration::from_secs(60);
 
-/// NVIDIA's effects from NGC, with an API key of NGC's.
 pub struct Ngc {
     key: String,
     agent: ureq::Agent,
@@ -44,7 +36,6 @@ impl Ngc {
         Self { key, agent }
     }
 
-    /// The files of a model's version or a resource's, as `models/afx_win_denoiser/versions/3.0.0_license`.
     fn files(&self, version: &str) -> anyhow::Result<Vec<Remote>> {
         let listing: Listing = self
             .agent
@@ -53,13 +44,11 @@ impl Ngc {
             .call()
             .and_then(|mut response| response.body_mut().read_json())
             .with_context(|| format!("listing NGC's {version}"))?;
-        // NGC lists each file's MD5 as a file of its own, which nothing needs.
+        // NGC lists each file's MD5 as a file of its own.
         let files = listing.model_files.into_iter().chain(listing.recipe_files).filter(|file| !file.path.ends_with(".md5"));
         Ok(files.map(|file| Remote { version: version.to_owned(), ..file }).collect())
     }
 
-    /// Reads `file` from NGC through `read`, which must read it to the end, and checks it came
-    /// whole.
     fn fetch<T>(
         &self,
         file: &Remote,
@@ -69,18 +58,18 @@ impl Ngc {
         read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
     ) -> anyhow::Result<T> {
         let what = || format!("downloading {} of NGC's {}", file.path, file.version);
-        // NGC sends the file from elsewhere, which the key isn't for: ureq leaves it out there.
+        // NGC redirects to storage the key isn't for; ureq leaves the Authorization out there.
         let mut response = self
             .agent
             .get(format!("{API}/{}/files/{}", file.version, file.path))
             .header("Authorization", format!("Bearer {}", self.key))
             .call()
             .with_context(what)?;
-        let mut counted = Counted { inner: response.body_mut().as_reader(), hasher: Sha256::new(), read: 0, done, total, progress };
+        let mut counted = Counted { inner: response.body_mut().as_reader(), hasher: Sha256::new(), file_bytes: 0, done, total, progress };
         let value = read(&mut counted).with_context(what)?;
         let digest = BASE64.encode(counted.hasher.finalize());
         anyhow::ensure!(
-            counted.read == file.size && digest == file.sha256,
+            counted.file_bytes == file.size && digest == file.sha256,
             "{} of NGC's {} came other than listed",
             file.path,
             file.version
@@ -121,12 +110,11 @@ impl Source for Ngc {
             self.fetch(file, &mut done, total, progress, |read| compress(read, &folder.join(path)))?;
         }
 
-        // The SDK comes as one archive, of which the runtime is a few files.
         let archive = Removed(folder.with_extension("sdk.zip"));
         self.fetch(sdk, &mut done, total, progress, |read| io::copy(read, &mut fs::File::create(&archive.0)?))?;
         let mut archive = zip::ZipArchive::new(fs::File::open(&archive.0)?).context("opening the SDK")?;
         for path in RUNTIME {
-            // The archive checks each file's CRC as it is read to the end.
+            // zip checks each file's CRC as it is read to the end.
             let mut file = archive.by_name(path).with_context(|| format!("the SDK has no {path}"))?;
             compress(&mut file, &folder.join(path)).with_context(|| format!("unpacking {path} from the SDK"))?;
         }
@@ -134,10 +122,8 @@ impl Source for Ngc {
     }
 }
 
-/// A file NGC lists.
 #[derive(Deserialize)]
 struct Remote {
-    /// The version it is a file of, which the listing leaves out.
     #[serde(skip)]
     version: String,
     path: String,
@@ -147,7 +133,6 @@ struct Remote {
     sha256: String,
 }
 
-/// NGC's listing of a version's files, of a model or of a resource.
 #[derive(Deserialize)]
 struct Listing {
     #[serde(rename = "modelFiles", default)]
@@ -156,13 +141,10 @@ struct Listing {
     recipe_files: Vec<Remote>,
 }
 
-/// Reads a file from NGC, hashing it and telling how far the download got.
 struct Counted<'a, R> {
     inner: R,
     hasher: Sha256,
-    /// What came of this file.
-    read: u64,
-    /// What came of the download.
+    file_bytes: u64,
     done: &'a mut u64,
     total: u64,
     progress: &'a dyn Fn(u64, u64),
@@ -172,14 +154,13 @@ impl<R: Read> Read for Counted<'_, R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let read = self.inner.read(buffer)?;
         self.hasher.update(&buffer[..read]);
-        self.read += read as u64;
+        self.file_bytes += read as u64;
         *self.done += read as u64;
         (self.progress)(*self.done, self.total);
         Ok(read)
     }
 }
 
-/// A file removed when it drops.
 struct Removed(PathBuf);
 
 impl Drop for Removed {
@@ -201,10 +182,9 @@ mod tests {
         let progress = std::cell::Cell::new((0, 0));
         let mut done = 10;
         let set = |done, total| progress.set((done, total));
-        let mut counted = Counted { inner: &b"abc"[..], hasher: Sha256::new(), read: 0, done: &mut done, total: 20, progress: &set };
+        let mut counted = Counted { inner: &b"abc"[..], hasher: Sha256::new(), file_bytes: 0, done: &mut done, total: 20, progress: &set };
         io::copy(&mut counted, &mut io::sink()).unwrap();
-        assert_eq!(counted.read, 3);
-        // As NGC lists the SHA-256 of "abc".
+        assert_eq!(counted.file_bytes, 3);
         assert_eq!(BASE64.encode(counted.hasher.finalize()), "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=");
         assert_eq!(progress.get(), (13, 20));
     }

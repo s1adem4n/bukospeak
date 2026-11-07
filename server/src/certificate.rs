@@ -1,8 +1,3 @@
-//! The server's self-signed X.509 certificate for an Ed25519 key, written in DER as RFC 5280
-//! lays it out, and made anew on each start: QUIC needs one, but the tailnet vouches for the
-//! server, so clients take any. It carries only what TLS needs to parse it and check the
-//! handshake's signature: the server's name, a validity without end, and the key.
-
 use bukospeak_proto::SERVER_NAME;
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -17,26 +12,19 @@ const OBJECT_IDENTIFIER: u8 = 0x06;
 const UTF8_STRING: u8 = 0x0c;
 const UTC_TIME: u8 = 0x17;
 const GENERALIZED_TIME: u8 = 0x18;
-/// The certificate's version, `[0]`, and its extensions, `[3]`, both explicitly tagged.
 const VERSION: u8 = 0xa0;
 const EXTENSIONS: u8 = 0xa3;
-/// A subject alternative name's DNS name, `[2]`, implicitly tagged.
 const DNS_NAME: u8 = 0x82;
 
-/// Ed25519, as RFC 8410 identifies it: 1.3.101.112.
 const ED25519: &[u8] = &[0x2b, 0x65, 0x70];
-/// The common name of a distinguished name: 2.5.4.3.
 const COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
-/// The subject alternative name extension: 2.5.29.17.
 const SUBJECT_ALT_NAME: &[u8] = &[0x55, 0x1d, 0x11];
-/// Version 3, which extensions need.
+// X.509 counts versions from 0.
 const V3: u8 = 2;
-/// Valid from 1975, and for ever after: RFC 5280's time for a certificate without a
-/// well-defined expiration.
 const NOT_BEFORE: &[u8] = b"750101000000Z";
+// RFC 5280's time for a certificate without a well-defined expiration.
 const NOT_AFTER: &[u8] = b"99991231235959Z";
 
-/// The DER of a value of `tag` holding `contents`.
 fn der(tag: u8, contents: &[u8]) -> Vec<u8> {
     let mut out = vec![tag];
     match u8::try_from(contents.len()) {
@@ -56,18 +44,16 @@ fn sequence(parts: &[&[u8]]) -> Vec<u8> {
     der(SEQUENCE, &parts.concat())
 }
 
-/// A bit string of whole bytes.
 fn bit_string(bytes: &[u8]) -> Vec<u8> {
-    der(BIT_STRING, &[&[0][..], bytes].concat())
+    let unused_bits = 0;
+    der(BIT_STRING, &[&[unused_bits][..], bytes].concat())
 }
 
-/// The distinguished name whose common name is `name`.
 fn distinguished_name(name: &str) -> Vec<u8> {
     let common_name = sequence(&[&der(OBJECT_IDENTIFIER, COMMON_NAME), &der(UTF8_STRING, name.as_bytes())]);
     sequence(&[&der(SET, &common_name)])
 }
 
-/// A new key, and its certificate for [`SERVER_NAME`].
 pub fn generate() -> anyhow::Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
     let random = SystemRandom::new();
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).map_err(|_| anyhow::anyhow!("the system has no randomness for a key"))?;
@@ -79,14 +65,12 @@ pub fn generate() -> anyhow::Result<(CertificateDer<'static>, PrivateKeyDer<'sta
     Ok((certificate.into(), PrivatePkcs8KeyDer::from(pkcs8.as_ref().to_vec()).into()))
 }
 
-/// The certificate of `key`, signed by it, for the server `name`, with the `serial` number.
 fn self_signed(key: &Ed25519KeyPair, name: &str, serial: [u8; 16]) -> Vec<u8> {
     let to_be_signed = to_be_signed(key, name, serial);
     let signature = key.sign(&to_be_signed);
     sequence(&[&to_be_signed, &algorithm(), &bit_string(signature.as_ref())])
 }
 
-/// The part of the certificate its signature covers.
 fn to_be_signed(key: &Ed25519KeyPair, name: &str, serial: [u8; 16]) -> Vec<u8> {
     let name_der = distinguished_name(name);
     let alt_names = sequence(&[&der(DNS_NAME, name.as_bytes())]);
@@ -103,13 +87,11 @@ fn to_be_signed(key: &Ed25519KeyPair, name: &str, serial: [u8; 16]) -> Vec<u8> {
     ])
 }
 
-/// Ed25519's algorithm identifier, which has no parameters.
 fn algorithm() -> Vec<u8> {
     sequence(&[&der(OBJECT_IDENTIFIER, ED25519)])
 }
 
-/// `serial` as a positive integer of as many bytes, which DER writes without a leading zero:
-/// its top bit cleared, and the one below it set.
+// DER reads a set top bit as negative, and wants no leading zero byte, which the next bit rules out.
 fn positive(mut serial: [u8; 16]) -> [u8; 16] {
     serial[0] = serial[0] & 0x7f | 0x40;
     serial
@@ -139,7 +121,6 @@ mod tests {
         let (key, serial) = (key(), [0xff; 16]);
         let certificate = self_signed(&key, "server", serial);
         let to_be_signed = to_be_signed(&key, "server", serial);
-        // Ed25519 signs deterministically, so the signature is the one in the certificate.
         let signature = key.sign(&to_be_signed);
         assert_eq!(certificate, sequence(&[&to_be_signed, &algorithm(), &bit_string(signature.as_ref())]));
         UnparsedPublicKey::new(&ring::signature::ED25519, key.public_key().as_ref()).verify(&to_be_signed, signature.as_ref()).unwrap();

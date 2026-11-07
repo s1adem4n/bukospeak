@@ -1,5 +1,3 @@
-//! The voice server: one channel that relays each member's audio to everyone else.
-
 mod certificate;
 mod downloads;
 mod ngc;
@@ -20,7 +18,6 @@ pub use room::Room;
 pub use sounds::Sounds;
 pub use tailnet::{Device, LocalApi, Tailnet};
 
-/// A QUIC endpoint on `listen` that presents a certificate made for it.
 pub fn endpoint(listen: SocketAddr) -> anyhow::Result<quinn::Endpoint> {
     let (certificate, key) = certificate::generate()?;
     let mut tls = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])

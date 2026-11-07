@@ -8,8 +8,6 @@ use bukospeak_core::download::Download;
 use bukospeak_core::proto::control::Rejection;
 use bukospeak_server::{Device, Downloads, Room, Source, compress, endpoint};
 
-/// Offers `first`, of a small file and a large one, from what `stamp` says, failing as many
-/// times first as `failures` says.
 struct Fake {
     prepared: Arc<AtomicU32>,
     stamp: Arc<AtomicU32>,
@@ -18,7 +16,6 @@ struct Fake {
 
 const LARGE: usize = 3 << 20;
 
-/// Noise, which zstd can't make much smaller.
 fn large() -> Vec<u8> {
     let mut state = 1u32;
     (0..LARGE)
@@ -55,13 +52,11 @@ struct Server {
     _folder: Folder,
 }
 
-/// A folder of the test's own, removed when it drops.
 struct Folder(PathBuf);
 
 impl Folder {
     fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!("bukospeak-test-{name}-{}", std::process::id()));
-        // Left over from a run that didn't finish, if at all.
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
@@ -70,12 +65,10 @@ impl Folder {
 
 impl Drop for Folder {
     fn drop(&mut self) {
-        // A folder in the system's temporary folder left behind does no harm.
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
-/// A tailnet in which each connection is a device of its own.
 fn own(peer: SocketAddr) -> Option<Device> {
     Some(Device { id: peer.to_string(), name: format!("member {}", peer.port()) })
 }
@@ -108,14 +101,12 @@ async fn a_download_is_prepared_once_and_its_files_come_whole_and_go_on_where_th
     let file = &download.files()[1];
     let to = into.0.join("large");
     download.fetch(file, &to, |_| ()).await.unwrap();
-    // As if that fetch had stopped after the first kilobyte.
     std::fs::OpenOptions::new().write(true).open(&to).unwrap().set_len(1024).unwrap();
     let mut first = None;
     download.fetch(file, &to, |held| _ = first.get_or_insert(held)).await.unwrap();
     assert_eq!(first, Some(1024));
     assert_eq!(zstd::decode_all(std::fs::File::open(&to).unwrap()).unwrap(), large());
 
-    // Asked for again, it is ready.
     download.close().await;
     start(&server, "first").await.unwrap().close().await;
     assert_eq!(server.prepared.load(Ordering::Relaxed), 1);
@@ -128,7 +119,6 @@ async fn a_file_that_came_damaged_is_removed_for_the_next_fetch_to_start_over() 
     let download = start(&server, "first").await.unwrap();
     let small = &download.files()[0];
     let to = into.0.join("small");
-    // As long as the file, but not its beginning.
     std::fs::write(&to, vec![0; small.size as usize - 1]).unwrap();
     assert!(matches!(download.fetch(small, &to, |_| ()).await, Err(Error::Damaged(path)) if path == "small"));
     assert!(!to.exists());
