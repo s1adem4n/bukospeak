@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ServerMessage};
-use bukospeak_proto::{ALPN, IDLE_TIMEOUT, KEEP_ALIVE, MemberId, PROTOCOL_VERSION, REPLACED, SERVER_NAME, audio};
+use bukospeak_proto::{ALPN, CLOSE_REPLACED, IDLE_TIMEOUT, KEEP_ALIVE, MemberId, PROTOCOL_VERSION, SERVER_NAME, audio};
 use bytes::Bytes;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{Connection, ConnectionError, Endpoint, RecvStream, SendStream};
@@ -45,7 +45,7 @@ pub enum Error {
 impl From<ConnectionError> for Error {
     fn from(error: ConnectionError) -> Self {
         match error {
-            ConnectionError::ApplicationClosed(close) if close.error_code.into_inner() == u64::from(REPLACED) => Self::Replaced,
+            ConnectionError::ApplicationClosed(close) if close.error_code.into_inner() == u64::from(CLOSE_REPLACED) => Self::Replaced,
             error => Self::Connection(error),
         }
     }

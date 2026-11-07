@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ServerMessage};
-use bukospeak_proto::{KEEP_ALIVE, MemberId, PROTOCOL_VERSION, REPLACED, SILENT_AFTER, audio};
+use bukospeak_proto::{CLOSE_REPLACED, KEEP_ALIVE, MemberId, PROTOCOL_VERSION, SILENT_AFTER, audio};
 use bytes::Bytes;
 use quinn::{Connection, ConnectionError, Endpoint, Incoming, RecvStream, SendStream, VarInt};
 use tokio::sync::mpsc;
@@ -181,7 +181,7 @@ impl Room {
         };
         let (id, back) = match held.and_then(|id| members.peers.remove_entry(&id)) {
             Some((id, old)) => {
-                old.connection.close(VarInt::from_u32(REPLACED), b"replaced");
+                old.connection.close(VarInt::from_u32(CLOSE_REPLACED), b"replaced");
                 (id, true)
             }
             None if members.peers.len() >= MAX_MEMBERS => return Err(Rejection::Full),

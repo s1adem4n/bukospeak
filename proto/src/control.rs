@@ -1,24 +1,7 @@
-//! Control messages on the connection's first bidirectional stream, which the client opens.
-//!
-//! Each message is JSON behind its length as a big-endian u16. The client starts with a
-//! [`ClientMessage::Hello`], which the server answers with a [`ServerMessage::Welcome`]; with a
-//! [`ClientMessage::Watch`], which it answers with a [`ServerMessage::Present`]; or with a
-//! [`ClientMessage::Download`], which it answers with [`ServerMessage::Preparing`] while it
-//! prepares the download and then with its [`ServerMessage::Files`], each of which the client
-//! asks for by a [`FileRequest`] on a stream of its own. Or the server answers with a
-//! [`ServerMessage::Rejected`], after which it closes the connection.
-//!
-//! The server knows who connects from the tailnet: a member is a device, named after its
-//! owner. A device that joins again while its place is held, as after its connection was lost,
-//! takes that place: the others see it [`reconnecting`](Member::reconnecting) meanwhile, not
-//! leave and join.
-
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::MemberId;
-
-/// The download of the call's sounds, WAV files named after what each tells.
 pub const SOUNDS: &str = "sounds";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,44 +9,28 @@ pub struct Member {
     pub id: MemberId,
     pub name: String,
     pub muted: bool,
-    /// The member's connection was lost, and the server holds its place for it to come back.
     pub reconnecting: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    /// Joins the channel, or takes the place the server still holds for the device.
     Hello { version: u32, muted: bool },
-    /// Watches who is in the channel without joining it: after the Present, the server tells
-    /// who joins, changes and leaves, until the client closes the connection.
     Watch { version: u32 },
-    /// Asks for the files of a download the server offers, by its `name`: [`SOUNDS`], or one
-    /// of NVIDIA's effects.
     Download { version: u32, name: String },
-    /// Mutes the member, or unmutes it, after the Hello.
     Mute { muted: bool },
 }
-
-/// Asks for a file of a download on a bidirectional stream of its own, after the download's
-/// Files: the server sends the file from its byte `from` on, and finishes the stream.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRequest {
     pub path: String,
     pub from: u64,
 }
-
-/// A file of a download, as the server sends it: compressed with zstd.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct File {
-    /// Where the file goes, relative to the download's folder, its folders parted by `/`.
     pub path: String,
     pub size: u64,
-    /// Its SHA-256, in lowercase hex.
     pub sha256: String,
 }
-
-/// How many bytes `read` gives, and their SHA-256 as a [`File`] tells it.
 pub fn digest(read: &mut (impl std::io::Read + ?Sized)) -> std::io::Result<(u64, String)> {
     use sha2::{Digest, Sha256};
 
@@ -82,38 +49,14 @@ pub fn digest(read: &mut (impl std::io::Read + ?Sized)) -> std::io::Result<(u64,
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    /// The client joined as `you`; `members` are everyone in the channel, the client included.
-    Welcome {
-        you: MemberId,
-        members: Vec<Member>,
-    },
-    /// The client watches the channel; `members` are everyone in it.
-    Present {
-        members: Vec<Member>,
-    },
-    Rejected {
-        reason: Rejection,
-    },
-    /// The server prepares the download, and has `done` of its `total` bytes; Files follow once
-    /// it is ready, or a Rejected if preparing it failed.
-    Preparing {
-        done: u64,
-        total: u64,
-    },
-    /// The download's files.
-    Files {
-        files: Vec<File>,
-    },
-    Joined {
-        member: Member,
-    },
-    /// A member muted or unmuted, or is reconnecting or back.
-    Changed {
-        member: Member,
-    },
-    Left {
-        id: MemberId,
-    },
+    Welcome { you: MemberId, members: Vec<Member> },
+    Present { members: Vec<Member> },
+    Rejected { reason: Rejection },
+    Preparing { done: u64, total: u64 },
+    Files { files: Vec<File> },
+    Joined { member: Member },
+    Changed { member: Member },
+    Left { id: MemberId },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -150,8 +93,6 @@ pub async fn write<W: AsyncWrite + Unpin>(stream: &mut W, message: &impl Seriali
     stream.write_all(&frame).await?;
     Ok(())
 }
-
-/// The next message, or None once the stream ended between messages.
 pub async fn read<R: AsyncRead + Unpin, M: for<'de> Deserialize<'de>>(stream: &mut R) -> Result<Option<M>, Error> {
     let mut len = [0; 2];
     match stream.read_exact(&mut len).await {
