@@ -1,6 +1,3 @@
-//! The app's button: a surface in the looks of what it is for, which is clicked, or pressed with
-//! Enter or Space once Tab gave it the focus.
-
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
@@ -12,34 +9,23 @@ use crate::ui::kit::{Icon, Spinner, Tooltip};
 use crate::ui::marks::Mark;
 use crate::ui::theme::{self, ActiveTokens, Tokens, Type, Typeset};
 
-/// What a button is for, which its looks tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variant {
-    /// Lifted off the panel it sits on: most buttons.
     Raised,
-    /// The one that moves things on.
     Primary,
-    /// What ends something.
     Danger,
-    /// Something switched off that wants attention, as a muted microphone.
     Off,
-    /// No surface until hovered: an icon in a bar, a row that opens a menu.
     Ghost,
-    /// Text alone, which is clicked: a value that opens for editing.
     Bare,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Size {
-    /// In bars and rows.
     Small,
     Medium,
-    /// What a screen is for: the dock's, the welcome's.
     Large,
 }
 
-/// A size's height, corners, inset of its content, icon and type: of buttons, and of the fields
-/// beside them.
 pub(super) struct Metrics {
     pub height: Pixels,
     pub radius: Pixels,
@@ -55,7 +41,7 @@ impl Size {
                 height: theme::CONTROL_SM,
                 radius: theme::RADIUS_CONTROL_SM,
                 inset: theme::CONTROL_SM_INSET,
-                icon: theme::ICON_SM,
+                icon: theme::ICON,
                 text: theme::TEXT,
             },
             Self::Medium => Metrics {
@@ -81,9 +67,7 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 #[derive(IntoElement)]
 pub struct Button {
     id: ElementId,
-    /// What the caller styled, over the button's own looks.
     style: StyleRefinement,
-    /// What the caller put in, after the icon and the label.
     children: Vec<AnyElement>,
     variant: Variant,
     size: Size,
@@ -91,10 +75,11 @@ pub struct Button {
     icon: Option<Glyph>,
     label: Option<SharedString>,
     keys: Option<&'static str>,
+    name: Option<SharedString>,
     tooltip: Option<SharedString>,
     loading: bool,
     disabled: bool,
-    /// The focus it takes, if not one of its own.
+    selected: bool,
     focus: Option<FocusHandle>,
     on_click: Option<ClickHandler>,
 }
@@ -111,9 +96,11 @@ impl Button {
             icon: None,
             label: None,
             keys: None,
+            name: None,
             tooltip: None,
             loading: false,
             disabled: false,
+            selected: false,
             focus: None,
             on_click: None,
         }
@@ -124,7 +111,6 @@ impl Button {
         self
     }
 
-    /// As wide as high, for an icon alone.
     pub fn square(mut self) -> Self {
         self.square = true;
         self
@@ -140,9 +126,13 @@ impl Button {
         self
     }
 
-    /// The keys that do the same from anywhere, shown after the label.
     pub fn keys(mut self, keys: Option<&'static str>) -> Self {
         self.keys = keys;
+        self
+    }
+
+    pub fn name(mut self, name: impl Into<SharedString>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
@@ -151,7 +141,6 @@ impl Button {
         self
     }
 
-    /// Shows that what it started is under way, and takes no other click meanwhile.
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
         self
@@ -162,7 +151,11 @@ impl Button {
         self
     }
 
-    /// Takes the focus by `focus`, so it can be given the focus.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
     pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
         self.focus = Some(focus.clone());
         self
@@ -191,15 +184,16 @@ impl RenderOnce for Button {
         let tokens = cx.tokens();
         let Metrics { height, radius, inset, icon, text: kind } = self.size.metrics();
         let inert = self.disabled || self.loading;
-        // A disabled fill would still call for the click it doesn't take: it gives the fill up
-        // and lies flat, without an edge, which would make it a field; its text faint.
+        // A disabled fill would still invite the click it doesn't take: it lies flat instead,
+        // without an edge, which would make it look like a field.
         let given_up = self.disabled && matches!(self.variant, Variant::Primary | Variant::Danger);
         let text = match self.variant {
             _ if given_up => tokens.text_faint,
             Variant::Raised => tokens.text,
             Variant::Primary => tokens.on_primary,
-            Variant::Danger => tokens.primary[0],
+            Variant::Danger => tokens.on_danger,
             Variant::Off => tokens.danger,
+            Variant::Ghost if self.selected => tokens.text,
             Variant::Ghost | Variant::Bare => tokens.text_muted,
         };
         let glyph = match (self.loading, self.icon) {
@@ -207,7 +201,7 @@ impl RenderOnce for Button {
             (false, Some(glyph)) => Some(Icon::new(glyph).size(icon).into_any_element()),
             (false, None) => None,
         };
-        let name = self.label.clone().or_else(|| self.tooltip.clone());
+        let name = self.label.clone().or_else(|| self.name.clone()).or_else(|| self.tooltip.clone());
         let mark = self.id.to_string();
         let mut button = div()
             .id(self.id)
@@ -218,10 +212,9 @@ impl RenderOnce for Button {
             .flex()
             .items_center()
             .justify_center()
-            .gap_2()
+            .gap(theme::INLINE)
             .rounded(radius)
-            // A bare button is its content alone, lined up as text is; the others keep an edge
-            // that focus colors.
+            // A transparent edge, which focus colors without moving the content.
             .when(self.variant != Variant::Bare, |button| button.border_1().border_color(tokens.base.opacity(0.)))
             .typeset(kind)
             .font_weight(FontWeight::MEDIUM)
@@ -234,21 +227,20 @@ impl RenderOnce for Button {
             })
             .map(|button| match given_up {
                 true => button.bg(tokens.hover),
-                false => surface(button, self.variant, self.size, tokens),
+                false => surface(button, self.variant, self.size, self.selected, tokens),
             });
         if inert {
-            // A loading button shows its spinner in full; a disabled one without a fill fades.
+            // A loading button shows its spinner in full.
             button = button.when(self.disabled && !given_up, |button| button.opacity(theme::DISABLED_OPACITY));
         } else {
             button = button
                 .cursor_pointer()
-                .map(|button| hovered(button, self.variant, tokens))
+                .map(|button| hovered(button, self.variant, self.selected, tokens))
                 .map(|button| {
                     let button = match &self.focus {
                         Some(focus) => button.track_focus(focus),
                         None => button.tab_index(0),
                     };
-                    // What has no surface shows the focus as it shows the pointer; the rest by its edge.
                     match self.variant {
                         Variant::Ghost => button.focus_visible(|style| style.bg(tokens.inset).text_color(tokens.text)),
                         Variant::Bare => button.focus_visible(|style| style.text_color(tokens.text)),
@@ -263,21 +255,19 @@ impl RenderOnce for Button {
     }
 }
 
-/// The surface of a variant at rest.
-fn surface(button: Stateful<gpui::Div>, variant: Variant, size: Size, tokens: &Tokens) -> Stateful<gpui::Div> {
-    // A large button stands further off what it is on.
+fn surface(button: Stateful<gpui::Div>, variant: Variant, size: Size, selected: bool, tokens: &Tokens) -> Stateful<gpui::Div> {
     let lifted = |light| if size == Size::Large { theme::depth::control_lg(light, tokens) } else { theme::depth::control(light, tokens) };
     match variant {
         Variant::Raised => button.bg(theme::gradient(tokens.control)).border_color(tokens.edge).shadow(lifted(tokens.highlight)),
         Variant::Primary => button.bg(theme::gradient(tokens.primary)).border_color(tokens.primary_edge).shadow(lifted(tokens.highlight)),
         Variant::Danger => button.bg(theme::gradient(tokens.danger_fill)).border_color(tokens.danger_edge).shadow(lifted(tokens.sheen)),
         Variant::Off => button.bg(tokens.danger.opacity(0.14)).border_color(tokens.danger.opacity(0.35)),
+        Variant::Ghost if selected => button.bg(tokens.inset),
         Variant::Ghost | Variant::Bare => button,
     }
 }
 
-/// How a variant answers the pointer: hovered, and pressed.
-fn hovered(button: Stateful<gpui::Div>, variant: Variant, tokens: &Tokens) -> Stateful<gpui::Div> {
+fn hovered(button: Stateful<gpui::Div>, variant: Variant, selected: bool, tokens: &Tokens) -> Stateful<gpui::Div> {
     match variant {
         Variant::Raised => {
             button.hover(|style| style.bg(theme::gradient(tokens.control_hover))).active(|style| style.bg(tokens.control[1]))
@@ -289,15 +279,16 @@ fn hovered(button: Stateful<gpui::Div>, variant: Variant, tokens: &Tokens) -> St
             button.hover(|style| style.bg(theme::gradient(tokens.danger_fill_hover))).active(|style| style.bg(tokens.danger_fill[1]))
         }
         Variant::Off => button.hover(|style| style.bg(tokens.danger.opacity(0.2))).active(|style| style.bg(tokens.danger.opacity(0.26))),
+        // Selected, it rests on what hovering shows, so hovering goes a step further.
+        Variant::Ghost if selected => button.hover(|style| style.bg(tokens.hover)).active(|style| style.bg(tokens.hover)),
         Variant::Ghost => button.hover(|style| style.bg(tokens.inset).text_color(tokens.text)).active(|style| style.bg(tokens.hover)),
         Variant::Bare => button.hover(|style| style.text_color(tokens.text)),
     }
 }
 
-/// Keys in a small chip, in the color of the text they sit beside.
 fn keycap(keys: &'static str, color: Hsla) -> impl IntoElement {
     div()
-        .px_1p5()
+        .px(theme::KEYCAP_INSET)
         .rounded(theme::RADIUS_XS)
         .border_1()
         .border_color(color.opacity(0.2))
@@ -308,8 +299,6 @@ fn keycap(keys: &'static str, color: Hsla) -> impl IntoElement {
         .child(keys)
 }
 
-/// How far a square button's edge lies outside its icon: pulled out by it, the icon lines up
-/// with what is above or beside the button.
 pub fn icon_inset(size: Size) -> Pixels {
     let Metrics { height, icon, .. } = size.metrics();
     (height - icon) / 2.

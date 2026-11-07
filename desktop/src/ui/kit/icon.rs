@@ -1,6 +1,3 @@
-//! An icon, in the color of the text around it unless given its own, and the spinner, an icon
-//! that turns while something is under way.
-
 use gpui::{Animation, AnimationExt, App, Hsla, IntoElement, Pixels, RenderOnce, Styled, Svg, Transformation, Window, percentage, svg};
 
 use crate::ui::glyph::Glyph;
@@ -28,7 +25,7 @@ impl Icon {
         self
     }
 
-    /// The SVG, colored: an SVG takes no color from the text around it.
+    // An SVG takes no color from the text around it.
     fn svg(self, window: &Window) -> Svg {
         let color = self.color.unwrap_or_else(|| window.text_style().color);
         svg().path(self.glyph.path()).flex_none().size(self.size).text_color(color)

@@ -1,5 +1,3 @@
-//! The states of the window worth looking at, each with what it takes to show it.
-
 use std::time::Duration;
 
 use bukospeak_core::proto::MemberId;
@@ -11,8 +9,6 @@ use crate::install::Progress;
 use crate::nvidia::Architecture;
 use crate::settings::{Settings, Suppression};
 
-/// A state of the window: the settings, the call as staged, the system as staged, and the steps
-/// that lead from the window opened on it to what it shows.
 pub struct Scene {
     pub name: &'static str,
     pub about: &'static str,
@@ -23,19 +19,16 @@ pub struct Scene {
     pub steps: &'static str,
 }
 
-/// The member this window is.
 const YOU: MemberId = MemberId(1);
 
 fn member(id: u16, name: &str) -> Member {
     Member { id: MemberId(id), name: name.into(), muted: false, reconnecting: false }
 }
 
-/// The usual call: this member and one other.
 fn two() -> Vec<Member> {
     vec![member(1, "Nachtfalke"), member(2, "Kiwi")]
 }
 
-/// A larger channel: this member and four others, one of them muted.
 fn five() -> Vec<Member> {
     vec![
         member(1, "Nachtfalke"),

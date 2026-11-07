@@ -1,8 +1,3 @@
-//! The window drawn offscreen against a staged call and a stand-in system, and driven as a user
-//! would: clicked, hovered and typed into by the names of its elements. Its timers run on a clock
-//! moved on by hand, and its motions are drawn finished, so a picture is the same on every run;
-//! only a film lets motions play, on the wall clock GPUI's animations read.
-
 mod host;
 mod scenes;
 
@@ -22,42 +17,29 @@ use crate::call::Call;
 use crate::ui::marks::Marks;
 use crate::ui::{self, Client, Main, theme};
 
-/// How far the timers' clock moves after a step, for what it started to happen: longer than any
-/// delay of the UI.
+// Longer than any delay of the UI.
 const SETTLE: Duration = Duration::from_millis(600);
 
-/// The keys as GPUI writes them, parsed.
 fn keystroke(keys: &str) -> anyhow::Result<Keystroke> {
     Keystroke::parse_with_os(keys, OperatingSystem::Linux).map_err(|error| anyhow::anyhow!("{keys}: {error}"))
 }
 
-/// The window, open on a scene.
 pub struct Harness {
     cx: HeadlessAppContext,
     window: AnyWindowHandle,
-    /// Where the pointer is.
     pointer: Point<Pixels>,
 }
 
-/// What the harness does to the window, one step of a script.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
-    /// Clicks the middle of the element of that name; of the `n`th drawn so, counting from 1,
-    /// for `name#n`.
     Click(String),
-    /// Moves the pointer over the element.
     Hover(String),
-    /// Types the text into what has the focus.
     Type(String),
-    /// Presses keys, as GPUI writes them: `enter`, `shift-tab`, `ctrl-a`.
     Key(String),
-    /// Moves the timers' clock on by as much.
     Wait(Duration),
 }
 
 impl Step {
-    /// The steps of a script, one a line or between semicolons: `click settings`, `hover join`,
-    /// `type Kiwi`, `key enter`, `wait 120`.
     pub fn parse(script: &str) -> anyhow::Result<Vec<Self>> {
         script
             .split(['\n', ';'])
@@ -79,7 +61,6 @@ impl Step {
 }
 
 impl Harness {
-    /// Opens the window on `scene`, `size` big, light or dark, and takes the scene's steps.
     pub fn open(scene: &Scene, size: Size<Pixels>, dark: bool) -> anyhow::Result<Self> {
         let text = Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(theme::SANS));
         let mut cx = HeadlessAppContext::with_platform(text, Arc::new(ui::Assets), gpui_platform::current_headless_renderer);
@@ -94,8 +75,7 @@ impl Harness {
             ui::init(cx);
             theme::force(dark, cx);
             cx.set_global(Marks::default());
-            // GPUI's motions follow the wall clock, which differs from run to run; drawn
-            // finished, they don't.
+            // GPUI's motions follow the wall clock, which differs from run to run.
             cx.set_reduce_motion(true);
             cx.new(|cx| Client::new(call, happenings, host, scene.settings.clone(), None, Some("Strg+Alt+M"), cx))
         });
@@ -108,7 +88,6 @@ impl Harness {
         Ok(harness)
     }
 
-    /// Takes a step and lets its effects play out, unless it is a wait.
     pub fn step(&mut self, step: &Step) -> anyhow::Result<()> {
         self.start(step)?;
         if !matches!(step, Step::Wait(_)) {
@@ -117,9 +96,6 @@ impl Harness {
         Ok(())
     }
 
-    /// Takes `step` with its motions playing, and draws `frames` frames `every` so far apart on
-    /// the wall clock, from the first the step leads to: close to the same on every run, as
-    /// long as a frame draws in less time than lies between two.
     pub fn film(&mut self, step: &Step, frames: u32, every: Duration) -> anyhow::Result<Vec<RgbaImage>> {
         self.cx.update(|cx| cx.set_reduce_motion(false));
         self.start(step)?;
@@ -133,7 +109,6 @@ impl Harness {
         Ok(shots)
     }
 
-    /// Takes a step and draws the frame it leads to.
     fn start(&mut self, step: &Step) -> anyhow::Result<()> {
         match step {
             Step::Click(name) => {
@@ -177,19 +152,16 @@ impl Harness {
         self.draw()
     }
 
-    /// The window as drawn now, in pixels at twice its size.
     pub fn snap(&mut self) -> anyhow::Result<RgbaImage> {
         self.draw()?;
         self.cx.capture_screenshot(self.window)
     }
 
-    /// The marked elements as drawn now, by their names, in the order they were drawn.
     pub fn marks(&mut self) -> anyhow::Result<Vec<(SharedString, Bounds<Pixels>)>> {
         self.draw()?;
         Ok(self.cx.update(|cx| cx.global::<Marks>().0.clone()))
     }
 
-    /// The middle of the element `name`, or of its `n`th drawn for `name#n`.
     fn find(&mut self, name: &str) -> anyhow::Result<Point<Pixels>> {
         let (name, nth) = match name.rsplit_once('#') {
             Some((name, nth)) => (name, nth.parse::<usize>().with_context(|| format!("{name}#{nth}: a count from 1"))?),
@@ -221,7 +193,6 @@ impl Harness {
         Ok(())
     }
 
-    /// Lets what was started play out: tasks, timers and motions.
     fn settle(&mut self) {
         self.cx.run_until_parked();
         for _ in 0..SETTLE.as_millis() / 50 {
@@ -231,7 +202,6 @@ impl Harness {
         }
     }
 
-    /// Draws the window anew, the marks with it.
     fn draw(&mut self) -> anyhow::Result<()> {
         self.cx.run_until_parked();
         self.cx.update(Marks::clear);

@@ -1,8 +1,3 @@
-//! Updates from the releases on GitHub, for an app Velopack installed (on Windows): a newer
-//! release is downloaded as soon as it is found and installed once no call is up, the app
-//! starting again in it. At the start the window waits for the first look, so a release found
-//! then is installed before anything else.
-
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -18,21 +13,15 @@ use velopack::{UpdateCheck, UpdateInfo, UpdateManager, VelopackApp};
 
 use crate::ui::Client;
 
-/// How long the app waits between looks for a newer release, while it runs.
 const EVERY: Duration = Duration::from_secs(60 * 60);
 
-/// Does what Velopack starts the app for around an install, an update or an uninstall, and
-/// applies an update downloaded before; either ends the process. First in `main`, before
-/// anything is started that would have to be stopped.
 pub fn start() {
     velopack().run();
 }
 
-/// Velopack's part of the app, and what the app does around it.
 fn velopack() -> VelopackApp<'static> {
     let app = VelopackApp::build();
-    // Velopack installs on Windows only; uninstalled, the app is gone, so a start with the
-    // system left would point at nothing.
+    // Velopack installs on Windows only; a start with the system left after it would point at nothing.
     #[cfg(target_os = "windows")]
     let app = app.on_before_uninstall_fast_callback(|_| {
         if let Err(error) = autostart::set(false) {
@@ -42,36 +31,26 @@ fn velopack() -> VelopackApp<'static> {
     app
 }
 
-/// Where the updater is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
-    /// Looking for a newer release.
     Checking,
-    /// Nothing newer: none was found, or looking or downloading failed.
     Current,
-    /// Downloading `version`, `percent` of it so far.
     Downloading { version: String, percent: u8 },
-    /// `version` is downloaded, and installed as soon as no call is up.
     Ready { version: String },
-    /// Installing `version`: the app quits, and starts again in it.
     Installing { version: String },
 }
 
 pub struct Updater {
     manager: UpdateManager,
     client: Entity<Client>,
-    /// The version installed.
     current: String,
     state: State,
-    /// The release downloaded, while it waits to be installed.
     downloaded: Option<UpdateInfo>,
     _looking: Task<()>,
     _client: Subscription,
 }
 
 impl Updater {
-    /// The updater of the installed app, already looking for a newer release; outside an
-    /// installation there is nothing to update.
     pub fn new(client: Entity<Client>, cx: &mut App) -> Option<Entity<Self>> {
         let source = GithubSource::new(env!("CARGO_PKG_REPOSITORY"), None, false);
         let manager = match UpdateManager::new(source, None, None) {
@@ -105,7 +84,6 @@ impl Updater {
         &self.state
     }
 
-    /// The version installed.
     pub fn current(&self) -> &str {
         &self.current
     }
@@ -115,15 +93,12 @@ impl Updater {
         cx.notify();
     }
 
-    /// Installs the release downloaded: the app quits, a call in it ending, and starts again in
-    /// the release.
     pub fn install(&mut self, cx: &mut Context<Self>) {
         let Some(release) = self.downloaded.take() else {
             return;
         };
         let version = release.TargetFullRelease.Version.clone();
-        // Velopack's installer waits for the app to quit, then starts it again: in the
-        // background if it ran there, without a window.
+        // Velopack starts the app again with these, so one in the background stays there.
         let arguments: &[&str] = if cx.windows().is_empty() { &[BACKGROUND] } else { &[] };
         match self.manager.wait_exit_then_apply_updates(&release, false, true, arguments) {
             Ok(()) => {
@@ -144,13 +119,10 @@ impl Updater {
     }
 }
 
-/// Whether an update waits for the call: while it is up or coming about.
 fn waits(phase: &Phase) -> bool {
     matches!(phase, Phase::Joining | Phase::Connected | Phase::Reconnecting)
 }
 
-/// Looks for a newer release, unless one is waiting already, and downloads it; fails only when
-/// the updater is gone.
 async fn look(updater: &WeakEntity<Updater>, cx: &mut AsyncApp) -> anyhow::Result<()> {
     let manager = updater.update(cx, |updater, cx| {
         matches!(updater.state, State::Checking | State::Current).then(|| {
@@ -182,11 +154,10 @@ async fn look(updater: &WeakEntity<Updater>, cx: &mut AsyncApp) -> anyhow::Resul
         async move {
             let (sender, receiver) = mpsc::channel::<i16>();
             thread::scope(|scope| {
-                // Velopack tells the progress from the thread downloading, into a channel of its
-                // own; the percents end when it is done with it.
+                // Velopack sends the progress from its downloading thread into a channel of its own.
                 scope.spawn(move || {
                     for progress in receiver {
-                        // Closed when the updater is gone, and with it whom the progress concerns.
+                        // Closed only once the updater is gone.
                         let _ = percents.unbounded_send(progress.clamp(0, 100) as u8);
                     }
                 });

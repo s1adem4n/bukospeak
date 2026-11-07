@@ -1,7 +1,3 @@
-//! The field's line drawn: the text or its placeholder, what is selected and the cursor, the line
-//! scrolled so the cursor stays in view; and the pointer on it, which, once pressed, goes on
-//! selecting wherever it goes until released.
-
 use gpui::{
     App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, Hitbox, HitboxBehavior,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ShapedLine, SharedString,
@@ -31,11 +27,9 @@ impl IntoElement for TextElement {
 
 pub struct Prepaint {
     line: ShapedLine,
-    /// Where the line's start is drawn, and how far it is scrolled to get there.
     origin: gpui::Point<Pixels>,
     scroll: Pixels,
     line_height: Pixels,
-    /// What of the field the text shows in, inside its inset.
     text: Bounds<Pixels>,
     selection: Option<Bounds<Pixels>>,
     cursor: Option<Bounds<Pixels>>,
@@ -85,7 +79,6 @@ impl Element for TextElement {
         let (shown, color): (SharedString, _) =
             if content.is_empty() { (field.placeholder.clone(), tokens.text_faint) } else { (content.to_owned().into(), style.color) };
         let run = TextRun { len: shown.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
-        // What an input method composes is underlined until it is committed.
         let runs = match field.text.marked().filter(|_| !content.is_empty()) {
             Some(marked) => {
                 let underline = UnderlineStyle { color: Some(color), thickness: theme::HAIRLINE, wavy: false };
@@ -104,14 +97,12 @@ impl Element for TextElement {
         let line = window.text_system().shape_line(shown, font_size, &runs, None);
 
         let text = Bounds::new(
-            // Inside the field's edge, which takes room too: the text lies `FIELD_INSET` off the
-            // field's outside.
+            // Inside the edge, which takes room too: the text lies `FIELD_INSET` off the outside.
             point(bounds.left() + inset, bounds.center().y - line_height / 2.),
             size((bounds.size.width - inset * 2.).max(Pixels::ZERO), line_height),
         );
         let selection = field.text.selection();
         let cursor_x = if content.is_empty() { Pixels::ZERO } else { line.x_for_index(field.text.cursor()) };
-        // Scrolled no further than the line reaches, and far enough that the cursor shows.
         let most = (line.width + theme::CURSOR - text.size.width).max(Pixels::ZERO);
         let scroll = field.scroll.min(most).max(cursor_x + theme::CURSOR - text.size.width).min(cursor_x).max(Pixels::ZERO);
         let origin = point(text.left() - scroll, text.top());
@@ -144,7 +135,6 @@ impl Element for TextElement {
         window.handle_input(&focus, ElementInputHandler::new(input_bounds, self.field.clone()), cx);
         window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
 
-        // The text is cut off at the inset, past which the line scrolls.
         window.with_content_mask(Some(gpui::ContentMask { bounds: prepaint.text }), |window| {
             if let Some(selection) = prepaint.selection {
                 window.paint_quad(fill(selection, selection_color));
@@ -168,8 +158,6 @@ impl Element for TextElement {
 }
 
 impl TextElement {
-    /// Presses, drags and right clicks on the field; a press takes the pointer, so a drag goes
-    /// on selecting past the field's edges.
     fn listen(&self, hitbox: &Hitbox, window: &mut Window) {
         window.on_mouse_event({
             let (field, hitbox) = (self.field.clone(), hitbox.clone());

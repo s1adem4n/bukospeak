@@ -1,10 +1,10 @@
-//! The app's sounds, for while its window isn't looked at: when one joins or leaves the call,
-//! the other comes or goes, and the microphone mutes or unmutes. Each is a soft tone, unless the
-//! server offers a sound of its name, which plays instead once installed.
-
 use std::f32::consts::TAU;
+use std::fs::File;
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -12,18 +12,17 @@ use bukospeak_core::Error as CallError;
 use bukospeak_core::proto::audio::SAMPLE_RATE;
 use bukospeak_core::proto::control::{Rejection, SOUNDS};
 use cpal::DeviceId;
+use rodio::buffer::SamplesBuffer;
+use rodio::source::Zero;
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 
 use crate::audio;
 use crate::install::{self, Error};
 
-/// The folder the server's sounds are installed in, if the system has a folder for programs'
-/// data.
 pub fn folder() -> Option<PathBuf> {
     dirs::data_local_dir().map(|folder| folder.join("bukospeak").join(SOUNDS))
 }
 
-/// Installs the sounds `server` offers as it has them now into `folder`, or removes them once it
-/// offers none. Blocks until they are installed.
 pub fn sync(server: &str, folder: &Path) -> Result<(), Error> {
     match install::install(server, SOUNDS, folder, |_| ()) {
         Err(Error::Download(CallError::Rejected(Rejection::Unavailable))) => Ok(install::remove(folder)?),
@@ -31,20 +30,16 @@ pub fn sync(server: &str, folder: &Path) -> Result<(), Error> {
     }
 }
 
-/// What a sound tells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cue {
     Joined,
     Left,
-    /// Another member came into the call.
     Came,
-    /// Another member went.
     Went,
     Muted,
     Unmuted,
 }
 
-/// A tone of a cue: its pitch in Hz, and when it starts, in seconds.
 type Note = (f32, f32);
 
 const E5: f32 = 659.26;
@@ -52,15 +47,12 @@ const A4: f32 = 440.;
 const B5: f32 = 987.77;
 const E4: f32 = 329.63;
 
-/// How long a note sounds, its attack, and how fast it fades after, in seconds.
 const NOTE: f32 = 0.32;
 const ATTACK: f32 = 0.006;
 const FADE: f32 = 0.07;
-/// The time between a cue's two notes.
 const STEP: f32 = 0.085;
 
 impl Cue {
-    /// The name of its file in the folder of sounds, without `.wav`.
     fn file(self) -> &'static str {
         match self {
             Self::Joined => "joined",
@@ -72,8 +64,6 @@ impl Cue {
         }
     }
 
-    /// Its notes: up for what begins, down for what ends; one's own a fifth higher than the
-    /// other's.
     fn notes(self) -> &'static [Note] {
         match self {
             Self::Joined => &[(E5, 0.), (B5, STEP)],
@@ -85,7 +75,6 @@ impl Cue {
         }
     }
 
-    /// How loud it is at its loudest, of full scale: quiet, beside the call's voices.
     fn level(self) -> f32 {
         match self {
             Self::Joined | Self::Left => 0.14,
@@ -93,12 +82,10 @@ impl Cue {
         }
     }
 
-    /// Its tone, in the call's format.
-    fn tone(self) -> Arc<[f32]> {
-        self.render(SAMPLE_RATE).into()
+    fn tone(self) -> SamplesBuffer {
+        SamplesBuffer::new(MONO, RATE, self.render(SAMPLE_RATE))
     }
 
-    /// Its tone at `rate`, in one channel, at its level at its loudest.
     fn render(self, rate: u32) -> Vec<f32> {
         let notes = self.notes();
         let end = notes.iter().map(|&(_, start)| start + NOTE).fold(0., f32::max);
@@ -125,42 +112,135 @@ impl Cue {
     }
 }
 
-/// Plays cues one after another, on a thread of its own, as long as this lives.
+const MONO: NonZero<u16> = NonZero::new(1).unwrap();
+const RATE: NonZero<u32> = NonZero::new(SAMPLE_RATE).unwrap();
+
+// Lets the device's buffer play out what the mixer handed it before the output closes.
+const TAIL: Duration = Duration::from_millis(250);
+
+// The output stays open between cues: a device that idles swallows the start of a stream.
 pub struct Cues {
-    asked: mpsc::Sender<(Cue, Option<DeviceId>)>,
+    asked: mpsc::Sender<Ask>,
+}
+
+enum Ask {
+    Open(Option<DeviceId>),
+    Play(Vec<Cue>, Option<DeviceId>),
+    Close,
 }
 
 impl Cues {
-    /// Cues from the WAV files in `folder` where there are, tones where not or without a
-    /// folder; the files are read each time, so ones installed meanwhile play from then on.
     pub fn new(folder: Option<PathBuf>) -> std::io::Result<Self> {
-        let (asked, cues) = mpsc::channel::<(Cue, Option<DeviceId>)>();
+        let (asked, asks) = mpsc::channel();
         thread::Builder::new().name("bukospeak-cues".into()).spawn(move || {
-            for (cue, output) in cues {
-                let file = folder.as_ref().map(|folder| folder.join(cue.file()).with_extension("wav"));
-                let sound = match file.filter(|file| file.exists()).map(|file| (audio::read_sound(&file), file)) {
-                    Some((Ok(sound), _)) => sound,
-                    Some((Err(error), file)) => {
-                        tracing::warn!("{}: {error}", file.display());
-                        cue.tone()
+            let mut output = None;
+            for ask in asks {
+                match ask {
+                    Ask::Open(device) => {
+                        Output::on(&mut output, device);
                     }
-                    None => cue.tone(),
-                };
-                match audio::sound(output.as_ref(), sound) {
-                    // The stream plays while it lives; the moment after lets its last buffer out.
-                    Ok((_stream, length)) => thread::sleep(length + Duration::from_millis(100)),
-                    Err(error) => tracing::warn!("no sound: {error}"),
+                    Ask::Play(cues, device) => {
+                        if let Some(output) = Output::on(&mut output, device) {
+                            output.replace(&cues, folder.as_deref());
+                        }
+                    }
+                    Ask::Close => {
+                        if let Some(output) = output.take() {
+                            output.close();
+                        }
+                    }
                 }
             }
         })?;
         Ok(Self { asked })
     }
 
-    /// Plays `cue` on the output device, the default for None.
-    pub fn play(&self, cue: Cue, output: Option<DeviceId>) {
-        // The thread ends only with the app, when no cue is to be heard any more.
-        let _ = self.asked.send((cue, output));
+    pub fn open(&self, output: Option<DeviceId>) {
+        self.ask(Ask::Open(output));
     }
+
+    pub fn play(&self, cues: Vec<Cue>, output: Option<DeviceId>) {
+        self.ask(Ask::Play(cues, output));
+    }
+
+    pub fn close(&self) {
+        self.ask(Ask::Close);
+    }
+
+    fn ask(&self, ask: Ask) {
+        // The thread runs as long as this.
+        let _ = self.asked.send(ask);
+    }
+}
+
+struct Output {
+    device: Option<DeviceId>,
+    _sink: MixerDeviceSink,
+    player: Player,
+    broke: Arc<AtomicBool>,
+}
+
+impl Output {
+    fn on(output: &mut Option<Self>, device: Option<DeviceId>) -> Option<&mut Self> {
+        if output.as_ref().is_none_or(|open| open.device != device || open.broke.load(Ordering::Relaxed)) {
+            *output = Self::open(device).inspect_err(|error| tracing::warn!("no sound: {error}")).ok();
+        }
+        output.as_mut()
+    }
+
+    fn open(device: Option<DeviceId>) -> Result<Self, CueError> {
+        let broke = Arc::new(AtomicBool::new(false));
+        let mut sink = DeviceSinkBuilder::from_device(audio::output_device(device.as_ref())?)?
+            .with_error_callback({
+                let broke = broke.clone();
+                move |error| {
+                    tracing::warn!("the sounds' output: {error}");
+                    broke.store(true, Ordering::Relaxed);
+                }
+            })
+            .open_sink_or_fallback()?;
+        sink.log_on_drop(false);
+        let player = Player::connect_new(sink.mixer());
+        Ok(Self { device, _sink: sink, player, broke })
+    }
+
+    // Only the latest change is worth hearing: queued behind earlier ones, a cue would come late.
+    fn replace(&self, cues: &[Cue], folder: Option<&Path>) {
+        self.player.clear();
+        cues.iter().for_each(|&cue| self.append(cue, folder));
+        self.player.play();
+    }
+
+    fn append(&self, cue: Cue, folder: Option<&Path>) {
+        let file = folder.map(|folder| folder.join(cue.file()).with_extension("wav")).filter(|file| file.exists());
+        let Some(file) = file else {
+            return self.player.append(cue.tone());
+        };
+        match File::open(&file).map_err(CueError::from).and_then(|opened| Ok(Decoder::try_from(opened)?)) {
+            Ok(sound) => self.player.append(sound),
+            Err(error) => {
+                tracing::warn!("{}: {error}", file.display());
+                self.player.append(cue.tone());
+            }
+        }
+    }
+
+    fn close(self) {
+        self.player.append(Zero::new(MONO, RATE).take_duration(TAIL));
+        self.player.sleep_until_end();
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CueError {
+    #[error(transparent)]
+    Device(#[from] audio::Error),
+    #[error(transparent)]
+    Sink(#[from] rodio::DeviceSinkError),
+    #[error(transparent)]
+    File(#[from] std::io::Error),
+    #[error(transparent)]
+    Wav(#[from] rodio::decoder::DecoderError),
 }
 
 #[cfg(test)]

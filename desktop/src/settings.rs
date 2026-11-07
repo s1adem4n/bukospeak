@@ -1,5 +1,3 @@
-//! What the user set up, in `settings.toml`: where the channel is and how the call sounds.
-
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -24,21 +22,13 @@ pub enum Error {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Settings {
-    /// The server as `host:port`.
     pub server: String,
-    /// The microphone's device id as cpal writes it; the system's default for None.
     pub input: Option<String>,
-    /// The speakers' or headphones' device id; the system's default for None.
     pub output: Option<String>,
-    /// How the microphone's noise is suppressed.
     pub suppression: Suppression,
-    /// Whether the speakers' echo is cancelled in what the microphone hears.
     pub echo_cancellation: bool,
-    /// How loud the others play, in percent of their level, up to the engine's most.
     pub volume: u16,
-    /// Whether the system starts the app with it, in the background.
     pub start_with_system: bool,
-    /// The games the app joins the call for while one runs, by their programs' file names.
     pub games: Vec<String>,
 }
 
@@ -57,23 +47,20 @@ impl Default for Settings {
     }
 }
 
-/// How the microphone's noise is suppressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Suppression {
-    /// It isn't: the microphone is sent as captured, for one whose noise is suppressed already.
+    #[value(help = "None: the microphone is sent as captured")]
     Off,
-    /// By the best suppression the engine has built in.
+    #[value(help = "The best suppression the engine has built in")]
     Standard,
-    /// By NVIDIA's effect that takes out room echo and noise, on an RTX card.
+    #[value(help = "NVIDIA's effect that takes out room echo and noise, on an RTX card")]
     NvidiaDereverbDenoiser,
-    /// By NVIDIA's Studio Voice, which also makes the voice sound as if from a studio's
-    /// microphone, on an RTX card.
+    #[value(help = "NVIDIA's Studio Voice, which makes the voice sound as if from a studio's microphone, on an RTX card")]
     NvidiaStudioVoice,
 }
 
 impl Suppression {
-    /// NVIDIA's effect it is, if it is one.
     pub fn nvidia(self) -> Option<Kind> {
         match self {
             Self::Off | Self::Standard => None,
@@ -82,8 +69,6 @@ impl Suppression {
         }
     }
 
-    /// The engine's suppression for it: NVIDIA's effect by `effects`, as installed; the best
-    /// built in while it isn't.
     pub fn engines(self, effects: Option<&Arc<Effects>>) -> bukospeak_core::Suppression {
         match (self, self.nvidia(), effects) {
             (Self::Off, ..) => bukospeak_core::Suppression::Off,
@@ -94,8 +79,6 @@ impl Suppression {
 }
 
 impl Settings {
-    /// The settings in the file at `path`; the defaults if there is none yet. A setting the file
-    /// lacks takes its default, and one the app no longer has is passed over.
     pub fn load(path: &Path) -> Result<Self, Error> {
         match fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|source| Error::Parse { path: path.to_owned(), source }),
@@ -109,17 +92,14 @@ impl Settings {
         crate::replace(path, &text).map_err(|source| Error::Write { path: path.to_owned(), source })
     }
 
-    /// Whether there is all joining takes: a server.
     pub fn is_complete(&self) -> bool {
         !self.server.trim().is_empty()
     }
 
-    /// The server, as joined.
     pub fn server(&self) -> &str {
         self.server.trim()
     }
 
-    /// The join these settings make.
     pub fn join(&self) -> Join {
         Join {
             server: self.server().to_owned(),
@@ -127,7 +107,6 @@ impl Settings {
         }
     }
 
-    /// The id kept for a direction's device; None for the system's default.
     pub fn device_id(&self, direction: Direction) -> Option<&str> {
         match direction {
             Direction::Input => self.input.as_deref(),
@@ -142,8 +121,6 @@ impl Settings {
         } = id;
     }
 
-    /// The device kept for a direction; the system's default for none, or for an id that isn't
-    /// one here, as one written on another system.
     pub fn device(&self, direction: Direction) -> Option<DeviceId> {
         let id = self.device_id(direction)?;
         id.parse().inspect_err(|error| tracing::warn!("the device {id} isn't one: {error}")).ok()
@@ -156,10 +133,9 @@ mod tests {
 
     use super::*;
 
-    /// A fresh folder of its own under the system's temporary one.
     fn folder(name: &str) -> PathBuf {
         let folder = std::env::temp_dir().join(format!("bukospeak-settings-{name}-{}", process::id()));
-        let _ = fs::remove_dir_all(&folder); // Left over from an earlier run, if at all.
+        let _ = fs::remove_dir_all(&folder);
         folder
     }
 

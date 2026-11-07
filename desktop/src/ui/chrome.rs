@@ -1,22 +1,14 @@
-//! The window's chrome, which the app draws itself on every system: the title bar, which holds
-//! the screen's controls, moves the window and, where the system leaves it to the app, holds the
-//! window's buttons; and on Linux, where the compositor leaves the frame to the app, the
-//! frame's rounded edge, its shadow, and the margin in it that resizes the window. After Zed's
-//! `platform_title_bar` and `workspace::client_side_decorations`.
-
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, Decorations, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels,
-    RenderOnce, ResizeEdge, Size, Stateful, StatefulInteractiveElement, Styled, Tiling, TitlebarOptions, Window, WindowButton,
-    WindowControlArea, WindowDecorations, WindowOptions, div, point, transparent_black,
+    AnyElement, App, Bounds, Decorations, Div, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, Size,
+    Stateful, StatefulInteractiveElement, Styled, Tiling, TitlebarOptions, Window, WindowControlArea, WindowDecorations, WindowOptions,
+    div, point, transparent_black,
 };
 
 use crate::ui::glyph::Glyph;
 use crate::ui::kit::{Icon, h_flex};
 use crate::ui::theme::{self, ActiveTokens};
 
-/// A window of the app, `size` large in the middle of the screen, with the chrome drawn by the
-/// app.
 pub fn options(size: Size<Pixels>, cx: &App) -> WindowOptions {
     let light = (theme::TITLE_BAR - theme::TRAFFIC_LIGHT) / 2.;
     WindowOptions {
@@ -30,14 +22,13 @@ pub fn options(size: Size<Pixels>, cx: &App) -> WindowOptions {
         // while the system waits to tell a drag from a double click.
         app_owns_titlebar_drag: true,
         window_decorations: Some(WindowDecorations::Client),
+        // What a window shows is laid out for its size.
+        is_resizable: false,
         app_id: Some("bukospeak".into()),
         ..WindowOptions::default()
     }
 }
 
-/// The frame around a window's content: on Linux, while the app draws it, a rounded edge with a
-/// shadow and the margin around it that takes the drags resizing the window, on every side not
-/// tiled against the screen's edge or another window. Elsewhere the content alone.
 pub fn frame(content: impl IntoElement, window: &mut Window, cx: &App) -> Stateful<Div> {
     let Decorations::Client { tiling } = window.window_decorations() else {
         window.set_client_inset(Pixels::ZERO);
@@ -45,7 +36,6 @@ pub fn frame(content: impl IntoElement, window: &mut Window, cx: &App) -> Statef
     };
     window.set_client_inset(theme::FRAME_SHADOW);
     let tokens = cx.tokens();
-    let zones = if window.is_resizable() { zones(window.viewport_size(), tiling) } else { Vec::new() };
     div()
         .id("frame")
         .relative()
@@ -70,81 +60,8 @@ pub fn frame(content: impl IntoElement, window: &mut Window, cx: &App) -> Statef
                 })
                 .child(content),
         )
-        .children(zones.into_iter().map(|(edge, bounds)| {
-            div()
-                .id(edge_name(edge))
-                .absolute()
-                .left(bounds.left())
-                .top(bounds.top())
-                .w(bounds.size.width)
-                .h(bounds.size.height)
-                .occlude()
-                .cursor(match edge {
-                    ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
-                    ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
-                    ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
-                    ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
-                })
-                .on_mouse_down(MouseButton::Left, move |_, window, _| window.start_window_resize(edge))
-        }))
 }
 
-/// Where in a window `size` large each edge not tiled takes the drags that resize by it: the
-/// shadow's margin and a little of the content, the corners a square of that reach, as they are
-/// harder to hit.
-fn zones(size: Size<Pixels>, tiling: Tiling) -> Vec<(ResizeEdge, Bounds<Pixels>)> {
-    let reach = theme::FRAME_SHADOW * 1.5;
-    // Along an edge, between the corners there are; the whole length where both ends are tiled.
-    let span = |start_tiled: bool, end_tiled: bool, length: Pixels| {
-        let start = if start_tiled { Pixels::ZERO } else { reach };
-        let end = if end_tiled { length } else { length - reach };
-        (start, end - start)
-    };
-    let (width, height) = (size.width, size.height);
-    let mut zones = Vec::new();
-    let mut zone = |edge, x, y, w, h| zones.push((edge, Bounds::new(point(x, y), gpui::size(w, h))));
-    let (x, w) = span(tiling.left, tiling.right, width);
-    if !tiling.top {
-        zone(ResizeEdge::Top, x, Pixels::ZERO, w, reach);
-    }
-    if !tiling.bottom {
-        zone(ResizeEdge::Bottom, x, height - reach, w, reach);
-    }
-    let (y, h) = span(tiling.top, tiling.bottom, height);
-    if !tiling.left {
-        zone(ResizeEdge::Left, Pixels::ZERO, y, reach, h);
-    }
-    if !tiling.right {
-        zone(ResizeEdge::Right, width - reach, y, reach, h);
-    }
-    let corners = [
-        (ResizeEdge::TopLeft, tiling.top || tiling.left, Pixels::ZERO, Pixels::ZERO),
-        (ResizeEdge::TopRight, tiling.top || tiling.right, width - reach, Pixels::ZERO),
-        (ResizeEdge::BottomLeft, tiling.bottom || tiling.left, Pixels::ZERO, height - reach),
-        (ResizeEdge::BottomRight, tiling.bottom || tiling.right, width - reach, height - reach),
-    ];
-    for (edge, tiled, x, y) in corners {
-        if !tiled {
-            zone(edge, x, y, reach, reach);
-        }
-    }
-    zones
-}
-
-fn edge_name(edge: ResizeEdge) -> &'static str {
-    match edge {
-        ResizeEdge::Top => "resize-top",
-        ResizeEdge::Bottom => "resize-bottom",
-        ResizeEdge::Left => "resize-left",
-        ResizeEdge::Right => "resize-right",
-        ResizeEdge::TopLeft => "resize-top-left",
-        ResizeEdge::TopRight => "resize-top-right",
-        ResizeEdge::BottomLeft => "resize-bottom-left",
-        ResizeEdge::BottomRight => "resize-bottom-right",
-    }
-}
-
-/// `element` with `radius` at the corners not tiled.
 fn round<E: Styled + FluentBuilder>(element: E, tiling: Tiling, radius: Pixels) -> E {
     element
         .when(!(tiling.top || tiling.left), |element| element.rounded_tl(radius))
@@ -153,8 +70,6 @@ fn round<E: Styled + FluentBuilder>(element: E, tiling: Tiling, radius: Pixels) 
         .when(!(tiling.bottom || tiling.right), |element| element.rounded_br(radius))
 }
 
-/// The content's corners, rounded inside the frame's where the app draws it: what fills the
-/// content and its background, is rounded with them.
 pub fn rounded<E: Styled + FluentBuilder>(content: E, window: &Window) -> E {
     match window.window_decorations() {
         Decorations::Client { tiling } => round(content, tiling, theme::FRAME_RADIUS - theme::FRAME_BORDER),
@@ -162,9 +77,6 @@ pub fn rounded<E: Styled + FluentBuilder>(content: E, window: &Window) -> E {
     }
 }
 
-/// The title bar: its content, which ends `TITLE_INSET` from its edges, and the window's own
-/// buttons where the app draws them. Pressed and moved, it moves the window; clicked twice, it
-/// zooms it.
 #[derive(IntoElement)]
 pub struct TitleBar {
     content: Option<AnyElement>,
@@ -176,8 +88,6 @@ impl TitleBar {
     }
 }
 
-/// Whether the pointer was pressed on the title bar and not yet released, when moving it moves
-/// the window.
 #[derive(Default)]
 struct Pressed(bool);
 
@@ -188,7 +98,6 @@ impl RenderOnce for TitleBar {
         let controls = window.window_controls();
         let [left, right] = window_buttons(window, cx);
         let start = if cfg!(target_os = "macos") && !window.is_fullscreen() { theme::TRAFFIC_LIGHTS } else { theme::TITLE_INSET };
-        let zooms = controls.maximize && window.is_resizable();
 
         h_flex()
             .id("title-bar")
@@ -205,75 +114,82 @@ impl RenderOnce for TitleBar {
                     window.start_window_move();
                 }
             }))
-            // On Windows the system zooms the window itself, the bar being its caption.
-            .on_click(move |event, window, _| {
-                if event.click_count() == 2 {
-                    if cfg!(target_os = "macos") {
+            // Clicked twice, macOS does what its settings say, as for its own title bars.
+            .when(cfg!(target_os = "macos"), |bar| {
+                bar.on_click(|event, window, _| {
+                    if event.click_count() == 2 {
                         window.titlebar_double_click();
-                    } else if cfg!(target_os = "linux") && zooms {
-                        window.zoom_window();
                     }
-                }
+                })
             })
             .when(cfg!(target_os = "linux") && client && controls.window_menu, |bar| {
                 bar.on_mouse_down(MouseButton::Right, |event, window, _| window.show_window_menu(event.position))
             })
-            .children((!left.is_empty()).then(|| buttons(left, window, cx)))
+            .children((!left.is_empty()).then(|| buttons(left, cx)))
             .child(h_flex().flex_1().min_w_0().h_full().pl(start).pr(theme::TITLE_INSET).children(self.content))
-            .children((!right.is_empty()).then(|| buttons(right, window, cx)))
+            .children((!right.is_empty()).then(|| buttons(right, cx)))
     }
 }
 
-/// The window's buttons on the title bar's left and right, where the app draws them: on Linux
-/// those the desktop sets, in its order, which the window manager offers for the window.
+// No Maximize: the window keeps its size.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Caption {
+    Minimize,
+    Close,
+}
+
+impl Caption {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Minimize => "minimize",
+            Self::Close => "close",
+        }
+    }
+
+    fn glyph(self) -> Glyph {
+        match self {
+            Self::Minimize => Glyph::Minimize,
+            Self::Close => Glyph::Close,
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn window_buttons(window: &Window, cx: &App) -> [Vec<WindowButton>; 2] {
+fn window_buttons(window: &Window, cx: &App) -> [Vec<Caption>; 2] {
     if !matches!(window.window_decorations(), Decorations::Client { .. }) {
         return [Vec::new(), Vec::new()];
     }
     let controls = window.window_controls();
     let layout = cx.button_layout().unwrap_or_else(gpui::WindowButtonLayout::linux_default);
-    let offered = |buttons: &[Option<WindowButton>]| {
+    let offered = |buttons: &[Option<gpui::WindowButton>]| {
         buttons
             .iter()
             .flatten()
-            .copied()
-            .filter(|button| match button {
-                WindowButton::Minimize => controls.minimize,
-                WindowButton::Maximize => controls.maximize,
-                WindowButton::Close => true,
+            .filter_map(|button| match button {
+                gpui::WindowButton::Minimize => controls.minimize.then_some(Caption::Minimize),
+                gpui::WindowButton::Maximize => None,
+                gpui::WindowButton::Close => Some(Caption::Close),
             })
             .collect()
     };
     [offered(&layout.left), offered(&layout.right)]
 }
 
-/// On Windows its three, on the right.
 #[cfg(target_os = "windows")]
-fn window_buttons(_: &Window, _: &App) -> [Vec<WindowButton>; 2] {
-    [Vec::new(), vec![WindowButton::Minimize, WindowButton::Maximize, WindowButton::Close]]
+fn window_buttons(_: &Window, _: &App) -> [Vec<Caption>; 2] {
+    [Vec::new(), vec![Caption::Minimize, Caption::Close]]
 }
 
-/// On macOS the system's own, in the title bar's corner.
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn window_buttons(_: &Window, _: &App) -> [Vec<WindowButton>; 2] {
+fn window_buttons(_: &Window, _: &App) -> [Vec<Caption>; 2] {
     [Vec::new(), Vec::new()]
 }
 
-/// The window's buttons, as the system's: on Windows full height and caption width, which the
-/// system clicks itself; on Linux small circles, clicked by the app.
-fn buttons(buttons: Vec<WindowButton>, window: &Window, cx: &App) -> impl IntoElement {
+fn buttons(buttons: Vec<Caption>, cx: &App) -> impl IntoElement {
     let tokens = cx.tokens();
     let windows = cfg!(target_os = "windows");
-    let maximized = window.is_maximized();
-    h_flex().h_full().when(!windows, |side| side.gap_2().px(theme::TITLE_INSET)).children(buttons.into_iter().map(|button| {
-        let glyph = match button {
-            WindowButton::Minimize => Glyph::Minimize,
-            WindowButton::Maximize if maximized => Glyph::Restore,
-            WindowButton::Maximize => Glyph::Maximize,
-            WindowButton::Close => Glyph::Close,
-        };
-        let close = button == WindowButton::Close;
+    h_flex().h_full().when(!windows, |side| side.gap(theme::INLINE).px(theme::TITLE_INSET)).children(buttons.into_iter().map(|button| {
+        let close = button == Caption::Close;
         div()
             .id(button.id())
             .flex()
@@ -284,9 +200,8 @@ fn buttons(buttons: Vec<WindowButton>, window: &Window, cx: &App) -> impl IntoEl
             .map(|control| {
                 if windows {
                     let area = match button {
-                        WindowButton::Minimize => WindowControlArea::Min,
-                        WindowButton::Maximize => WindowControlArea::Max,
-                        WindowButton::Close => WindowControlArea::Close,
+                        Caption::Minimize => WindowControlArea::Min,
+                        Caption::Close => WindowControlArea::Close,
                     };
                     control
                         .w(theme::CAPTION_BUTTON)
@@ -308,39 +223,12 @@ fn buttons(buttons: Vec<WindowButton>, window: &Window, cx: &App) -> impl IntoEl
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             match button {
-                                WindowButton::Minimize => window.minimize_window(),
-                                WindowButton::Maximize => window.zoom_window(),
-                                WindowButton::Close => window.remove_window(),
+                                Caption::Minimize => window.minimize_window(),
+                                Caption::Close => window.remove_window(),
                             }
                         })
                 }
             })
-            .child(Icon::new(glyph).size(if windows { theme::ICON } else { theme::ICON_SM }))
+            .child(Icon::new(button.glyph()).size(theme::ICON_SM))
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use gpui::size;
-
-    use super::*;
-
-    #[test]
-    fn the_margin_resizes_by_the_edges_and_corners_not_tiled() {
-        let window = size(theme::step(100.), theme::step(75.));
-        let edges = |tiling| zones(window, tiling).into_iter().map(|(edge, _)| edge).collect::<Vec<_>>();
-        assert_eq!(edges(Tiling::default()).len(), 8);
-        let top = Tiling { top: true, ..Tiling::default() };
-        assert_eq!(edges(top), [ResizeEdge::Bottom, ResizeEdge::Left, ResizeEdge::Right, ResizeEdge::BottomLeft, ResizeEdge::BottomRight]);
-        assert!(edges(Tiling::tiled()).is_empty());
-    }
-
-    #[test]
-    fn a_side_reaches_into_a_tiled_corner() {
-        let top = Tiling { top: true, ..Tiling::default() };
-        let (_, left) =
-            zones(size(theme::step(100.), theme::step(75.)), top).into_iter().find(|(edge, _)| *edge == ResizeEdge::Left).unwrap();
-        assert_eq!(left.top(), Pixels::ZERO);
-        assert_eq!(left.bottom(), theme::step(75.) - theme::FRAME_SHADOW * 1.5);
-    }
 }

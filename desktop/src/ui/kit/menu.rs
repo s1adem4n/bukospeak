@@ -1,7 +1,3 @@
-//! A menu: items to choose from, shown beneath what opened it or where a right click was. Open,
-//! it has the focus: the arrows move through it, Enter chooses, Escape closes it, and the focus
-//! goes back where it was. A click beside it closes it and does nothing else.
-
 use std::cell::Cell;
 use std::panic::Location;
 use std::rc::Rc;
@@ -15,23 +11,11 @@ use gpui::{
 };
 
 use crate::ui::glyph::Glyph;
-use crate::ui::kit::{Icon, h_flex, v_flex};
+use crate::ui::kit::{Icon, h_flex, list_reach, panel_inset, v_flex};
 use crate::ui::marks::Mark;
 use crate::ui::theme::{self, ActiveTokens, Typeset};
 
-actions!(
-    menu,
-    [
-        /// The item below the highlighted one.
-        Next,
-        /// The item above it.
-        Previous,
-        /// Chooses the highlighted item.
-        Choose,
-        /// Closes the menu, choosing nothing.
-        Close
-    ]
-);
+actions!(menu, [Next, Previous, Choose, Close]);
 
 const CONTEXT: &str = "Menu";
 
@@ -47,7 +31,6 @@ pub fn init(cx: &mut App) {
 
 type Action = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// An item: what it says, whether it is the one chosen now, and what choosing it does.
 pub struct Item {
     label: SharedString,
     checked: bool,
@@ -74,21 +57,39 @@ impl Item {
 enum Entry {
     Item(Item),
     Separator,
-    /// The title of the items after it, which aren't the menu's own: a vendor's.
     Heading(SharedString),
+}
+
+impl Entry {
+    fn height(&self) -> Pixels {
+        match self {
+            Self::Item(_) | Self::Heading(_) => theme::MENU_ITEM,
+            Self::Separator => theme::HAIRLINE + theme::MENU_SEPARATOR * 2.,
+        }
+    }
+}
+
+fn chosen(entries: &[Entry]) -> Option<usize> {
+    entries.iter().position(|entry| matches!(entry, Entry::Item(item) if item.checked))
+}
+
+fn anchor(entries: &[Entry]) -> Pixels {
+    let anchor = chosen(entries).unwrap_or(0);
+    let above: Pixels = entries[..anchor].iter().map(Entry::height).sum();
+    let anchor = entries.get(anchor).map_or(Pixels::ZERO, Entry::height);
+    theme::HAIRLINE + theme::MENU_PAD + above + anchor / 2.
+}
+
+fn item_inset() -> Pixels {
+    panel_inset() - theme::MENU_PAD
 }
 
 pub struct Menu {
     entries: Vec<Entry>,
-    /// Whether any item shows a check, so the labels of all line up after its place.
-    checks: bool,
     highlighted: Option<usize>,
     focus: FocusHandle,
-    /// Where the focus was before the menu took it, and goes back to.
     previous: Option<FocusHandle>,
-    /// Whether it was closed, after which its owner drops it.
     closed: bool,
-    /// The side of what opened it it came out on, as [`Popover`] placed it last.
     side: Rc<Cell<Side>>,
     _focus_out: gpui::Subscription,
 }
@@ -102,31 +103,28 @@ impl Focusable for Menu {
 }
 
 impl Menu {
-    /// Opens a menu of what `build` puts in it, and gives it the focus; its owner shows it
-    /// with [`Popover`] until it emits [`DismissEvent`].
     pub fn open(window: &mut Window, cx: &mut App, build: impl FnOnce(Menu) -> Menu) -> Entity<Self> {
         let previous = window.focused(cx);
         let menu = cx.new(|cx| {
             let focus = cx.focus_handle();
             // Tab, or the window losing an element, takes the focus away: the menu is done.
             let focus_out = cx.on_focus_out(&focus, window, |menu: &mut Menu, _, window, cx| menu.close(window, cx));
-            build(Self {
+            let menu = build(Self {
                 entries: Vec::new(),
-                checks: false,
                 highlighted: None,
                 focus,
                 previous,
                 closed: false,
                 side: Rc::default(),
                 _focus_out: focus_out,
-            })
+            });
+            Self { highlighted: chosen(&menu.entries), ..menu }
         });
         window.focus(&menu.focus_handle(cx), cx);
         menu
     }
 
     pub fn item(mut self, item: Item) -> Self {
-        self.checks |= item.checked;
         self.entries.push(Entry::Item(item));
         self
     }
@@ -136,7 +134,6 @@ impl Menu {
         self
     }
 
-    /// Titles the items that follow, lined up with their labels.
     pub fn heading(mut self, title: impl Into<SharedString>) -> Self {
         self.entries.push(Entry::Heading(title.into()));
         self
@@ -169,7 +166,6 @@ impl Menu {
         action(window, cx);
     }
 
-    /// The items that can be chosen, by their index among the entries.
     fn choosable(&self) -> impl DoubleEndedIterator<Item = usize> + '_ {
         self.entries.iter().enumerate().filter_map(|(index, entry)| matches!(entry, Entry::Item(item) if !item.disabled).then_some(index))
     }
@@ -201,32 +197,35 @@ impl Render for Menu {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
         let entries = self.entries.iter().enumerate().map(|(index, entry)| match entry {
-            Entry::Separator => div().my_1().mx_2().h(theme::HAIRLINE).bg(tokens.hairline).into_any_element(),
+            Entry::Separator => v_flex()
+                .h(entry.height())
+                .justify_center()
+                .px(item_inset())
+                .child(div().h(theme::HAIRLINE).bg(tokens.hairline))
+                .into_any_element(),
             Entry::Heading(title) => h_flex()
-                .px_2()
-                .pt_1()
-                .gap_2()
-                .h(theme::MENU_ITEM)
+                .h(entry.height())
+                .px(item_inset())
+                .pt(theme::LINE)
                 .typeset(theme::TEXT_XS)
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(tokens.text_faint)
-                .when(self.checks, |heading| heading.child(div().flex_none().size(theme::ICON_SM)))
                 .child(title.clone())
                 .into_any_element(),
             Entry::Item(item) => {
                 let highlighted = self.highlighted == Some(index);
+                // The check at the end, where a list row has its menu's mark, so the label starts
+                // where the row's does.
                 h_flex()
                     .id(index)
                     .mark(item.label.clone())
                     .role(Role::MenuItem)
-                    .h(theme::MENU_ITEM)
-                    .px_2()
-                    .gap_2()
+                    .h(entry.height())
+                    .px(item_inset())
+                    .gap(theme::GAP)
                     .rounded(theme::RADIUS_CONTROL_SM)
-                    .when(self.checks, |row| {
-                        row.child(div().size(theme::ICON_SM).children(item.checked.then(|| Icon::new(Glyph::Check).size(theme::ICON_SM))))
-                    })
                     .child(div().flex_1().min_w_0().truncate().child(item.label.clone()))
+                    .children(item.checked.then(|| Icon::new(Glyph::Check).size(theme::ICON_SM)))
                     .map(|row| {
                         if item.disabled {
                             row.opacity(theme::DISABLED_OPACITY)
@@ -262,38 +261,33 @@ impl Render for Menu {
             .typeset(theme::TEXT)
             .text_color(tokens.text)
             .children(entries)
-            // Comes on from what opened it, settling the last of the gap between. Its first frame,
-            // before it is placed, is unseen.
+            // Its first frame, before it is placed, is unseen.
             .with_animation("pop", Animation::new(theme::POP).with_easing(ease_out_quint()), {
                 let toward = match self.side.get() {
                     Side::Below => -1.,
                     Side::Above => 1.,
+                    Side::Over => 0.,
                 };
-                move |menu, delta| menu.opacity(delta).top(theme::MENU_GAP * toward * (1. - delta))
+                move |menu, delta| menu.opacity(delta).top(theme::MENU_RISE * toward * (1. - delta))
             })
     }
 }
 
-/// Where an open menu shows.
 #[derive(Clone, Copy, Debug)]
 pub enum Place {
-    /// Beneath the element the popover is put in, their right edges in line; above it where
-    /// there is no room beneath. That element is positioned for it.
-    BelowEnd,
-    /// At a point of the window, its top left corner there: a menu a right click opens.
+    // The popover goes inside the row, which must be positioned relative.
+    OverValue,
     At(Point<Pixels>),
 }
 
-/// Which side of what opened it a menu came out on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Side {
     #[default]
     Below,
     Above,
+    Over,
 }
 
-/// An open menu, drawn above everything in the window, over a backdrop that takes a click
-/// beside it and closes it.
 #[derive(IntoElement)]
 pub struct Popover {
     menu: Entity<Menu>,
@@ -325,39 +319,34 @@ impl RenderOnce for Popover {
             ),
         )
         .with_priority(1);
-        let menu = deferred(Placed { place: self.place, side: self.menu.read(cx).side.clone(), menu: self.menu.into_any_element() })
-            .with_priority(2);
+        let (side, anchor) = {
+            let menu = self.menu.read(cx);
+            (menu.side.clone(), anchor(&menu.entries))
+        };
+        // No wider than the window inside its gutters: a longer label is cut short.
+        let menu = div().max_w(viewport.width - theme::GUTTER * 2.).child(self.menu).into_any_element();
+        let menu = deferred(Placed { place: self.place, anchor, side, menu }).with_priority(2);
         // Spanning what opened it, whose bounds the menu is placed by.
         div().absolute().inset_0().child(backdrop).child(menu)
     }
 }
 
-/// A menu laid out at its own size and placed by what opened it: beneath, in line with its
-/// end, or above where only there it fits, a gap away; at the window's edge where it would
-/// cross it.
 struct Placed {
     place: Place,
+    anchor: Pixels,
     menu: AnyElement,
-    /// Told the side it came out on, which its motion comes from.
     side: Rc<Cell<Side>>,
 }
 
-/// Where a menu of `size` goes for `place`, beside `opener` in a window of `viewport`, and on
-/// which side.
-fn position(place: Place, opener: Bounds<Pixels>, size: Size<Pixels>, viewport: Size<Pixels>) -> (Point<Pixels>, Side) {
-    let (target, gap, x) = match place {
-        Place::BelowEnd => (opener, theme::MENU_GAP, opener.right() - size.width),
-        Place::At(at) => (Bounds { origin: at, size: Size::default() }, Pixels::ZERO, at.x),
-    };
+fn position(place: Place, anchor: Pixels, opener: Bounds<Pixels>, size: Size<Pixels>, viewport: Size<Pixels>) -> (Point<Pixels>, Side) {
     let (top, bottom) = (theme::GUTTER, viewport.height - theme::GUTTER);
-    let below = bottom - (target.bottom() + gap);
-    let above = target.top() - gap - top;
-    let side = if size.height <= below || below >= above { Side::Below } else { Side::Above };
-    let y = match side {
-        Side::Below => target.bottom() + gap,
-        Side::Above => target.top() - gap - size.height,
+    let (x, y, side) = match place {
+        Place::OverValue => (opener.right() + list_reach() - size.width, opener.center().y - anchor, Side::Over),
+        Place::At(at) => {
+            let (below, above) = (bottom - at.y, at.y - top);
+            if size.height <= below || below >= above { (at.x, at.y, Side::Below) } else { (at.x, at.y - size.height, Side::Above) }
+        }
     };
-    // Taller than the room on either side, it lies along the window's top edge.
     let y = y.min(bottom - size.height).max(top);
     let x = x.min(viewport.width - theme::GUTTER - size.width).max(theme::GUTTER);
     (Point { x, y }, side)
@@ -412,7 +401,7 @@ impl Element for Placed {
         cx: &mut App,
     ) {
         let laid = window.layout_bounds(*menu);
-        let (origin, side) = position(self.place, opener, laid.size, window.viewport_size());
+        let (origin, side) = position(self.place, self.anchor, opener, laid.size, window.viewport_size());
         self.side.set(side);
         let offset = origin - laid.origin;
         window.with_element_offset(Point { x: offset.x.round(), y: offset.y.round() }, |window| self.menu.prepaint(window, cx));
@@ -443,38 +432,53 @@ mod tests {
     const MENU: Size<Pixels> = Size { width: px(200.), height: px(150.) };
 
     fn row(top: f32) -> Bounds<Pixels> {
-        Bounds { origin: point(px(20.), px(top)), size: size(px(360.), px(44.)) }
+        Bounds { origin: point(px(30.), px(top)), size: size(px(340.), px(44.)) }
     }
 
     #[test]
-    fn a_menu_hangs_below_its_row_in_line_with_its_end() {
-        let (at, side) = position(Place::BelowEnd, row(100.), MENU, WINDOW);
-        assert_eq!(side, Side::Below);
-        assert_eq!(at, point(px(380.) - MENU.width, px(144.) + theme::MENU_GAP));
+    fn over_a_row_s_end_the_menu_ends_on_the_panel_s_end_and_puts_its_chosen_item_on_the_row() {
+        let anchor = px(50.);
+        let (at, side) = position(Place::OverValue, anchor, row(200.), MENU, WINDOW);
+        assert_eq!(side, Side::Over);
+        assert_eq!(at, point(px(370.) + list_reach() - MENU.width, px(222.) - anchor));
     }
 
     #[test]
-    fn without_room_below_it_stands_above_its_row_and_leaves_it_free() {
-        let (at, side) = position(Place::BelowEnd, row(500.), MENU, WINDOW);
-        assert_eq!(side, Side::Above);
-        assert_eq!(at.y + MENU.height, px(500.) - theme::MENU_GAP);
-    }
-
-    #[test]
-    fn taller_than_either_side_it_takes_the_larger_and_stays_in_the_window() {
-        let tall = size(MENU.width, px(400.));
-        let (at, side) = position(Place::BelowEnd, row(350.), tall, WINDOW);
-        assert_eq!(side, Side::Above);
+    fn over_a_row_by_the_window_s_edge_it_moves_inside_the_window() {
+        let (at, _) = position(Place::OverValue, px(14.), row(540.), MENU, WINDOW);
+        assert_eq!(at.y + MENU.height, WINDOW.height - theme::GUTTER);
+        let (at, _) = position(Place::OverValue, px(140.), row(10.), MENU, WINDOW);
         assert_eq!(at.y, theme::GUTTER);
-        let (at, side) = position(Place::BelowEnd, row(150.), tall, WINDOW);
-        assert_eq!(side, Side::Below);
-        assert_eq!(at.y + tall.height, WINDOW.height - theme::GUTTER);
+    }
+
+    #[test]
+    fn at_a_point_it_hangs_below_or_where_only_there_it_fits_above() {
+        let (at, side) = position(Place::At(point(px(100.), px(100.))), Pixels::ZERO, Bounds::default(), MENU, WINDOW);
+        assert_eq!((at, side), (point(px(100.), px(100.)), Side::Below));
+        let (at, side) = position(Place::At(point(px(100.), px(550.))), Pixels::ZERO, Bounds::default(), MENU, WINDOW);
+        assert_eq!((at, side), (point(px(100.), px(550.) - MENU.height), Side::Above));
     }
 
     #[test]
     fn at_a_point_by_the_edge_it_stays_in_the_window() {
-        let (at, side) = position(Place::At(point(px(390.), px(10.))), Bounds::default(), MENU, WINDOW);
+        let (at, side) = position(Place::At(point(px(390.), px(10.))), Pixels::ZERO, Bounds::default(), MENU, WINDOW);
         assert_eq!(side, Side::Below);
         assert_eq!(at, point(WINDOW.width - theme::GUTTER - MENU.width, theme::GUTTER));
+    }
+
+    #[test]
+    fn the_anchor_is_the_middle_of_the_first_chosen_item_else_of_the_first() {
+        let entries = |checked| {
+            vec![
+                Entry::Item(Item::new("first", |_, _| {})),
+                Entry::Separator,
+                Entry::Heading("vendor".into()),
+                Entry::Item(Item::new("chosen", |_, _| {}).checked(checked)),
+            ]
+        };
+        let top = theme::HAIRLINE + theme::MENU_PAD;
+        let above = theme::MENU_ITEM + (theme::HAIRLINE + theme::MENU_SEPARATOR * 2.) + theme::MENU_ITEM;
+        assert_eq!(anchor(&entries(true)), top + above + theme::MENU_ITEM / 2.);
+        assert_eq!(anchor(&entries(false)), top + theme::MENU_ITEM / 2.);
     }
 }

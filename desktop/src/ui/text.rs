@@ -1,5 +1,3 @@
-//! What the app tells the user, in German, of what went wrong.
-
 use crate::audio::Direction;
 use crate::call::{Failure, Notice};
 use bukospeak_core::proto::control::Rejection;

@@ -1,6 +1,3 @@
-//! A terminal client for trying the server: joins the channel on the desktop's audio devices
-//! and prints what happens in it.
-
 use std::io::IsTerminal;
 use std::sync::{Arc, mpsc};
 
@@ -23,30 +20,28 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List the audio devices, the defaults marked with *.
+    #[command(about = "List the audio devices, the defaults marked with *")]
     Devices,
-    /// Join the channel as this device on the server's tailnet and talk, printing who comes,
-    /// goes and speaks, until Ctrl-C.
+    #[command(about = "Join the channel and talk, printing who comes, goes and speaks, until Ctrl-C")]
     Join {
-        /// The server as host:port.
+        #[arg(help = "The server as host:port")]
         server: String,
-        /// The microphone's id, as `devices` lists it; the default if not given.
-        #[arg(long)]
+        #[arg(long, help = "The microphone's id, as `devices` lists it; the default if not given")]
         input: Option<DeviceId>,
-        /// The speakers' or headphones' id; the default if not given.
-        #[arg(long)]
+        #[arg(long, help = "The speakers' or headphones' id; the default if not given")]
         output: Option<DeviceId>,
-        /// How the microphone's noise is suppressed: NVIDIA's effects are installed from the
-        /// server first, if they aren't yet.
-        #[arg(long, value_enum, default_value_t = Suppression::Standard)]
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = Suppression::Standard,
+            help = "How the microphone's noise is suppressed; NVIDIA's effects are installed from the server first"
+        )]
         suppression: Suppression,
-        /// Leave the speakers' echo in what the microphone hears, for a headset.
-        #[arg(long)]
+        #[arg(long, help = "Leave the speakers' echo in what the microphone hears, for a headset")]
         no_echo_cancellation: bool,
     },
 }
 
-/// What the client waits for.
 enum Happening {
     Update(Box<Update>),
     AudioFailed(audio::Error),
@@ -87,7 +82,6 @@ fn devices() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What the engine does to the microphone's signal.
 struct Processing {
     suppression: Suppression,
     echo_cancellation: bool,
@@ -100,7 +94,7 @@ fn join(server: &str, input: Option<DeviceId>, output: Option<DeviceId>, process
     };
 
     let (happenings, received) = mpsc::channel();
-    // `cpal` passes the microphone's signal as it is.
+    // Desktop devices pass the microphone's signal unprocessed.
     let engine = Engine::new(Conditioning::Engine, Arc::new(Forward(happenings.clone())))?;
     engine.set_suppression(processing.suppression.engines(effects.as_ref()))?;
     engine.set_echo_cancellation(processing.echo_cancellation);
@@ -111,8 +105,7 @@ fn join(server: &str, input: Option<DeviceId>, output: Option<DeviceId>, process
     let audio = Audio::call(microphone, speaker, None, input, output, move |error| _ = failures.send(Happening::AudioFailed(error)))?;
     ctrlc::set_handler(move || _ = happenings.send(Happening::Stop))?;
 
-    // The channel as last printed.
-    let mut shown = Channel::default();
+    let mut printed = Channel::default();
     loop {
         match received.recv().expect("the client holds a sender until it leaves") {
             Happening::Update(update) => {
@@ -120,7 +113,7 @@ fn join(server: &str, input: Option<DeviceId>, output: Option<DeviceId>, process
                 if let Some(lost) = lost {
                     return Err(lost).context("the call ended");
                 }
-                if shown.you().is_none()
+                if printed.you().is_none()
                     && let Some(you) = channel.you()
                 {
                     let others: Vec<&str> =
@@ -130,13 +123,13 @@ fn join(server: &str, input: Option<DeviceId>, output: Option<DeviceId>, process
                 if let Some(announcement) = announcement {
                     println!("{announcement}");
                 }
-                for &id in channel.speaking().iter().filter(|id| !shown.speaking().contains(id)) {
+                for &id in channel.speaking().iter().filter(|id| !printed.speaking().contains(id)) {
                     println!("{} speaks", name(&channel, id));
                 }
-                for &id in shown.speaking().iter().filter(|id| !channel.speaking().contains(id)) {
-                    println!("{} is quiet", name(&shown, id));
+                for &id in printed.speaking().iter().filter(|id| !channel.speaking().contains(id)) {
+                    println!("{} is quiet", name(&printed, id));
                 }
-                shown = channel;
+                printed = channel;
             }
             Happening::AudioFailed(error) => eprintln!("{error}"),
             Happening::Stop => break,
@@ -148,8 +141,6 @@ fn join(server: &str, input: Option<DeviceId>, output: Option<DeviceId>, process
     Ok(())
 }
 
-/// Installs NVIDIA's effects for the system's card from the server, unless they are installed,
-/// telling how far it got.
 fn install(server: &str) -> anyhow::Result<Arc<Effects>> {
     let architecture = nvidia::card().context("NVIDIA's effects need an RTX card under Windows")?;
     let mut shown = None;
@@ -171,7 +162,6 @@ fn install(server: &str) -> anyhow::Result<Arc<Effects>> {
     Effects::installed(architecture, failed).context("NVIDIA's effects aren't where they were installed")
 }
 
-/// A member's name, as the channel knows it.
 fn name(channel: &Channel, id: MemberId) -> &str {
     channel.members().iter().find(|member| member.id == id).map_or("someone", |member| &member.name)
 }

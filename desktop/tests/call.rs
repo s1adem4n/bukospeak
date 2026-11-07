@@ -1,5 +1,3 @@
-//! The call against a real server, as the app drives it, with stand-ins for the devices.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -15,12 +13,8 @@ use bukospeak_server::{Device, Downloads, Room, Tailnet};
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use tokio::runtime::Runtime;
 
-/// How long a call may take to get where a test waits for it: a lost connection is told after
-/// a join again that fails.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// A server, which stops when dropped as the real one does: it closes its connections, so
-/// clients learn at once that it went.
 struct Server {
     runtime: Runtime,
     endpoint: quinn::Endpoint,
@@ -34,22 +28,18 @@ impl Drop for Server {
     }
 }
 
-/// A tailnet in which each connection is a device of its own.
 fn own(peer: SocketAddr) -> Option<Device> {
     Some(Device { id: peer.to_string(), name: format!("member {}", peer.port()) })
 }
 
-/// A tailnet in which every connection is the same device.
 fn one_device(_: SocketAddr) -> Option<Device> {
     Some(Device { id: "desktop".into(), name: "Desktop Owner".into() })
 }
 
-/// A tailnet that knows no one.
 fn nobody(_: SocketAddr) -> Option<Device> {
     None
 }
 
-/// A server on localhost whose members `tailnet` tells.
 fn serve(tailnet: impl Tailnet) -> Server {
     let runtime = Runtime::new().unwrap();
     let endpoint = runtime.block_on(async { bukospeak_server::endpoint("127.0.0.1:0".parse().unwrap()) }).unwrap();
@@ -58,8 +48,6 @@ fn serve(tailnet: impl Tailnet) -> Server {
     Server { runtime, endpoint, address }
 }
 
-/// Plays nothing, but holds the call's ends as the devices would, and counts the calls played
-/// and the inputs listened to; or fails to start a call, as devices may.
 #[derive(Clone, Default)]
 struct StandIn {
     played: Arc<AtomicUsize>,
@@ -68,7 +56,6 @@ struct StandIn {
     fails: Arc<AtomicBool>,
 }
 
-/// A call's ends or the input held, counted in `count` while held.
 struct Played {
     _ends: Option<(Microphone, Speaker)>,
     count: Arc<AtomicUsize>,
@@ -105,7 +92,6 @@ impl Drop for Played {
     }
 }
 
-/// A call as the app holds it.
 struct App {
     call: Call,
     happenings: UnboundedReceiver<Happening>,
@@ -123,7 +109,6 @@ impl App {
         self.call.join(Join { server: server.address.clone(), devices: Devices::default() });
     }
 
-    /// Takes in what happens until `done` holds; fails the test after a while.
     fn until(&mut self, what: &str, done: impl Fn(&Call) -> bool) {
         let deadline = Instant::now() + PATIENCE;
         while !done(&self.call) {
@@ -136,7 +121,6 @@ impl App {
         }
     }
 
-    /// Takes in what happens for a moment, as the app does all along.
     fn settle(&mut self) {
         let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
@@ -148,12 +132,10 @@ impl App {
         }
     }
 
-    /// Who is in the call, in the order they came.
     fn ids(&self) -> Vec<MemberId> {
         self.call.members().iter().map(|member| member.id).collect()
     }
 
-    /// This member's id, once in the call.
     fn you(&self) -> MemberId {
         self.call.you().expect("in the call")
     }
@@ -192,7 +174,6 @@ fn the_input_is_listened_to_while_asked_and_out_of_a_call_only() {
     app.settle();
     assert_eq!(listening.load(Ordering::Relaxed), 1);
 
-    // The call's input takes over once the call plays, and gives it back when left.
     app.join(&server);
     app.until("the call", connected);
     assert_eq!(listening.load(Ordering::Relaxed), 0);
@@ -201,7 +182,6 @@ fn the_input_is_listened_to_while_asked_and_out_of_a_call_only() {
     app.settle();
     assert_eq!((listening.load(Ordering::Relaxed), app.devices.playing.load(Ordering::Relaxed)), (1, 0));
 
-    // A join that fails leaves it listened to.
     app.join(&stranger);
     app.until("the rejection", |call| matches!(call.phase(), Phase::Failed(_)));
     app.settle();
@@ -241,7 +221,6 @@ fn a_leave_during_the_join_ends_the_call_before_it_plays_and_the_next_join_is_cl
     app.join(&server);
     app.call.leave();
     assert_eq!(*app.call.phase(), Phase::Idle);
-    // Joined again at once: this join waits for the one left, and sees nothing of it.
     app.join(&server);
     app.until("the second call", connected);
     assert_eq!(app.devices.played.load(Ordering::Relaxed), 1, "the call left during its join never played");
@@ -267,7 +246,6 @@ fn quitting_during_a_join_leaves_the_channel() {
 
     let mut app = App::new();
     app.join(&server);
-    // Waits for the join under way and leaves.
     drop(app);
     other.settle();
     assert_eq!(other.ids(), [other.you()]);
@@ -311,10 +289,8 @@ fn a_dropout_shows_reconnecting_and_a_lost_connection_ends_the_call_and_its_audi
     app.join(&server);
     app.until("the call", connected);
     drop(server);
-    // The call shows it, and plays on while it joins again, until that fails.
     let since = app.call.since();
     app.until("reconnecting", |call| *call.phase() == Phase::Reconnecting);
-    // Joining again is still the same call.
     assert_eq!(app.call.since(), since);
     assert_eq!(app.devices.playing.load(Ordering::Relaxed), 1);
     app.until("the loss", |call| *call.phase() == Phase::Failed(Failure::ConnectionLost));
@@ -335,7 +311,6 @@ fn a_call_this_device_joined_again_elsewhere_ends_and_stays_ended() {
     app.until("the replacement", |call| *call.phase() == Phase::Failed(Failure::Replaced));
     app.settle();
     assert_eq!(app.devices.playing.load(Ordering::Relaxed), 0);
-    // The place stays elsewhere: the call ended here doesn't take it back.
     elsewhere.settle();
     assert_eq!(*elsewhere.call.phase(), Phase::Connected);
     assert_eq!(*app.call.phase(), Phase::Failed(Failure::Replaced));

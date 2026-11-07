@@ -1,6 +1,3 @@
-//! A slider: a value on a rail between its least and its most, in steps, set by a click or a
-//! drag along it, or by the arrow keys once it has the focus.
-
 use gpui::{
     App, Bounds, Context, Corners, CursorStyle, DispatchPhase, Element, ElementId, EventEmitter, FocusHandle, GlobalElementId, Hitbox,
     HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -11,15 +8,7 @@ use gpui::{
 use crate::ui::marks::Mark;
 use crate::ui::theme::{self, ActiveTokens};
 
-actions!(
-    slider,
-    [
-        /// One step less.
-        Decrease,
-        /// One step more.
-        Increase
-    ]
-);
+actions!(slider, [Decrease, Increase]);
 
 const CONTEXT: &str = "Slider";
 
@@ -32,7 +21,6 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-/// The value moved: while it is dragged, and done once the drag or the key that moved it ends.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SliderEvent {
     pub value: f32,
@@ -44,10 +32,8 @@ pub struct Slider {
     least: f32,
     most: f32,
     step: f32,
-    /// What it is a value of, for those who don't see the row it sits in.
     label: &'static str,
     focus: FocusHandle,
-    /// Whether the knob follows the pointer, which was pressed on the rail.
     dragging: bool,
 }
 
@@ -58,7 +44,6 @@ impl Slider {
         Self { value: snap(value, least, most, step), least, most, step, label, focus: cx.focus_handle().tab_stop(true), dragging: false }
     }
 
-    /// How far along the rail the value is, from 0 to 1.
     fn fraction(&self) -> f32 {
         (self.value - self.least) / (self.most - self.least)
     }
@@ -72,7 +57,6 @@ impl Slider {
         }
     }
 
-    /// Sets the value under the pointer, `x` along the rail that lies in `bounds`.
     fn set_at(&mut self, x: Pixels, bounds: Bounds<Pixels>, done: bool, cx: &mut Context<Self>) {
         let along = (x - bounds.left()) / bounds.size.width;
         self.set(self.least + along.clamp(0., 1.) * (self.most - self.least), done, cx);
@@ -87,7 +71,6 @@ impl Slider {
     }
 }
 
-/// The step nearest to `value`, within the least and the most.
 fn snap(value: f32, least: f32, most: f32, step: f32) -> f32 {
     (least + ((value - least) / step).round() * step).clamp(least, most)
 }
@@ -115,8 +98,6 @@ impl Render for Slider {
     }
 }
 
-/// The rail, filled up to the knob, which takes the pointer: pressed on it, the pointer keeps
-/// moving the knob until released, wherever it goes.
 struct Rail {
     slider: gpui::Entity<Slider>,
 }
@@ -176,8 +157,7 @@ impl Element for Rail {
     ) {
         let tokens = cx.tokens();
         let knob = theme::SLIDER_KNOB;
-        // The knob's middle travels between its half-widths in from the ends, so it never
-        // reaches past them.
+        // The knob's middle stays a half-width in from the ends, so it never reaches past them.
         let rail = Bounds::new(
             point(bounds.left() + knob / 2., bounds.center().y - theme::SLIDER_RAIL / 2.),
             size(bounds.size.width - knob, theme::SLIDER_RAIL),

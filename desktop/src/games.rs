@@ -1,7 +1,3 @@
-//! The games the app joins the call for: whether one runs, looked at every few seconds on a
-//! thread of its own, and what runs now that could be one. A game is known by the file name of
-//! its program, as Windows and the others name its process.
-
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -10,13 +6,10 @@ use std::time::Duration;
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-/// How often the watcher looks: a game takes longer than this to start.
 const LOOK: Duration = Duration::from_secs(3);
 
-/// Fortnite's program, which the app joins for unless told otherwise.
 pub const FORTNITE: &str = "FortniteClient-Win64-Shipping.exe";
 
-/// Games by their programs, and what they are called.
 const KNOWN: &[(&str, &str)] = &[(FORTNITE, "Fortnite")];
 
 #[derive(Debug, thiserror::Error)]
@@ -27,11 +20,8 @@ pub enum Error {
     Thread(#[from] std::io::Error),
 }
 
-/// How many programs [`running`] offers at most.
 const OFFERED: usize = 8;
 
-/// What a game's program is called: its game's name if known, else the file's without its
-/// extension.
 pub fn title(program: &str) -> &str {
     KNOWN
         .iter()
@@ -39,8 +29,6 @@ pub fn title(program: &str) -> &str {
         .map_or_else(|| program.rsplit_once('.').map_or(program, |(stem, _)| stem), |(_, title)| title)
 }
 
-/// The programs running, by their file names, the largest first, which a game is among while it
-/// runs; the app's own left out.
 pub fn running() -> Result<Vec<String>, Error> {
     let mut system = System::new()?;
     system.refresh_processes_specifics(
@@ -64,27 +52,21 @@ pub fn running() -> Result<Vec<String>, Error> {
     Ok(programs.into_iter().take(OFFERED).map(|(file, _)| file).collect())
 }
 
-/// The file name of a process's program; its own name where its program isn't readable, as
-/// another user's isn't.
 fn program(process: &sysinfo::Process) -> Option<String> {
     let name = process.exe().and_then(|path| path.file_name()).unwrap_or_else(|| process.name());
     let name = name.to_string_lossy();
     (!name.is_empty()).then(|| name.into_owned())
 }
 
-/// Whether one of `games` is among `programs`, by their file names, case aside.
 fn any_runs<'a>(games: &[String], mut programs: impl Iterator<Item = &'a str>) -> bool {
     programs.any(|program| games.iter().any(|game| game.eq_ignore_ascii_case(program)))
 }
 
-/// Looks every few seconds whether one of its games runs, and tells each time that changes; it
-/// stops when dropped.
 pub struct Watcher {
     games: mpsc::Sender<Vec<String>>,
 }
 
 impl Watcher {
-    /// Watches for `games`, telling `runs` whether one does, first right away.
     pub fn new(games: Vec<String>, runs: impl Fn(bool) + Send + 'static) -> Result<Self, Error> {
         let (sender, received) = mpsc::channel();
         let mut system = System::new()?;
@@ -110,9 +92,8 @@ impl Watcher {
         Ok(Self { games: sender })
     }
 
-    /// Watches for `games` from now on.
     pub fn set(&self, games: Vec<String>) {
-        // The thread ends only when this drops.
+        // The thread runs as long as this.
         let _ = self.games.send(games);
     }
 }

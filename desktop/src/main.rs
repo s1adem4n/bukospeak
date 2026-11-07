@@ -1,5 +1,3 @@
-//! The BukoSpeak desktop app, for Windows, macOS and Linux.
-
 // A release started from the desktop opens no console window beside its own on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -25,19 +23,16 @@ use bukospeak_desktop::call::Phase;
 use bukospeak_desktop::ui::{self, Client, Desktop, Trouble};
 use bukospeak_desktop::update::{self, Updater};
 
-/// What the tray, the hotkey or a later start asks the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Open,
-    /// Joins the call, or leaves it if in it or joining.
     ToggleCall,
     ToggleMute,
     Quit,
 }
 
-/// Sends an action to the app.
 fn send(actions: &UnboundedSender<Action>, action: Action) {
-    // A closed channel means the app is quitting, when nothing is left to do.
+    // Closed only while the app quits.
     let _ = actions.unbounded_send(action);
 }
 
@@ -48,7 +43,6 @@ fn main() {
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
-    // Every desktop system has one; without a home there is nowhere to keep anything.
     let folder = bukospeak_desktop::config_folder().expect("the system has a config folder");
     let (actions, asked) = mpsc::unbounded();
     if !instance::take(&folder, actions.clone()) {
@@ -63,37 +57,31 @@ fn main() {
         }
     };
     let (call, happenings) = Call::new(DesktopPlayer).expect("the engine's threads start");
-    // The system starts the app so, with it: into the tray, unless the window is needed.
     let background = std::env::args().any(|argument| argument == BACKGROUND);
 
     let app = gpui_platform::application().with_assets(ui::Assets);
-    // The dock's icon, clicked while the window is closed.
+    // On macOS, the dock's icon clicked while the window is closed.
     let reopen = actions.clone();
     app.on_reopen(move |_| send(&reopen, Action::Open));
     app.run(move |cx| {
         ui::init(cx);
-        // Wayland has no keys for every app; GPUI on X11 or another system says something else.
+        // Wayland has no keys for every app.
         let hotkey = (cx.compositor_name() != "Wayland").then(|| Hotkey::new(actions.clone())).flatten();
         let mute_keys = hotkey.as_ref().map(|_| keys::KEYS);
         let client = cx.new(|cx| Client::new(call, happenings, Arc::new(Desktop::new(settings_path)), settings, trouble, mute_keys, cx));
         let updater = Updater::new(client.clone(), cx);
         client.update(cx, |client, cx| client.start_with_system(cx));
         let tray = show_tray(&client, actions.clone(), cx);
-        // Without a tray the app is its window: closing it leaves the call and quits. With one,
-        // the app goes on in the tray until it is told to quit there.
         cx.set_quit_mode(if tray { QuitMode::Explicit } else { QuitMode::LastWindowClosed });
-        // It lives as long as the app.
         let autopilot = Autopilot::new(client.clone(), cx);
         follow(asked, client.clone(), updater.clone(), hotkey, autopilot, cx);
-        // Without a tray, or without a server to join, the window is needed.
-        if !(background && tray && client.read(cx).settings.is_complete()) {
+        let stays_in_tray = background && tray && client.read(cx).settings.is_complete();
+        if !stays_in_tray {
             ui::start(client, updater, cx);
         }
     });
 }
 
-/// Shows the app in the tray, if the system has one, following where one stands in the call;
-/// true if it is shown.
 fn show_tray(client: &Entity<Client>, actions: UnboundedSender<Action>, cx: &mut App) -> bool {
     let Some(tray) = Tray::new(actions) else {
         return false;
@@ -108,12 +96,10 @@ fn show_tray(client: &Entity<Client>, actions: UnboundedSender<Action>, cx: &mut
         tray.show(standing, call.is_muted());
     };
     show(client.read(cx));
-    // The tray lives as long as this.
     cx.observe(client, move |client, cx| show(client.read(cx))).detach();
     true
 }
 
-/// Does what is asked, as long as the app runs; the hotkey stays registered as long.
 fn follow(
     mut asked: UnboundedReceiver<Action>,
     client: Entity<Client>,
@@ -134,7 +120,6 @@ fn follow(
                     } else if read.settings.is_complete() {
                         client.update(cx, |client, cx| client.join(cx));
                     } else {
-                        // The server to join is given in the window.
                         open(&client, &updater, cx);
                     }
                 }
@@ -146,11 +131,10 @@ fn follow(
     .detach();
 }
 
-/// Shows the window, opening it if it isn't.
 fn open(client: &Entity<Client>, updater: &Option<Entity<Updater>>, cx: &mut App) {
     match cx.windows().first() {
         Some(window) => {
-            // The window is there, so updating it can't fail for its absence.
+            // Fails only for a window that is gone.
             let _ = window.update(cx, |_, window, _| window.activate_window());
         }
         None => ui::open(client.clone(), updater.clone(), cx),

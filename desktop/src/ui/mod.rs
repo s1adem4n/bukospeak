@@ -1,7 +1,3 @@
-//! The window: a welcome the first time, then the channel with who is in it and the dock to
-//! join, mute and leave; and the settings. Before it, at the start, the update window, while a
-//! newer release is looked for.
-
 mod chrome;
 mod client;
 mod glyph;
@@ -13,8 +9,8 @@ mod text;
 pub(crate) mod theme;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, AppContext, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement,
-    KeyBinding, ParentElement, Render, Styled, Subscription, Window, WindowOptions, actions, div, ease_out_quint, size,
+    Animation, AnimationExt, App, AppContext, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyBinding,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, WindowOptions, actions, div, ease_out_quint, size,
 };
 
 use crate::ui::chrome::TitleBar;
@@ -27,22 +23,10 @@ use crate::ui::screens::{Channel, ChannelEvent, Settings, Update, Welcome, Welco
 use crate::ui::theme::{ActiveTokens, Typeset};
 use crate::update::Updater;
 
-actions!(
-    bukospeak,
-    [
-        /// Escape: closes the settings.
-        Back,
-        /// Tab: the focus on to the next control.
-        FocusNext,
-        /// Shift-Tab: back to the one before.
-        FocusPrevious
-    ]
-);
+actions!(bukospeak, [Back, FocusNext, FocusPrevious]);
 
-/// The key context of the window's content, which Back is bound in.
 const CONTEXT: &str = "Main";
 
-/// Installs the looks and binds the keys, once, before a window opens.
 pub fn init(cx: &mut App) {
     theme::install(cx);
     kit::init(cx);
@@ -53,17 +37,11 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-/// Opens the window at the start: with an updater, the update window first, which opens it.
 pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut App) {
     let Some(updater) = updater else {
         return open(client, None, cx);
     };
-    // No title bar: the window is moved by any of it.
-    let options = WindowOptions {
-        is_resizable: false,
-        is_minimizable: false,
-        ..chrome::options(size(theme::UPDATE_WINDOW.0, theme::UPDATE_WINDOW.1), cx)
-    };
+    let options = WindowOptions { is_minimizable: false, ..chrome::options(size(theme::UPDATE_WINDOW.0, theme::UPDATE_WINDOW.1), cx) };
     cx.open_window(options, |window, cx| {
         theme::follow(window, cx);
         cx.new(|cx| Update::new(client, updater, window, cx))
@@ -72,12 +50,9 @@ pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut 
     cx.activate(true);
 }
 
-/// Opens the window, which shows the client and a release the updater waits to install.
 pub fn open(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut App) {
     let (width, height) = theme::WINDOW;
-    let (least_width, least_height) = theme::WINDOW_MIN;
-    let options = WindowOptions { window_min_size: Some(size(least_width, least_height)), ..chrome::options(size(width, height), cx) };
-    cx.open_window(options, |window, cx| {
+    cx.open_window(chrome::options(size(width, height), cx), |window, cx| {
         theme::follow(window, cx);
         cx.new(|cx| Main::new(client, updater, window, cx))
     })
@@ -85,23 +60,16 @@ pub fn open(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut A
     cx.activate(true);
 }
 
-/// What went wrong with the settings themselves, beside the call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trouble {
-    /// The settings file couldn't be read: the app starts from the defaults.
     Unreadable,
     NotSaved,
-    /// The server offers no NVIDIA effects for the card: Standard suppresses the noise.
     NvidiaUnavailable,
-    /// NVIDIA's effects didn't install: Standard suppresses the noise.
     NvidiaNotInstalled,
-    /// NVIDIA's effect didn't start: Standard suppresses the noise instead.
     NvidiaFailed,
-    /// The system wasn't told to start the app with it, or not to any more.
     StartNotSet,
 }
 
-/// The screen the window shows.
 enum Screen {
     Channel(Entity<Channel>),
     Welcome(Entity<Welcome>),
@@ -112,9 +80,7 @@ pub struct Main {
     client: Entity<Client>,
     updater: Option<Entity<Updater>>,
     screen: Screen,
-    /// Where the focus rests between fields, so the window's keys reach it.
     focus: FocusHandle,
-    /// What the window hears from its screen, if the screen tells it anything.
     _screen: Option<Subscription>,
     _subscriptions: [Subscription; 2],
 }
@@ -123,7 +89,6 @@ impl Main {
     pub(crate) fn new(client: Entity<Client>, updater: Option<Entity<Updater>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&client, |_, _, cx| cx.notify());
         let appearance = cx.observe_window_appearance(window, |_, window, cx| theme::follow(window, cx));
-        // A closed window no longer shows who is in the channel, nor the microphone's level.
         cx.on_release(|main, cx| {
             main.client.update(cx, |client, _| {
                 client.set_lobby(false);
@@ -149,10 +114,7 @@ impl Main {
         cx: &mut Context<Self>,
     ) -> (Screen, Subscription) {
         let channel = cx.new(|cx| Channel::new(client.clone(), updater.cloned(), cx));
-        let subscription = cx.subscribe_in(&channel, window, |main, _, event: &ChannelEvent, window, cx| match event {
-            ChannelEvent::Settings => main.show_settings(window, cx),
-            ChannelEvent::Setup => main.show_welcome(window, cx),
-        });
+        let subscription = cx.subscribe_in(&channel, window, |main, _, _: &ChannelEvent, window, cx| main.show_welcome(window, cx));
         (Screen::Channel(channel), subscription)
     }
 
@@ -167,7 +129,7 @@ impl Main {
 
     fn show(&mut self, screen: Screen, subscription: Option<Subscription>, window: &mut Window, cx: &mut Context<Self>) {
         (self.screen, self._screen) = (screen, subscription);
-        // The fields of the screen before had the focus; the window's keys need it to go on.
+        // The previous screen's fields had the focus; the window's keys need it back.
         if !matches!(self.screen, Screen::Welcome(_)) {
             window.focus(&self.focus, cx);
         }
@@ -191,8 +153,6 @@ impl Main {
         self.show(Screen::Settings(settings), None, window, cx);
     }
 
-    /// Watches who is in the channel while the window shows it, and listens to the microphone
-    /// while the settings show its level; only then.
     fn watch(&self, cx: &mut Context<Self>) {
         let (lobby, listening) = (matches!(self.screen, Screen::Channel(_)), matches!(self.screen, Screen::Settings(_)));
         self.client.update(cx, |client, _| {
@@ -218,64 +178,43 @@ impl Main {
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> TitleBar {
         let tokens = cx.tokens();
-        let inset = kit::icon_inset(Size::Small);
-        // Buttons cover the bar they sit on, which on Windows is the window's caption: else the
-        // system takes their clicks for dragging the window.
-        let content: Option<AnyElement> = match &self.screen {
-            Screen::Channel(_) => Some(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(tokens.text_muted)
-                            .child(host(&self.client.read(cx).settings.server).to_owned()),
-                    )
-                    .child(
-                        div().occlude().child(
-                            Button::new("settings", Variant::Ghost)
-                                .size(Size::Small)
-                                .square()
-                                .icon(Glyph::Settings)
-                                .tooltip("Einstellungen")
-                                .on_click(cx.listener(|main, _, window, cx| main.show_settings(window, cx))),
-                        ),
-                    )
-                    .into_any_element(),
-            ),
-            Screen::Settings(_) => Some(
-                div()
-                    .occlude()
-                    // The chevron's stroke, not its blank, lines up with the panels' edges.
-                    .ml(-inset - theme::BACK_BEARING)
-                    .child(
-                        Button::new("back", Variant::Ghost)
-                            .size(Size::Small)
-                            .pl(inset)
-                            // The title starts where the settings' titles and labels do.
-                            .gap(theme::PANEL_INSET - theme::ICON + theme::BACK_BEARING)
-                            .text_color(tokens.text)
-                            .icon(Glyph::Back)
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Einstellungen"))
-                            .on_click(cx.listener(|main, _, window, cx| main.show_channel(window, cx))),
-                    )
-                    .into_any_element(),
-            ),
-            Screen::Welcome(_) => None,
+        let (title, open) = match &self.screen {
+            Screen::Channel(_) => (SharedString::from(host(&self.client.read(cx).settings.server).to_owned()), false),
+            Screen::Settings(_) => ("Einstellungen".into(), true),
+            Screen::Welcome(_) => return TitleBar::new(None),
         };
-        // A button's icon lines up on the bar's inset, the button's surface reaching past it.
-        TitleBar::new(content.map(|content| h_flex().flex_1().min_w_0().h_full().mr(-inset).child(content).into_any_element()))
+        let content = h_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .justify_between()
+            .gap(theme::GAP)
+            // The icon lines up on the bar's inset; its surface reaches past it.
+            .mr(-kit::icon_inset(Size::Small))
+            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).text_color(tokens.text_muted).child(title))
+            .child(
+                // Buttons cover the bar they sit on, which on Windows is the window's caption:
+                // else the system takes their clicks for dragging the window.
+                div().occlude().child(
+                    Button::new("settings", Variant::Ghost)
+                        .size(Size::Small)
+                        .square()
+                        .icon(Glyph::Settings)
+                        .selected(open)
+                        .name("Einstellungen")
+                        .on_click(cx.listener(move |main, _, window, cx| match open {
+                            true => main.show_channel(window, cx),
+                            false => main.show_settings(window, cx),
+                        })),
+                ),
+            );
+        TitleBar::new(Some(content.into_any_element()))
     }
 }
 
 impl Render for Main {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A screen comes on from the side it lies on: the settings beyond the channel.
-        let (content, screen, from) = match &self.screen {
+        let (content, screen, enters_from) = match &self.screen {
             Screen::Channel(channel) => (channel.clone().into_any_element(), 0_usize, -1.),
             Screen::Welcome(welcome) => (welcome.clone().into_any_element(), 1, 0.),
             Screen::Settings(settings) => (settings.clone().into_any_element(), 2, 1.),
@@ -283,7 +222,7 @@ impl Render for Main {
         let content = div().relative().flex_1().min_h_0().flex().flex_col().child(content).with_animation(
             ("screen", screen),
             Animation::new(theme::APPEAR).with_easing(ease_out_quint()),
-            move |content, delta| content.opacity(delta).left(theme::RISE * from * (1. - delta)),
+            move |content, delta| content.opacity(delta).left(theme::RISE * enters_from * (1. - delta)),
         );
         let tokens = cx.tokens();
         let main = div()
@@ -306,7 +245,6 @@ impl Render for Main {
     }
 }
 
-/// The host of a server's address, without its port: what the title bar names it by.
 fn host(server: &str) -> &str {
     match server.rsplit_once(':') {
         // An IPv6 address alone has colons too, but no port after a bracket.

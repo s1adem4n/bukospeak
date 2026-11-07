@@ -1,7 +1,3 @@
-//! The update window, at the start: it shows the updater looking for a newer release and
-//! downloading and installing one it found, and opens the app's window in its place once there
-//! is none, or once looking takes longer than the start should wait.
-
 use std::time::Duration;
 
 use gpui::{
@@ -15,14 +11,11 @@ use crate::ui::kit::{self, Spinner, v_flex};
 use crate::ui::theme::{self, ActiveTokens, Typeset};
 use crate::update::{State, Updater};
 
-/// How long the start waits for the updater to learn whether there is a newer release; one it
-/// learns of later is installed once no call is up.
-const PATIENCE: Duration = Duration::from_secs(3);
+const MAX_CHECK_WAIT: Duration = Duration::from_secs(3);
 
 pub struct Update {
     client: Entity<Client>,
     updater: Entity<Updater>,
-    /// Whether the app's window is open, this one closing.
     done: bool,
     _subscriptions: [Subscription; 2],
     _patience: Task<()>,
@@ -38,8 +31,7 @@ impl Update {
         });
         let appearance = cx.observe_window_appearance(window, |_, window, cx| theme::follow(window, cx));
         let patience = cx.spawn_in(window, async move |update, cx| {
-            cx.background_executor().timer(PATIENCE).await;
-            // Gone with its window, when the app's is open already.
+            cx.background_executor().timer(MAX_CHECK_WAIT).await;
             let _ = update.update_in(cx, |update, window, cx| {
                 if *update.updater.read(cx).state() == State::Checking {
                     update.open_app(window, cx);
@@ -49,7 +41,6 @@ impl Update {
         Self { client, updater, done: false, _subscriptions: [observed, appearance], _patience: patience }
     }
 
-    /// Opens the app's window in this one's place.
     fn open_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.done {
             return;
@@ -82,7 +73,7 @@ impl Render for Update {
             .size_full()
             .items_center()
             .justify_center()
-            .gap_6()
+            .gap(theme::SECTION)
             .bg(tokens.base)
             .font_family(theme::SANS)
             .text_color(tokens.text)
@@ -92,7 +83,7 @@ impl Render for Update {
             .child(
                 v_flex()
                     .items_center()
-                    .gap_1()
+                    .gap(theme::LINE)
                     .child(div().typeset(theme::TEXT_MD).font_weight(FontWeight::MEDIUM).child(headline))
                     .child(div().font_family(theme::MONO).typeset(theme::TEXT_SM).text_color(tokens.text_faint).child(versions)),
             )

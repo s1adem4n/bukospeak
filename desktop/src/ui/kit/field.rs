@@ -1,6 +1,3 @@
-//! Text fields in the app's looks: [`Field`], always open for typing, and [`InlineField`], which
-//! shows its value until clicked and keeps what was typed once Enter is pressed or the focus goes.
-
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding,
@@ -10,13 +7,7 @@ use gpui::{
 use crate::ui::kit::{Button, Size, TextField, TextFieldEvent, Variant, h_flex};
 use crate::ui::theme::{self, ActiveTokens, Typeset};
 
-actions!(
-    inline_field,
-    [
-        /// Escape while editing: the field goes back to what it held.
-        Cancel
-    ]
-);
+actions!(inline_field, [Cancel]);
 
 const CONTEXT: &str = "InlineField";
 
@@ -24,8 +15,6 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Cancel, Some(CONTEXT))]);
 }
 
-/// A text field as large as a button of its size, set into the panel it is on; its edge lights
-/// up while it has the focus. Its text takes the text style it is given.
 #[derive(IntoElement)]
 pub struct Field {
     field: Entity<TextField>,
@@ -65,19 +54,13 @@ impl RenderOnce for Field {
     }
 }
 
-/// What an inline field holds changed: an edit ended with another value than before.
 pub struct InlineFieldEvent(pub String);
 
-/// A value read character by character, as a server, shown at a row's end in the mono font,
-/// quieter than the row's label, until clicked, then edited in place: Enter or the focus going
-/// keeps what was typed, Escape goes back.
 pub struct InlineField {
     field: Entity<TextField>,
     placeholder: SharedString,
-    /// The value outside an edit: kept, shown, and gone back to on Escape.
     value: String,
     editing: bool,
-    /// Where the focus goes after an edit, so the keys go on from here.
     focus: FocusHandle,
     _events: Subscription,
 }
@@ -117,7 +100,6 @@ impl InlineField {
         }
     }
 
-    /// Ends an edit without keeping it; outside an edit, Escape goes on to the window.
     fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing {
             self.end(window, cx);

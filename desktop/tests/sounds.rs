@@ -1,5 +1,3 @@
-//! The server's sounds, installed by the app from a real server as they are there now.
-
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -9,13 +7,11 @@ use bukospeak_desktop::cues;
 use bukospeak_server::{Device, Downloads, Room, Sounds};
 use tokio::runtime::Runtime;
 
-/// A folder of the test's own, removed when it drops.
 struct Folder(PathBuf);
 
 impl Folder {
     fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!("bukospeak-test-sounds-{name}-{}", std::process::id()));
-        // Left over from a run that didn't finish, if at all.
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         Self(path)
@@ -24,12 +20,10 @@ impl Folder {
 
 impl Drop for Folder {
     fn drop(&mut self) {
-        // A folder in the system's temporary folder left behind does no harm.
         let _ = fs::remove_dir_all(&self.0);
     }
 }
 
-/// A server offering the sounds in its folder `sounds`.
 struct Server {
     _runtime: Runtime,
     address: String,
@@ -37,7 +31,6 @@ struct Server {
     _folder: Folder,
 }
 
-/// A tailnet in which each connection is a device of its own.
 fn own(peer: SocketAddr) -> Option<Device> {
     Some(Device { id: peer.to_string(), name: format!("member {}", peer.port()) })
 }

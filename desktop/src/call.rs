@@ -1,15 +1,3 @@
-//! The call as the desktop app has it: joins, leaves and watches the channel on a worker thread
-//! of its own, plays the call through a [`Player`], and keeps what the window shows of it. Out
-//! of a call, the player listens to the input alone while asked to, for the meter.
-//!
-//! Joins and leaves block on the server, so they run on the worker, one after the other. What
-//! comes back, from the worker and from the engine, arrives as [`Happening`]s on one channel,
-//! which the app hands to [`Call::happen`] on its own thread, in order.
-//!
-//! Each of the engine's updates tells which of its joins it is of, and its leave returns the
-//! last: the worker hands that back in order with the updates, and updates of a call left, still
-//! on their way, are dropped.
-
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -24,65 +12,46 @@ use bukospeak_core::{
 };
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
-/// Where the call is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Phase {
     Idle,
     Joining,
     Connected,
-    /// The connection was lost, and the engine joins again.
     Reconnecting,
     Failed(Failure),
 }
 
-/// Why a join failed or a call ended without a leave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     Rejected(Rejection),
-    /// The server's name doesn't resolve.
     NotFound,
-    /// The server didn't answer the join in time.
     NoAnswer,
-    /// No connection to the server came about, or it broke during the join.
     Unreachable,
-    /// The microphone and speakers didn't start.
     Audio,
-    /// The connection was lost, and joining again failed.
     ConnectionLost,
-    /// This device joined the channel again elsewhere, as another of its clients, which took
-    /// the call's place: the call isn't joined again, else the two would take turns.
     Replaced,
 }
 
-/// Something the user should know beside the call, which goes on without it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
-    /// A device isn't there, or no device is.
     DeviceMissing(Direction),
-    /// A device is there but doesn't play.
     DeviceFailed(Direction),
 }
 
-/// The devices a call plays on; the system's defaults for None.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Devices {
     pub input: Option<DeviceId>,
     pub output: Option<DeviceId>,
 }
 
-/// What a call needs to join.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Join {
-    /// The server as `host:port`.
     pub server: String,
     pub devices: Devices,
 }
 
-/// Hears why a device doesn't play, once each time it stops.
 pub type Report = Box<dyn Fn(audio::Error) + Send>;
 
-/// Plays a call's two ends, or listens to the input alone, `meter` measuring the input either
-/// way: on the desktop's devices, or on stand-ins in tests.
 pub trait Player: Send + 'static {
     fn play(
         &mut self,
@@ -96,12 +65,10 @@ pub trait Player: Send + 'static {
     fn listen(&mut self, meter: &Meter, input: Option<&DeviceId>, report: Report) -> io::Result<Box<dyn Playing>>;
 }
 
-/// A call playing, or the input listened to, until it is dropped.
 pub trait Playing: Send {
     fn set_device(&self, direction: Direction, device: Option<DeviceId>);
 }
 
-/// Plays calls on the desktop's devices.
 pub struct DesktopPlayer;
 
 impl Player for DesktopPlayer {
@@ -131,16 +98,12 @@ impl Playing for Audio {
     }
 }
 
-/// Something that came back from the worker or the engine, for [`Call::happen`].
 pub struct Happening(Event);
 
 enum Event {
     Update(Box<Update>),
-    /// A join came back; the number is the one [`Call`] gave it.
     Joined(u64, Result<(), Failure>),
-    /// A leave came back with the engine's call it left.
     Left(u64),
-    /// A call's device report, by the call's number.
     Device(u64, audio::Error),
 }
 
@@ -153,36 +116,21 @@ enum Command {
     SetDevice(Direction, Option<DeviceId>),
 }
 
-/// The call: joins and leaves the channel, and keeps what the window shows of it.
 pub struct Call {
     engine: Arc<Engine>,
     commands: Option<mpsc::Sender<Command>>,
     worker: Option<thread::JoinHandle<()>>,
-    /// The number of the call the worker should play; 0 for none. A join that comes back with
-    /// another doesn't play, and the leave after it ends it.
-    current: Arc<AtomicU64>,
-    numbers: u64,
-    /// The join under way or the call up, by its number.
+    call_to_play: Arc<AtomicU64>,
+    last_number: u64,
     call: Option<u64>,
-    /// Whether the call's join came back.
-    joined: bool,
-    /// When the join under way or the call up was asked for, for the log to tell how long each
-    /// step of the join took.
-    asked: Instant,
-    /// When the call came up, joining again within it included; None out of a call.
-    since: Option<Instant>,
-    /// Leaves sent whose engine call hasn't come back: updates meanwhile may be of the call left.
-    leaves: usize,
-    /// The engine's call left last: updates of it or of one before are stale.
-    left_call: u64,
-    /// The server to watch while out of a call, if any.
+    join_came_back: bool,
+    join_asked: Instant,
+    up_since: Option<Instant>,
+    pending_leaves: usize,
+    last_left_call: u64,
     watched: Option<String>,
-    /// How loud the input is, in a call or listened to.
     meter: Meter,
-    /// Whether the input is to be listened to out of a call.
     listening: bool,
-    /// The call as the engine told it last, which may join again before its join came back
-    /// here; empty out of a call.
     channel: Channel,
     phase: Phase,
     present: Vec<Member>,
@@ -190,27 +138,20 @@ pub struct Call {
     notice: Option<Notice>,
 }
 
-/// A call as the harness shows it: who is in it, and where it stands.
 #[cfg(feature = "harness")]
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub phase: Phase,
-    /// This member, while in the call.
     pub you: Option<MemberId>,
-    /// Everyone in the call, this member included.
     pub members: Vec<Member>,
     pub speaking: Vec<MemberId>,
-    /// Who is in the channel, watched from outside it.
     pub present: Vec<Member>,
     pub muted: bool,
     pub notice: Option<Notice>,
-    /// How long the call has been up.
     pub up_for: Option<std::time::Duration>,
 }
 
 impl Call {
-    /// A call as `stage` says, for the harness: it has no worker, so it joins, watches and plays
-    /// nothing, and stays where it is staged until staged anew.
     #[cfg(feature = "harness")]
     pub fn staged(stage: Stage) -> io::Result<(Self, UnboundedReceiver<Happening>)> {
         let (happenings, received) = unbounded();
@@ -219,14 +160,14 @@ impl Call {
             engine,
             commands: None,
             worker: None,
-            current: Arc::new(AtomicU64::new(0)),
-            numbers: 0,
+            call_to_play: Arc::new(AtomicU64::new(0)),
+            last_number: 0,
             call: None,
-            joined: false,
-            asked: Instant::now(),
-            since: None,
-            leaves: 0,
-            left_call: 0,
+            join_came_back: false,
+            join_asked: Instant::now(),
+            up_since: None,
+            pending_leaves: 0,
+            last_left_call: 0,
             watched: None,
             meter: Meter::default(),
             listening: false,
@@ -240,7 +181,6 @@ impl Call {
         Ok((call, received))
     }
 
-    /// Takes on what `stage` says.
     #[cfg(feature = "harness")]
     pub fn stage(&mut self, stage: Stage) {
         let state = match stage.phase {
@@ -249,28 +189,26 @@ impl Call {
             Phase::Idle | Phase::Joining | Phase::Failed(_) => State::Out,
         };
         self.channel = Channel::shown(state, stage.you, stage.members, stage.speaking);
-        self.joined = matches!(stage.phase, Phase::Connected | Phase::Reconnecting);
+        self.join_came_back = matches!(stage.phase, Phase::Connected | Phase::Reconnecting);
         self.phase = stage.phase;
         self.present = stage.present;
         self.muted = stage.muted;
         self.notice = stage.notice;
-        self.since = stage.up_for.map(|up_for| Instant::now() - up_for);
+        self.up_since = stage.up_for.map(|up_for| Instant::now() - up_for);
     }
 
-    /// A call with no one in it yet, which plays through `player`; what happens comes on the
-    /// receiver.
     pub fn new(player: impl Player) -> io::Result<(Self, UnboundedReceiver<Happening>)> {
         let (happenings, received) = unbounded();
-        // The desktop's audio passes the microphone's signal as it is.
+        // Desktop devices pass the microphone's signal unprocessed.
         let engine = Arc::new(Engine::new(Conditioning::Engine, Arc::new(Forward(happenings.clone())))?);
         let (commands, inbox) = mpsc::channel();
-        let current = Arc::new(AtomicU64::new(0));
+        let call_to_play = Arc::new(AtomicU64::new(0));
         let meter = Meter::default();
         let worker = Worker {
             engine: Arc::clone(&engine),
             player: Box::new(player),
             happenings,
-            current: Arc::clone(&current),
+            call_to_play: Arc::clone(&call_to_play),
             meter: meter.clone(),
             devices: Devices::default(),
             listening: false,
@@ -282,14 +220,14 @@ impl Call {
             engine,
             commands: Some(commands),
             worker: Some(worker),
-            current,
-            numbers: 0,
+            call_to_play,
+            last_number: 0,
             call: None,
-            joined: false,
-            asked: Instant::now(),
-            since: None,
-            leaves: 0,
-            left_call: 0,
+            join_came_back: false,
+            join_asked: Instant::now(),
+            up_since: None,
+            pending_leaves: 0,
+            last_left_call: 0,
             watched: None,
             meter,
             listening: false,
@@ -306,38 +244,30 @@ impl Call {
         &self.phase
     }
 
-    /// Whether a call is up, joining again included.
     pub fn is_in_call(&self) -> bool {
         matches!(self.phase, Phase::Connected | Phase::Reconnecting)
     }
 
-    /// When the call came up, while it is up.
     pub fn since(&self) -> Option<Instant> {
-        self.since
+        self.up_since
     }
 
-    /// This member's id, while in the call.
     pub fn you(&self) -> Option<MemberId> {
         self.channel.you()
     }
 
-    /// Everyone in the call, this member included, in the order they came.
     pub fn members(&self) -> &[Member] {
         self.channel.members()
     }
 
-    /// Who speaks now, this member among them.
     pub fn speaking(&self) -> &[MemberId] {
         self.channel.speaking()
     }
 
-    /// Who is in the channel, watched from outside it.
     pub fn present(&self) -> &[Member] {
         &self.present
     }
 
-    /// Whether this member is muted: the microphone sends silence and the others see it muted.
-    /// It holds across calls.
     pub fn is_muted(&self) -> bool {
         self.muted
     }
@@ -346,29 +276,26 @@ impl Call {
         self.notice.as_ref()
     }
 
-    /// Joins the channel, unless a call is up or joining; the worker stops watching first.
     pub fn join(&mut self, join: Join) {
         if self.call.is_some() {
             return;
         }
-        self.numbers += 1;
-        let number = self.numbers;
+        self.last_number += 1;
+        let number = self.last_number;
         self.call = Some(number);
-        (self.joined, self.channel) = (false, Channel::default());
+        (self.join_came_back, self.channel) = (false, Channel::default());
         self.phase = Phase::Joining;
         self.notice = None;
-        self.current.store(number, Ordering::Relaxed);
-        self.asked = Instant::now();
+        self.call_to_play.store(number, Ordering::Relaxed);
+        self.join_asked = Instant::now();
         // The engine stops watching on a join.
-        self.send(Command::Join { number, join, asked: self.asked });
+        self.send(Command::Join { number, join, asked: self.join_asked });
     }
 
-    /// Leaves the call, or the join under way.
     pub fn leave(&mut self) {
         self.end(None);
     }
 
-    /// Forgets the failure and the notice the user has seen.
     pub fn dismiss(&mut self) {
         if matches!(self.phase, Phase::Failed(_)) {
             self.phase = Phase::Idle;
@@ -383,7 +310,6 @@ impl Call {
 
     pub fn set_suppression(&self, suppression: Suppression) {
         if let Err(error) = self.engine.set_suppression(suppression) {
-            // The call goes on with the suppression before; the next takes this one.
             tracing::warn!("making the noise suppression chosen: {error}");
         }
     }
@@ -392,17 +318,14 @@ impl Call {
         self.engine.set_echo_cancellation(on);
     }
 
-    /// How loud the others play, in percent of their level.
     pub fn set_volume(&self, percent: u16) {
         self.engine.set_volume(f32::from(percent) / 100.0);
     }
 
-    /// How loud the input is: in a call, or while listened to out of one.
     pub fn meter(&self) -> &Meter {
         &self.meter
     }
 
-    /// Listens to the input while out of a call, for the meter, or stops.
     pub fn listen(&mut self, on: bool) {
         if self.listening != on {
             self.listening = on;
@@ -410,12 +333,10 @@ impl Call {
         }
     }
 
-    /// Plays the call, and listens to the input, on another device from now on.
     pub fn set_device(&self, direction: Direction, device: Option<DeviceId>) {
         self.send(Command::SetDevice(direction, device));
     }
 
-    /// Watches who is in the channel on `server` while out of a call; for None, nowhere.
     pub fn watch(&mut self, server: Option<String>) {
         if self.watched != server {
             self.watched = server;
@@ -423,14 +344,13 @@ impl Call {
         }
     }
 
-    /// Takes in what came back.
     pub fn happen(&mut self, happening: Happening) {
         match happening.0 {
             Event::Update(update) => self.update(*update),
             Event::Joined(number, result) => self.joined(number, result),
             Event::Left(call) => {
-                self.leaves -= 1;
-                self.left_call = call;
+                self.pending_leaves -= 1;
+                self.last_left_call = call;
             }
             Event::Device(number, error) => {
                 tracing::warn!("{error}");
@@ -447,14 +367,14 @@ impl Call {
         }
         match result {
             Ok(()) => {
-                self.joined = true;
+                self.join_came_back = true;
                 self.follow();
             }
-            // The engine has a call for the audio that didn't start; the leave ends it.
+            // The engine holds a call for the audio that didn't start, which only a leave ends.
             Err(Failure::Audio) => self.end(Some(Failure::Audio)),
             Err(failure) => {
                 self.call = None;
-                self.current.store(0, Ordering::Relaxed);
+                self.call_to_play.store(0, Ordering::Relaxed);
                 self.phase = Phase::Failed(failure);
                 self.rewatch();
             }
@@ -464,8 +384,7 @@ impl Call {
     fn update(&mut self, update: Update) {
         let Update { channel, lost, .. } = update;
         self.present = channel.present().to_vec();
-        // Out of a call, or of one left whose last updates still arrive.
-        if self.call.is_none() || self.leaves > 0 || channel.call() <= self.left_call {
+        if self.is_stale(&channel) {
             return;
         }
         if let Some(lost) = lost {
@@ -480,43 +399,41 @@ impl Call {
         self.follow();
     }
 
-    /// Shows the call as the engine has it, once its join came back: up only once the engine
-    /// entered the channel too, so a call shows connected with who is in it.
+    fn is_stale(&self, channel: &Channel) -> bool {
+        self.call.is_none() || self.pending_leaves > 0 || channel.call() <= self.last_left_call
+    }
+
     fn follow(&mut self) {
-        if !self.joined {
+        if !self.join_came_back {
             return;
         }
         match self.channel.state() {
             State::Connected => {
                 if self.phase == Phase::Joining {
-                    log_step("the call shows connected", self.asked);
-                    self.since = Some(Instant::now());
+                    log_step("the call shows connected", self.join_asked);
+                    self.up_since = Some(Instant::now());
                 }
                 self.phase = Phase::Connected;
             }
             State::Reconnecting => self.phase = Phase::Reconnecting,
-            // Not entered yet: the update that tells who is in the call is still on its way. A
-            // call left or lost ended here before its last update.
+            // The update that tells who is in the call is still on its way.
             State::Out => {}
         }
     }
 
-    /// Ends the call on the screen at once, with why if it failed; the worker stops its audio
-    /// and leaves.
     fn end(&mut self, failure: Option<Failure>) {
         if self.call.take().is_none() {
             return;
         }
-        self.current.store(0, Ordering::Relaxed);
+        self.call_to_play.store(0, Ordering::Relaxed);
         self.channel = Channel::default();
-        self.since = None;
+        self.up_since = None;
         self.phase = failure.map_or(Phase::Idle, Phase::Failed);
-        self.leaves += 1;
+        self.pending_leaves += 1;
         self.send(Command::Leave);
         self.rewatch();
     }
 
-    /// Watches what is to be watched, while out of a call; the engine stops watching on a join.
     fn rewatch(&mut self) {
         if self.call.is_some() {
             return;
@@ -529,19 +446,16 @@ impl Call {
     }
 
     fn send(&self, command: Command) {
-        // A staged call has no worker: what it would do is left undone.
+        // A staged call has no worker.
         if let Some(commands) = &self.commands {
-            // The worker runs until the commands close, which they do only on drop.
             commands.send(command).expect("the worker runs while the call is there");
         }
     }
 }
 
 impl Drop for Call {
-    /// Stops the call's audio and leaves the call: a join under way finishes first, so this
-    /// may wait for the server.
     fn drop(&mut self) {
-        self.current.store(0, Ordering::Relaxed);
+        self.call_to_play.store(0, Ordering::Relaxed);
         self.commands = None;
         if let Some(worker) = self.worker.take() {
             worker.join().expect("the worker doesn't panic");
@@ -549,7 +463,6 @@ impl Drop for Call {
     }
 }
 
-/// What the user is told of a device's report.
 fn notice(error: &audio::Error) -> Notice {
     use audio::Error;
     match *error {
@@ -558,7 +471,6 @@ fn notice(error: &audio::Error) -> Notice {
     }
 }
 
-/// What the user is told of a failed join.
 fn failure(error: Error) -> Failure {
     match error {
         Error::Rejected(rejection) => Failure::Rejected(rejection),
@@ -575,35 +487,28 @@ fn failure(error: Error) -> Failure {
     }
 }
 
-/// Logs a step of a join, with how long after it was asked for it came.
 fn log_step(step: &str, asked: Instant) {
     tracing::info!("{step}: {} ms after the join was asked for", asked.elapsed().as_millis());
 }
 
-/// Hands the engine's updates on, without waiting.
 struct Forward(UnboundedSender<Happening>);
 
 impl Listener for Forward {
     fn update(&self, update: Update) {
-        // Closed only when the call is dropped, which stops the engine.
+        // Closed only once the call is dropped.
         let _ = self.0.unbounded_send(Happening(Event::Update(Box::new(update))));
     }
 }
 
-/// What the worker thread holds: it joins, leaves and watches, and holds the call's audio, or
-/// out of a call the input listened to.
 struct Worker {
     engine: Arc<Engine>,
     player: Box<dyn Player>,
     happenings: UnboundedSender<Happening>,
-    current: Arc<AtomicU64>,
+    call_to_play: Arc<AtomicU64>,
     meter: Meter,
-    /// The devices chosen last.
     devices: Devices,
     listening: bool,
-    /// The call's audio.
     playing: Option<Box<dyn Playing>>,
-    /// The input listened to; never while the call's audio plays.
     listened: Option<Box<dyn Playing>>,
 }
 
@@ -643,12 +548,11 @@ impl Worker {
         self.engine.leave();
     }
 
-    /// Listens to the input while asked to and no call plays, and only then.
     fn relisten(&mut self) {
         if !self.listening || self.playing.is_some() {
             self.listened = None;
         } else if self.listened.is_none() {
-            // An input that doesn't play leaves the meter still; the next call tells the user why.
+            // The next call tells the user why the input doesn't play.
             let report: Report = Box::new(|error| tracing::warn!("listening: {error}"));
             self.listened = self
                 .player
@@ -658,8 +562,6 @@ impl Worker {
         }
     }
 
-    /// Joins and starts the call's audio, and tells the call how it went; the audio returned
-    /// plays the call until the next leave.
     fn join(&mut self, number: u64, join: Join, asked: Instant) -> Option<Box<dyn Playing>> {
         let Join { server, devices } = join;
         self.devices = devices.clone();
@@ -673,16 +575,15 @@ impl Worker {
                 return self.joined(number, Err(failure(error)));
             }
         };
-        if self.current.load(Ordering::Relaxed) != number {
-            // Left while joining: the leave after this join ends the call before it plays.
+        if self.call_to_play.load(Ordering::Relaxed) != number {
+            // Left while joining: the leave queued behind this join ends the call.
             return None;
         }
         let happenings = self.happenings.clone();
         let report: Report = Box::new(move |error| {
-            // Closed only when the call is dropped, which stops the audio.
+            // Closed only once the call is dropped.
             let _ = happenings.unbounded_send(Happening(Event::Device(number, error)));
         });
-        // The input listened to gives way to the call's, which the meter measures from now on.
         self.listened = None;
         match self.player.play(microphone, speaker, &self.meter, &devices, report) {
             Ok(playing) => {
@@ -692,20 +593,18 @@ impl Worker {
             }
             Err(error) => {
                 tracing::warn!("the audio didn't start: {error}");
-                // The call leaves on this failure, which ends the engine's call.
                 self.joined(number, Err(Failure::Audio))
             }
         }
     }
 
-    /// Tells the call how its join went; nothing plays.
     fn joined(&self, number: u64, result: Result<(), Failure>) -> Option<Box<dyn Playing>> {
         self.tell(Event::Joined(number, result));
         None
     }
 
     fn tell(&self, event: Event) {
-        // Closed only when the call is dropped, which ends the worker after this command.
+        // Closed only once the call is dropped.
         let _ = self.happenings.unbounded_send(Happening(event));
     }
 }

@@ -1,5 +1,3 @@
-//! What the BukoSpeak desktop app and the terminal client share, and the app's window.
-
 pub mod audio;
 pub mod autopilot;
 pub mod autostart;
@@ -17,18 +15,13 @@ pub mod update;
 use std::path::{Path, PathBuf};
 use std::{fs, io, process};
 
-/// What the desktop clients log unless `RUST_LOG` says otherwise: warnings, but not the
-/// PulseAudio client's error each time a connection to the sound server closes as it should,
-/// after listing the devices.
+// PulseAudio's client logs an error each time a connection closes as it should, after listing devices.
 pub const LOG_FILTER: &str = "warn,pulseaudio::client::reactor=off";
 
-/// The folder the desktop app keeps its files in, if the system has a config folder.
 pub fn config_folder() -> Option<PathBuf> {
     dirs::config_dir().map(|folder| folder.join("bukospeak"))
 }
 
-/// Writes `text` to a file of its own beside `path` and renames it over it, so a reader never
-/// sees half of it; makes the folder if there is none.
 fn replace(path: &Path, text: &str) -> io::Result<()> {
     let folder = path.parent().expect("the file is inside a folder");
     let name = path.file_name().expect("the path names a file").to_string_lossy();

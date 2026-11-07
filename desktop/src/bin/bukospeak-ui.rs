@@ -1,6 +1,3 @@
-//! The desktop app's window without a display: drawn offscreen in a scene, driven by a script,
-//! and saved as pictures, for looking at the UI and at what a change does to it.
-
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,55 +18,49 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List the scenes.
+    #[command(about = "List the scenes")]
     List,
-    /// Draw a scene, after the script's steps, into a PNG at twice the window's size.
+    #[command(about = "Draw a scene, after the script's steps, into a PNG at twice the window's size")]
     Snap {
         #[command(flatten)]
         view: View,
         #[arg(long, short, default_value = "snap.png")]
         out: PathBuf,
     },
-    /// Draw frames of what the script's last step sets moving, from the step on, side by side in
-    /// one PNG.
+    #[command(about = "Draw frames of what the script's last step sets moving, side by side in one PNG")]
     Film {
         #[command(flatten)]
         view: View,
-        /// How many frames.
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 8, help = "How many frames")]
         frames: u32,
-        /// How far apart, in milliseconds.
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 50, help = "How far apart, in milliseconds")]
         every: u64,
         #[arg(long, short, default_value = "film.png")]
         out: PathBuf,
     },
-    /// Print the named elements drawn, and where: what a script clicks, hovers and checks.
+    #[command(about = "Print the named elements drawn, and where: what a script clicks, hovers and checks")]
     Marks {
         #[command(flatten)]
         view: View,
     },
-    /// Draw every scene, light and dark, into a folder with a page that shows them all.
+    #[command(about = "Draw every scene, light and dark, into a folder with a page that shows them all")]
     Gallery {
         #[arg(default_value = "gallery")]
         folder: PathBuf,
-        /// The window's size, in logical pixels.
-        #[arg(long, default_value = "380x560", value_parser = parse_size)]
+        #[arg(long, default_value = "380x560", value_parser = parse_size, help = "The window's size, in logical pixels")]
         size: (f32, f32),
     },
 }
 
 #[derive(Args)]
 struct View {
-    /// The scene, as `list` names it.
+    #[arg(help = "The scene, as `list` names it")]
     scene: String,
-    /// What to do to the window before: `click settings; type Kiwi; key enter; wait 200`.
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", help = "What to do to the window before: `click settings; type Kiwi; key enter; wait 200`")]
     steps: String,
     #[arg(long, value_enum, default_value_t = Theme::Dark)]
     theme: Theme,
-    /// The window's size, in logical pixels.
-    #[arg(long, default_value = "380x560", value_parser = parse_size)]
+    #[arg(long, default_value = "380x560", value_parser = parse_size, help = "The window's size, in logical pixels")]
     size: (f32, f32),
 }
 
@@ -130,7 +121,6 @@ fn scene(name: &str) -> anyhow::Result<Scene> {
     }
 }
 
-/// The window on the scene `name`, as `view` has it, after `steps`.
 #[allow(clippy::disallowed_methods, reason = "the window is as large as the command line asks")]
 fn open(name: &str, steps: &[Step], view: &View) -> anyhow::Result<Harness> {
     let scene = scene(name)?;
@@ -150,7 +140,6 @@ fn save(image: &RgbaImage, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The frames in a row, a gap between each.
 fn side_by_side(frames: &[RgbaImage]) -> anyhow::Result<RgbaImage> {
     const GAP: u32 = 16;
     let first = frames.first().context("no frames")?;

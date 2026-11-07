@@ -1,6 +1,3 @@
-//! The window's screens, each an entity of its own that reads the client and tells the window
-//! where to go next.
-
 mod channel;
 mod settings;
 mod update;

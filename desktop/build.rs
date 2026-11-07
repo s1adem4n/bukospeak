@@ -1,5 +1,3 @@
-//! Gives the app's Windows binary its icon and its version.
-
 use std::env;
 
 fn main() {

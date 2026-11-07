@@ -1,18 +1,9 @@
-//! Between a device's format and the call's 48 kHz mono: channels mixed down or copied out, and
-//! the rate converted in 10 ms chunks when the device runs at another, and the times the
-//! platform tells for the device's samples carried over to the call's. Nothing here allocates
-//! after construction.
-//!
-//! The input and the output device each run on their own clock; the few ppm between them and
-//! the senders' clocks are the jitter buffers' to absorb, so the ratio here is fixed.
-
 use std::time::{Duration, Instant};
 
 use bukospeak_core::proto::audio::{FRAME_SAMPLES, SAMPLE_RATE};
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{Fft, FixedSync, Resampler};
 
-/// A device's format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Format {
     pub channels: usize,
@@ -29,14 +20,11 @@ pub enum Error {
     Resampler(#[from] rubato::ResamplerConstructionError),
 }
 
-/// How much of a channel's level the last 10 ms make: it follows over about a second.
 const LEVEL_SMOOTHING: f32 = 0.01;
 
-/// From the input device's samples to the call's.
 pub struct Input {
     channels: usize,
     rate: u32,
-    /// 10 ms at the device's rate, mixed down to mono, and when its first sample was captured.
     chunk: Box<[f32]>,
     captured: Instant,
     filled: usize,
@@ -44,32 +32,26 @@ pub struct Input {
     resampling: Option<Resampling>,
 }
 
-/// Mixes channels down weighted by their levels, so a microphone on one input of an interface
-/// keeps its level beside the silent others, which an average would halve and add their noise
-/// to, while channels alike are averaged.
+// Weighted by level: a microphone on one input of an interface keeps its level beside the silent
+// others, which an average would halve.
 struct Mixdown {
     weights: Box<[f32]>,
-    /// The channels' mean squares, following over about a second.
     levels: Box<[f32]>,
-    /// The channels' sums of squares in the chunk filled.
     energies: Box<[f32]>,
 }
 
-/// From the call's samples to the output device's.
 pub struct Output {
     channels: usize,
     rate: u32,
-    /// 10 ms at the device's rate, in mono.
     chunk: Box<[f32]>,
     played: usize,
     resampling: Option<Resampling>,
 }
 
-/// A fixed-ratio resampler between 10 ms at the device's rate and a frame at 48 kHz.
+// A fixed ratio: the jitter buffers absorb the few ppm between the device's and the senders' clocks.
 struct Resampling {
     fft: Fft<f32>,
     frame: Box<[f32]>,
-    /// How much later a sample comes out than it went in.
     delay: Duration,
 }
 
@@ -78,14 +60,11 @@ impl Input {
         let chunk = chunk_len(device)?;
         let resampling = Resampling::new(device.rate, SAMPLE_RATE)?;
         let (channels, rate) = (device.channels, device.rate);
-        // Told anew with the first sample of each chunk.
         let captured = Instant::now();
         let mixdown = Mixdown::new(channels);
         Ok(Self { channels, rate, chunk: vec![0.0; chunk].into(), captured, filled: 0, mixdown, resampling })
     }
 
-    /// Takes the device's interleaved samples, the first of them captured at `captured`, and
-    /// hands `call` them at 48 kHz mono, with when the first of those was captured.
     pub fn push(&mut self, samples: &[f32], captured: Instant, mut call: impl FnMut(&[f32], Instant)) {
         for (n, frame) in samples.chunks_exact(self.channels).enumerate() {
             if self.filled == 0 {
@@ -118,22 +97,19 @@ impl Mixdown {
     }
 
     fn mix(&mut self, frame: &[f32]) -> f32 {
-        // A faulty driver's NaN, infinite or huge sample would turn a level, and with it every
-        // weight, to NaN for good: clip to full scale, as an integer device would, and take NaN
-        // for silence.
+        // A faulty driver's NaN, infinite or huge sample would turn every weight to NaN for good:
+        // clip to full scale, as an integer device would.
         let clip = |sample: f32| if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) };
         self.energies.iter_mut().zip(frame).for_each(|(energy, sample)| *energy += clip(*sample).powi(2));
         frame.iter().zip(&self.weights).map(|(sample, weight)| clip(*sample) * weight).sum()
     }
 
-    /// Weighs the channels anew after a chunk of `frames`, in proportion to their RMS levels.
     fn weigh(&mut self, frames: usize) {
         for (level, energy) in self.levels.iter_mut().zip(&mut self.energies) {
             *level += (*energy / frames as f32 - *level) * LEVEL_SMOOTHING;
             *energy = 0.0;
         }
         let total: f32 = self.levels.iter().map(|level| level.sqrt()).sum();
-        // All silent, they keep their weights.
         if total > 0.0 {
             self.weights.iter_mut().zip(&self.levels).for_each(|(weight, level)| *weight = level.sqrt() / total);
         }
@@ -147,8 +123,6 @@ impl Output {
         Ok(Self { channels: device.channels, rate: device.rate, chunk: vec![0.0; chunk].into(), played: chunk, resampling })
     }
 
-    /// Fills the device's interleaved samples, the first of which plays at `plays`, with what
-    /// `call` fills in at 48 kHz mono, told when the first of those plays.
     pub fn pull(&mut self, samples: &mut [f32], plays: Instant, mut call: impl FnMut(&mut [f32], Instant)) {
         for (n, frame) in samples.chunks_exact_mut(self.channels).enumerate() {
             if self.played == self.chunk.len() {
@@ -169,7 +143,6 @@ impl Output {
 }
 
 impl Resampling {
-    /// None if the rates are the same.
     fn new(from: u32, to: u32) -> Result<Option<Self>, Error> {
         if from == to {
             return Ok(None);
@@ -190,12 +163,10 @@ fn process(fft: &mut Fft<f32>, from: &[f32], to: &mut [f32]) {
     fft.process_into_buffer(&input, &mut output, None).expect("the chunks have the sizes the resampler was made for");
 }
 
-/// How long `samples` take at `rate`.
 fn duration_of(samples: usize, rate: u32) -> Duration {
     Duration::from_nanos(samples as u64 * 1_000_000_000 / u64::from(rate))
 }
 
-/// Samples in 10 ms at the device's rate.
 fn chunk_len(device: Format) -> Result<usize, Error> {
     if device.channels == 0 {
         return Err(Error::NoChannels);
@@ -220,19 +191,15 @@ mod tests {
         (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
     }
 
-    /// The frequency of a sine sampled at `rate`, by its zero crossings.
     fn frequency(samples: &[f32], rate: u32) -> f32 {
         let crossings = samples.windows(2).filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0)).count();
         crossings as f32 / 2.0 / (samples.len() as f32 / rate as f32)
     }
 
-    /// The middle half, past the resamplers' delay.
     fn settled(samples: &[f32]) -> &[f32] {
         &samples[samples.len() / 4..samples.len() * 3 / 4]
     }
 
-    /// Through an input device's format into the call, and from there out of an output
-    /// device's, in buffers of odd lengths; what the call got, and what the device played.
     fn round_trip(device: Format) -> (Vec<f32>, Vec<f32>) {
         let mut input = Input::new(device).unwrap();
         let mut output = Output::new(device).unwrap();
@@ -279,7 +246,6 @@ mod tests {
         let captured: Vec<f32> = sine(SAMPLE_RATE, 1.0, 440.0).iter().flat_map(|&sample| [0.0, sample]).collect();
         let mut call = Vec::new();
         input.push(&captured, Instant::now(), |frame, _| call.extend_from_slice(frame));
-        // Averaged for the first 10 ms, until the levels are known.
         let rms = rms(&call[FRAME_SAMPLES..]);
         assert!((0.35..0.36).contains(&rms), "rms {rms}");
     }
@@ -301,7 +267,6 @@ mod tests {
         for rate in [44_100, 16_000, 96_000] {
             let (call, played) = round_trip(Format { channels: 2, rate });
             let left: Vec<f32> = played.iter().step_by(2).copied().collect();
-            // The sine keeps its pitch in the call and back on the device, and its loudness.
             for (samples, at) in [(&call, SAMPLE_RATE), (&left, rate)] {
                 let frequency = frequency(settled(samples), at);
                 assert!((438.0..442.0).contains(&frequency), "{rate} Hz: a frequency of {frequency} Hz at {at} Hz");
@@ -329,12 +294,9 @@ mod tests {
             for (frame, (&captured, &plays)) in captured.iter().zip(&played).enumerate() {
                 let at = start + frame as u32 * Duration::from_millis(10);
                 let off = |told: Instant, at: Instant| told.max(at) - told.min(at);
-                // Within what rounding the samples' times to nanoseconds loses.
                 assert!(off(captured + captured_delay, at) <= Duration::from_micros(1), "{rate} Hz: frame {frame} captured off");
                 assert!(off(plays, at + played_delay) <= Duration::from_micros(1), "{rate} Hz: frame {frame} plays off");
             }
-            // The output asks for a chunk as it starts playing it, the input hands one over once
-            // it is full.
             let chunks = 100 * 333 / (rate as usize / 100);
             assert_eq!((captured.len(), played.len()), (chunks, chunks + 1), "{rate} Hz");
         }

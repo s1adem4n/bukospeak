@@ -1,6 +1,3 @@
-//! NVIDIA's effects on an RTX card, which only Windows runs: installed from the download the
-//! server offers for the card's generation, and run as the call's noise suppression.
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +8,6 @@ use bukospeak_maxine::{Effect, Runtime};
 
 use crate::install::{self, Progress};
 
-/// The system's RTX card, if it has one the effects run on.
 pub fn card() -> Option<Architecture> {
     bukospeak_maxine::detect().unwrap_or_else(|error| {
         tracing::warn!("finding an RTX card: {error}");
@@ -19,31 +15,23 @@ pub fn card() -> Option<Architecture> {
     })
 }
 
-/// The folder the effects for `architecture` are installed in, if the system has a folder for
-/// programs' data.
 fn folder(architecture: Architecture) -> Option<PathBuf> {
     dirs::data_local_dir().map(|folder| folder.join("bukospeak").join("nvidia").join(architecture.name()))
 }
 
-/// NVIDIA's effects, installed for a card.
 pub struct Effects {
     folder: PathBuf,
     architecture: Architecture,
-    /// The runtime, once an effect was made; shared by those made after.
     runtime: Mutex<Option<Arc<Runtime>>>,
-    /// Hears that an effect couldn't be made, and the built-in suppression runs instead.
     failed: Box<dyn Fn() + Send + Sync>,
 }
 
 impl Effects {
-    /// The effects installed for `architecture`, if they are; `failed` hears whenever one
-    /// can't be made.
     pub fn installed(architecture: Architecture, failed: impl Fn() + Send + Sync + 'static) -> Option<Arc<Self>> {
         let folder = folder(architecture)?;
         install::is_installed(&folder).then(|| Arc::new(Self { folder, architecture, runtime: Mutex::default(), failed: Box::new(failed) }))
     }
 
-    /// The engine's suppression by the effect `kind`.
     pub fn suppression(self: &Arc<Self>, kind: Kind) -> Suppression {
         Suppression::Plugged(Arc::new(Maker { effects: Arc::clone(self), kind }))
     }
@@ -78,11 +66,9 @@ impl MakeSuppressor for Maker {
     }
 }
 
-/// An effect of NVIDIA's, suppressing a call's noise.
 struct Nvidia {
     effect: Effect,
     delay: usize,
-    /// Whether the last frame failed, told once until one runs again.
     failing: bool,
 }
 
@@ -111,8 +97,6 @@ impl Suppressor for Nvidia {
     }
 }
 
-/// Installs the effects for `architecture` from the download `server` offers, as
-/// [`install::install`] does, unless they are installed.
 pub fn install(server: &str, architecture: Architecture, progress: impl FnMut(Progress)) -> Result<(), install::Error> {
     let folder = folder(architecture).ok_or(install::Error::NoFolder)?;
     if install::is_installed(&folder) {

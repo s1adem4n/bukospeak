@@ -1,6 +1,3 @@
-//! What outlives the window: the call and the settings. The window shows them and the tray and
-//! the hotkey act on them, with or without a window open.
-
 use std::sync::Arc;
 
 use crate::audio::Direction;
@@ -17,27 +14,20 @@ use gpui::{AppContext, Context, Task};
 
 use crate::ui::Trouble;
 
-/// NVIDIA's effects on the system's RTX card.
 pub struct Nvidia {
     architecture: Architecture,
-    /// The effects, once installed.
     effects: Option<Arc<Effects>>,
-    /// How far the installation going on got.
     pub installing: Option<Progress>,
-    /// Tells the app that an effect didn't start.
     failed: mpsc::UnboundedSender<()>,
 }
 
 impl Nvidia {
-    /// The effects, if installed.
     fn installed(&self) -> Option<Arc<Effects>> {
         let failed = self.failed.clone();
-        // The app hears of it as long as it runs.
         Effects::installed(self.architecture, move || _ = failed.unbounded_send(()))
     }
 }
 
-/// What the installation's thread tells.
 enum Installing {
     Progress(Progress),
     Done(Result<(), install::Error>),
@@ -48,13 +38,9 @@ pub struct Client {
     pub settings: Settings,
     host: Arc<dyn Host>,
     pub trouble: Option<Trouble>,
-    /// The keys that mute and unmute from any app, if the system took them.
     pub mute_keys: Option<&'static str>,
-    /// Whether a window shows the channel from outside, so who is in it is watched.
     lobby: bool,
-    /// NVIDIA's effects, once the system's RTX card was found.
     pub nvidia: Option<Nvidia>,
-    /// The server's sounds being installed, if they are.
     syncing: Option<Task<()>>,
     _happenings: Task<()>,
     _card: Task<()>,
@@ -95,15 +81,12 @@ impl Client {
         let system = Arc::clone(&host);
         let card = cx.spawn(async move |this, cx| {
             if let Some(architecture) = cx.background_spawn(async move { system.card() }).await {
-                // The app may be quitting before the card was found.
                 let _ = this.update(cx, |client, cx| client.found(architecture, cx));
             }
         });
         Self { call, settings, host, trouble, mute_keys, lobby: false, nvidia: None, syncing: None, _happenings: happenings, _card: card }
     }
 
-    /// Takes in the system's RTX card: NVIDIA's effects suppress the noise from now on if they
-    /// are chosen, once installed.
     fn found(&mut self, architecture: Architecture, cx: &mut Context<Self>) {
         let (failed, failures) = mpsc::unbounded();
         cx.spawn(async move |this, cx| {
@@ -125,8 +108,6 @@ impl Client {
         self.suppress(cx);
     }
 
-    /// Suppresses the noise as chosen, installing NVIDIA's effects first if they are chosen and
-    /// not installed: Standard suppresses it meanwhile.
     fn suppress(&mut self, cx: &mut Context<Self>) {
         let effects = self.nvidia.as_ref().and_then(|nvidia| nvidia.effects.as_ref());
         self.call.set_suppression(self.settings.suppression.engines(effects));
@@ -140,8 +121,6 @@ impl Client {
         cx.notify();
     }
 
-    /// Installs NVIDIA's effects for `architecture` from the server, on a thread of its own:
-    /// it may take minutes.
     fn install(&mut self, architecture: Architecture, cx: &mut Context<Self>) {
         let server = self.settings.server().to_owned();
         if let Some(nvidia) = &mut self.nvidia {
@@ -160,11 +139,10 @@ impl Client {
                         Progress::Preparing { done, total } | Progress::Fetching { done, total } => (done * 100).checked_div(total),
                     };
                     if shown.replace((std::mem::discriminant(&now), percent)) != Some((std::mem::discriminant(&now), percent)) {
-                        // The app may be quitting; the installation goes on to the end regardless.
+                        // The app may be quitting; the installation runs to the end regardless.
                         let _ = progress.unbounded_send(Installing::Progress(now));
                     }
                 });
-                // As above.
                 let _ = tell.unbounded_send(Installing::Done(installed));
             })
             .expect("the installation's thread starts");
@@ -187,8 +165,6 @@ impl Client {
         .detach();
     }
 
-    /// Takes in how installing NVIDIA's effects ended: they suppress the noise if chosen, or
-    /// Standard does once they couldn't be installed.
     fn installed(&mut self, installed: Result<(), install::Error>, cx: &mut Context<Self>) {
         let Some(nvidia) = &mut self.nvidia else { return };
         nvidia.installing = None;
@@ -208,8 +184,6 @@ impl Client {
         self.suppress(cx);
     }
 
-    /// Installs the sounds the server of the call offers as it has them now, in the background,
-    /// unless that is going on.
     fn sync_sounds(&mut self, cx: &mut Context<Self>) {
         if self.syncing.is_some() {
             return;
@@ -222,12 +196,10 @@ impl Client {
             if let Err(error) = synced {
                 tracing::warn!("installing the server's sounds: {error}");
             }
-            // The app may be quitting meanwhile.
             let _ = this.update(cx, |client, _| client.syncing = None);
         }));
     }
 
-    /// What the window asks of the system.
     pub fn host(&self) -> &Arc<dyn Host> {
         &self.host
     }
@@ -255,31 +227,26 @@ impl Client {
         cx.notify();
     }
 
-    /// Whether a window shows the channel from outside.
     pub fn set_lobby(&mut self, lobby: bool) {
         self.lobby = lobby;
         self.watch();
     }
 
-    /// Listens to the microphone while a window shows its level, out of a call too.
     pub fn set_listening(&mut self, listening: bool) {
         self.call.listen(listening);
     }
 
-    /// Watches who is in the channel while a window shows it from outside.
     fn watch(&mut self) {
         let outside = matches!(self.call.phase(), Phase::Idle | Phase::Failed(_)) && self.lobby;
         let server = (outside && self.settings.is_complete()).then(|| self.settings.server().to_owned());
         self.call.watch(server);
     }
 
-    /// Takes another server, which the channel is watched on from now on.
     pub fn set_server(&mut self, server: String, cx: &mut Context<Self>) {
         self.change(|settings| settings.server = server, cx);
         self.watch();
     }
 
-    /// Changes the settings and keeps them.
     fn change(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         edit(&mut self.settings);
         if let Err(error) = self.host.save_settings(&self.settings) {
@@ -299,14 +266,11 @@ impl Client {
         self.suppress(cx);
     }
 
-    /// Has the system start the app with it or not, as the settings say: at the app's start,
-    /// so an install moved keeps being started, and when they change.
     pub fn start_with_system(&mut self, cx: &mut Context<Self>) {
         let (host, on) = (Arc::clone(&self.host), self.settings.start_with_system);
         cx.spawn(async move |this, cx| {
             if let Err(error) = cx.background_spawn(async move { host.start_with_system(on) }).await {
                 tracing::warn!("starting with the system: {error}");
-                // The app may be quitting before the system answered.
                 let _ = this.update(cx, |client, cx| {
                     client.trouble = Some(Trouble::StartNotSet);
                     cx.notify();
@@ -321,7 +285,6 @@ impl Client {
         self.start_with_system(cx);
     }
 
-    /// Joins for `game` while it runs from now on, or no more.
     pub fn set_game(&mut self, game: &str, on: bool, cx: &mut Context<Self>) {
         self.change(
             |settings| {
@@ -339,8 +302,6 @@ impl Client {
         self.call.set_echo_cancellation(on);
     }
 
-    /// Plays the others at `percent` of their level, and keeps it once `done` choosing: while a
-    /// slider is dragged, it is heard at once but saved only at the end.
     pub fn set_volume(&mut self, percent: u16, done: bool, cx: &mut Context<Self>) {
         self.call.set_volume(percent);
         if done {

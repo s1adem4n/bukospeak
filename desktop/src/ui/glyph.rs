@@ -1,22 +1,17 @@
-//! The icons the app shows, from Lucide (`assets/icons/LICENSE.txt`), and the assets that hold
-//! them.
-
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 
-/// Each glyph and the file of its icon, in `assets/icons`.
 macro_rules! glyphs {
-    ($($(#[$doc:meta])* $glyph:ident => $file:literal,)*) => {
+    ($($glyph:ident => $file:literal,)*) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum Glyph {
-            $($(#[$doc])* $glyph,)*
+            $($glyph,)*
         }
 
         impl Glyph {
             const ALL: &[Glyph] = &[$(Glyph::$glyph,)*];
 
-            /// Where the icon lies among the assets, and its SVG.
             fn file(self) -> (&'static str, &'static [u8]) {
                 match self {
                     $(Glyph::$glyph => (
@@ -34,24 +29,16 @@ glyphs! {
     MicOff => "mic-off",
     PhoneOff => "phone-off",
     Settings => "settings",
-    Back => "chevron-left",
     Warning => "triangle-alert",
     Users => "users",
-    /// One's own avatar before the server named one.
     You => "user",
     Reconnecting => "wifi-off",
     Edit => "pencil",
-    /// A value chosen from a menu.
     Choose => "chevrons-up-down",
     Download => "download",
-    /// Something under way, turning.
     Loading => "loader-circle",
-    /// A menu's item that is chosen.
     Check => "check",
-    /// The window's buttons, where the app draws them.
     Minimize => "minus",
-    Maximize => "square",
-    Restore => "copy",
     Close => "x",
 }
 
@@ -61,7 +48,6 @@ impl Glyph {
     }
 }
 
-/// The glyphs' icons, inside the binary.
 pub struct Assets;
 
 impl AssetSource for Assets {

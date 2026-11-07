@@ -1,7 +1,3 @@
-//! What the window asks of the system it runs on, beside the call: where the settings are kept,
-//! the audio devices, the RTX card and NVIDIA's effects for it, and the server's sounds. The app
-//! asks the system itself, through [`Desktop`]; the harness stands in for it.
-
 use std::path::PathBuf;
 
 use crate::audio::{self, Device, Direction};
@@ -13,27 +9,19 @@ use crate::{autostart, cues};
 pub trait Host: Send + Sync + 'static {
     fn save_settings(&self, settings: &Settings) -> Result<(), settings::Error>;
 
-    /// The devices there are for a direction.
     fn devices(&self, direction: Direction) -> Result<Vec<Device>, audio::Error>;
 
-    /// Has the system start the app with it, in the background, or not.
     fn start_with_system(&self, on: bool) -> Result<(), autostart::Error>;
 
-    /// The programs running, the largest first, which a game is among while it runs.
     fn programs(&self) -> Vec<String>;
 
-    /// The system's RTX card, if it has one NVIDIA's effects run on.
     fn card(&self) -> Option<Architecture>;
 
-    /// Installs NVIDIA's effects for `architecture`, as [`nvidia::install`] does; blocks until
-    /// they are.
     fn install(&self, server: &str, architecture: Architecture, progress: &mut dyn FnMut(Progress)) -> Result<(), install::Error>;
 
-    /// Installs the sounds the server offers, as [`cues::sync`] does; blocks until they are.
     fn sync_sounds(&self, server: &str) -> Result<(), install::Error>;
 }
 
-/// The system the app runs on, its settings kept in the file at a path.
 pub struct Desktop {
     settings: PathBuf,
 }

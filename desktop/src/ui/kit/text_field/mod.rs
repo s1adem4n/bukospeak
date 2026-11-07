@@ -1,7 +1,3 @@
-//! A field of one line of text: typed into, also through the system's input methods, selected by
-//! keys and the pointer, cut, copied and pasted, undone and redone, and with a right click the
-//! menu of those.
-
 mod edit;
 mod element;
 
@@ -45,7 +41,6 @@ actions!(
         Paste,
         Undo,
         Redo,
-        /// Enter: what was typed is meant.
         Confirm,
         ShowCharacterPalette
     ]
@@ -69,7 +64,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-end", SelectEnd, field),
         KeyBinding::new("enter", Confirm, field),
     ]);
-    // The clipboard, undoing, words and the line's ends by the keys each system has for them.
     if cfg!(target_os = "macos") {
         cx.bind_keys([
             KeyBinding::new("cmd-a", SelectAll, field),
@@ -109,21 +103,15 @@ pub fn init(cx: &mut App) {
     }
 }
 
-/// What a field tells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextFieldEvent {
-    /// Its text changed.
     Changed,
-    /// Enter was pressed in it.
     Confirmed,
-    /// The focus left it, and what it opened.
     Left,
 }
 
-/// The line as last drawn, which the pointer and the input methods find characters on.
 struct Layout {
     line: ShapedLine,
-    /// Where the line's start was drawn, left of the field's edge by as far as it is scrolled.
     origin: Point<Pixels>,
     line_height: Pixels,
 }
@@ -132,12 +120,9 @@ pub struct TextField {
     text: Text,
     focus: FocusHandle,
     placeholder: SharedString,
-    /// How far the line is scrolled left, so the cursor stays in view.
     scroll: Pixels,
     layout: Option<Layout>,
-    /// Whether the pointer, pressed on the text, selects as it moves.
     selecting: bool,
-    /// Whether the cursor shows now, while it blinks.
     cursor_shown: bool,
     blinking: Option<Task<()>>,
     menu: Option<(Entity<Menu>, Point<Pixels>, Subscription)>,
@@ -180,7 +165,6 @@ impl TextField {
         self.text.content()
     }
 
-    /// Holds `value` from now, the cursor at its end and nothing to undo.
     pub fn set_value(&mut self, value: String, cx: &mut Context<Self>) {
         self.text = Text::new(value);
         cx.emit(TextFieldEvent::Changed);
@@ -196,7 +180,6 @@ impl TextField {
         self.moved(cx);
     }
 
-    /// Shows the cursor and blinks it from now: it holds still while one types or moves it.
     fn blink(&mut self, cx: &mut Context<Self>) {
         self.cursor_shown = true;
         self.blinking = Some(cx.spawn(async move |field, cx| {
@@ -213,7 +196,6 @@ impl TextField {
         }));
     }
 
-    /// The selection or the cursor moved.
     fn moved(&mut self, cx: &mut Context<Self>) {
         if self.blinking.is_some() {
             self.blink(cx);
@@ -221,7 +203,6 @@ impl TextField {
         cx.notify();
     }
 
-    /// The text changed, or didn't, by an edit.
     fn edited(&mut self, changed: bool, window: &mut Window, cx: &mut Context<Self>) {
         if changed {
             window.notify_text_input_changed(&self.focus);
@@ -240,8 +221,6 @@ impl TextField {
         self.moved(cx);
     }
 
-    /// Where the cursor goes for an arrow: off a selection to its end on that side, else a
-    /// step that way.
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         let selection = self.text.selection();
         let to = if selection.is_empty() { self.text.previous_boundary(selection.start) } else { selection.start };
@@ -318,7 +297,6 @@ impl TextField {
         self.edited(changed, window, cx);
     }
 
-    /// What may be taken out of the field: the selection.
     fn selected_text(&self) -> Option<&str> {
         let selection = self.text.selection();
         (!selection.is_empty()).then(|| &self.text.content()[selection])
@@ -338,7 +316,6 @@ impl TextField {
         }
     }
 
-    /// Pastes the clipboard's text, its lines joined by spaces: the field holds one.
     fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pasted) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let line = pasted.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" ");
@@ -377,7 +354,6 @@ impl TextField {
         window.show_character_palette();
     }
 
-    /// The offset of the text under `position` in the window, by the line as last drawn.
     fn offset_at(&self, position: Point<Pixels>) -> usize {
         let Some(layout) = &self.layout else {
             return 0;
@@ -385,13 +361,10 @@ impl TextField {
         layout.line.closest_index_for_x(position.x - layout.origin.x)
     }
 
-    /// Where `offset` of the text lies along the line as last drawn, from the line's start.
     fn x_of(&self, layout: &Layout, offset: usize) -> Pixels {
         layout.line.x_for_index(offset)
     }
 
-    /// A press on the text: the cursor goes there, or a selection is extended there with Shift;
-    /// two clicks select a word, three the whole line.
     fn press(&mut self, position: Point<Pixels>, clicks: usize, shift: bool, cx: &mut Context<Self>) {
         let offset = self.offset_at(position);
         self.selecting = true;
@@ -410,8 +383,6 @@ impl TextField {
         }
     }
 
-    /// Opens the menu of cut, copy, paste and select all at `position`, the cursor moved there
-    /// unless it was pressed on the selection.
     fn open_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let offset = self.offset_at(position);
         if !self.text.selection().contains(&offset) {
@@ -424,7 +395,6 @@ impl TextField {
             let item = |label: &'static str, edit: fn(&mut TextField, &mut Window, &mut Context<TextField>)| {
                 let field = field.clone();
                 Item::new(label, move |window, cx| {
-                    // The field may be gone with its window.
                     let _ = field.update(cx, |field, cx| edit(field, window, cx));
                 })
             };

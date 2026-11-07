@@ -1,7 +1,3 @@
-//! The settings: the microphone, the output, what the app does on its own, and the server, each
-//! kept as soon as it is changed: the server once Enter is pressed or the focus goes, the rest at
-//! once.
-
 use crate::audio::{self, Direction};
 use crate::games;
 use crate::install::Progress;
@@ -13,21 +9,17 @@ use gpui::{
 };
 
 use crate::ui::client::Client;
-use crate::ui::kit::menu::{Item, Menu, Place, Popover};
+use crate::ui::kit::menu::{Item, Menu};
 use crate::ui::kit::{self, InlineField, InlineFieldEvent, InputLevel, Slider, SliderEvent, Spinner, Switch, h_flex, v_flex};
 use crate::ui::theme::{self, ActiveTokens, Typeset};
 
-/// A device to choose: the system's default for None.
 #[derive(Clone, Debug, PartialEq)]
 struct Choice {
     id: Option<String>,
     title: SharedString,
-    /// Kept but not there now: shown as chosen, not to be chosen again.
     missing: bool,
 }
 
-/// The choices for a direction from its devices' ids and names: the default first, then the
-/// devices there are, then the one kept if it isn't among them.
 fn choices(devices: impl IntoIterator<Item = (String, String)>, kept: Option<&str>) -> Vec<Choice> {
     let standard = Choice { id: None, title: "Standard".into(), missing: false };
     let there = devices.into_iter().map(|(id, name)| Choice { id: Some(id), title: name.into(), missing: false });
@@ -40,7 +32,6 @@ fn choices(devices: impl IntoIterator<Item = (String, String)>, kept: Option<&st
     choices
 }
 
-/// A menu of the settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Opened {
     Device(Direction),
@@ -48,8 +39,6 @@ enum Opened {
     Games,
 }
 
-/// The choices of noise suppression, by their titles: the app's own, then NVIDIA's, which an RTX
-/// card is offered under NVIDIA's name.
 const SUPPRESSIONS: [(Suppression, &str); 4] = [
     (Suppression::Off, "Aus"),
     (Suppression::Standard, "Standard"),
@@ -60,16 +49,11 @@ const SUPPRESSIONS: [(Suppression, &str); 4] = [
 pub struct Settings {
     client: Entity<Client>,
     server: Entity<InlineField>,
-    /// The choices of microphones and of outputs; until the system listed its devices, only
-    /// the one kept.
     inputs: Vec<Choice>,
     outputs: Vec<Choice>,
     volume: Entity<Slider>,
-    /// The programs running when the settings opened, the largest first, to choose games from;
-    /// empty until the system listed them.
     programs: Vec<String>,
     level: Entity<InputLevel>,
-    /// The menu open, and which it is.
     menu: Option<(Opened, Entity<Menu>, Subscription)>,
     _subscriptions: Vec<Subscription>,
     _listing: Task<()>,
@@ -111,7 +95,6 @@ impl Settings {
                     (list(Direction::Input), list(Direction::Output), host.programs())
                 })
                 .await;
-            // The settings may be closed before the system answered.
             let _ = settings.update(cx, |settings, cx| {
                 let named = |devices: Vec<audio::Device>| devices.into_iter().map(|device| (device.id.to_string(), device.name));
                 let read = settings.client.read(cx);
@@ -135,8 +118,6 @@ impl Settings {
         }
     }
 
-    /// A row that chooses a device from a menu, which the row opens below its end: the device's
-    /// name, which its group titles, and for the microphone how loud it is at the end.
     fn render_device(&self, direction: Direction, cx: &mut Context<Self>) -> AnyElement {
         let (id, choices) = match direction {
             Direction::Input => ("input", &self.inputs),
@@ -146,19 +127,16 @@ impl Settings {
         let chosen =
             choices.iter().find(|choice| choice.id.as_deref() == kept).map_or_else(|| "Standard".into(), |choice| choice.title.clone());
         let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Device(direction)).map(|(_, menu, _)| menu);
-        // The level sits where other rows show their value: the row reads as they do.
-        let level = (direction == Direction::Input).then(|| self.level.clone().into_any_element());
-        div()
-            .relative()
-            .child(
-                kit::menu_row(id, div().truncate().child(chosen), level, open.is_some(), cx)
-                    .on_click(cx.listener(move |settings, _, window, cx| settings.open_devices(direction, window, cx))),
-            )
-            .children(open.map(|menu| Popover::new(menu, Place::BelowEnd)))
-            .into_any_element()
+        kit::menu_row(
+            id,
+            "Gerät",
+            chosen,
+            open,
+            cx.listener(move |settings, _, window, cx| settings.open_devices(direction, window, cx)),
+            cx,
+        )
     }
 
-    /// Opens the menu of `direction`'s devices, the one kept checked.
     fn open_devices(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
         let choices = match direction {
             Direction::Input => self.inputs.clone(),
@@ -170,7 +148,6 @@ impl Settings {
             let item = |choice: &Choice| {
                 let (client, id) = (client.clone(), choice.id.clone());
                 Item::new(choice.title.clone(), move |_, cx| {
-                    // The window may be gone with the choice.
                     let _ = client.update(cx, |client, cx| client.set_device(direction, id.clone(), cx));
                 })
                 .checked(choice.id == kept)
@@ -184,7 +161,6 @@ impl Settings {
         self.show(Opened::Device(direction), menu, cx);
     }
 
-    /// Shows `menu` until it is dismissed.
     fn show(&mut self, opened: Opened, menu: Entity<Menu>, cx: &mut Context<Self>) {
         let closed = cx.subscribe(&menu, |settings, _, _: &DismissEvent, cx| {
             settings.menu = None;
@@ -194,8 +170,6 @@ impl Settings {
         cx.notify();
     }
 
-    /// The row that chooses the noise suppression from a menu, and tells how far installing
-    /// NVIDIA's effects got.
     fn render_suppression(&self, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
         let chosen =
@@ -205,26 +179,25 @@ impl Settings {
         });
         let tokens = cx.tokens();
         let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Suppression).map(|(_, menu, _)| menu);
-        let value = h_flex().gap_1p5().text_color(tokens.text_muted).child(chosen).children(installing.map(|percent| {
+        let value = h_flex().gap(theme::TIGHT).child(chosen).children(installing.map(|percent| {
             h_flex()
-                .gap_1()
+                .gap(theme::TIGHT)
                 .font_family(theme::MONO)
                 .typeset(theme::TEXT_SM)
                 .text_color(tokens.text_faint)
                 .child(Spinner::new(theme::ICON_SM).color(tokens.speaking))
                 .child(format!("{percent} %"))
         }));
-        div()
-            .relative()
-            .child(
-                kit::menu_row("suppression", "Rauschfilter", Some(value.into_any_element()), open.is_some(), cx)
-                    .on_click(cx.listener(|settings, _, window, cx| settings.open_suppressions(window, cx))),
-            )
-            .children(open.map(|menu| Popover::new(menu, Place::BelowEnd)))
-            .into_any_element()
+        kit::menu_row(
+            "suppression",
+            "Rauschfilter",
+            value,
+            open,
+            cx.listener(|settings, _, window, cx| settings.open_suppressions(window, cx)),
+            cx,
+        )
     }
 
-    /// Opens the menu of noise suppressions, the one chosen checked.
     fn open_suppressions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let read = self.client.read(cx);
         let (chosen, nvidia) = (read.settings.suppression, read.nvidia.is_some());
@@ -233,7 +206,6 @@ impl Settings {
             let item = |&(suppression, title): &(Suppression, &'static str)| {
                 let client = client.clone();
                 Item::new(title, move |_, cx| {
-                    // The window may be gone with the choice.
                     let _ = client.update(cx, |client, cx| client.set_suppression(suppression, cx));
                 })
                 .checked(suppression == chosen)
@@ -248,28 +220,16 @@ impl Settings {
         self.show(Opened::Suppression, menu, cx);
     }
 
-    /// The row that chooses the games the app joins for, from a menu: the games kept, and the
-    /// programs running that could be one.
     fn render_games(&self, cx: &mut Context<Self>) -> AnyElement {
         let games = &self.client.read(cx).settings.games;
         let chosen = match games.as_slice() {
             [] => "Keinem".to_owned(),
             games => games.iter().map(|game| games::title(game)).collect::<Vec<_>>().join(", "),
         };
-        let tokens = cx.tokens();
         let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Games).map(|(_, menu, _)| menu);
-        let value = div().text_color(tokens.text_muted).child(chosen);
-        div()
-            .relative()
-            .child(
-                kit::menu_row("games", "Beitreten bei", Some(value.into_any_element()), open.is_some(), cx)
-                    .on_click(cx.listener(|settings, _, window, cx| settings.open_games(window, cx))),
-            )
-            .children(open.map(|menu| Popover::new(menu, Place::BelowEnd)))
-            .into_any_element()
+        kit::menu_row("games", "Beitreten bei", chosen, open, cx.listener(|settings, _, window, cx| settings.open_games(window, cx)), cx)
     }
 
-    /// Opens the menu of games: those kept, checked, then the programs running that aren't.
     fn open_games(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let kept = self.client.read(cx).settings.games.clone();
         let running: Vec<String> =
@@ -279,7 +239,6 @@ impl Settings {
             let item = |program: &String, on: bool| {
                 let (client, program) = (client.clone(), program.clone());
                 Item::new(games::title(&program).to_owned(), move |_, cx| {
-                    // The window may be gone with the choice.
                     let _ = client.update(cx, |client, cx| client.set_game(&program, !on, cx));
                 })
                 .checked(on)
@@ -293,11 +252,14 @@ impl Settings {
         self.show(Opened::Games, menu, cx);
     }
 
-    /// How loud the others are: the slider from the panel's inset, its value at the end.
+    fn render_level(&self, cx: &App) -> AnyElement {
+        kit::row("Pegel", cx).child(self.level.clone()).into_any_element()
+    }
+
     fn render_volume(&self, cx: &mut Context<Self>) -> AnyElement {
         let percent = self.client.read(cx).settings.volume;
-        kit::row_frame()
-            // The rail, not the knob's room around it, starts where the labels do.
+        kit::row("Lautstärke", cx)
+            // The rail, not the knob's room around it, starts a gap after the label.
             .child(div().flex_1().ml(-theme::SLIDER_KNOB / 2.).child(self.volume.clone()))
             .child(
                 div()
@@ -322,7 +284,6 @@ impl Settings {
         let client = self.client.downgrade();
         kit::row(label, cx)
             .child(Switch::new(id, label, on).on_change(move |on, _, cx| {
-                // The window may be gone with the click.
                 let _ = client.update(cx, |client, cx| set(client, on, cx));
             }))
             .into_any_element()
@@ -334,6 +295,7 @@ impl Render for Settings {
         let echo = self.client.read(cx).settings.echo_cancellation;
         let microphone = [
             self.render_device(Direction::Input, cx),
+            self.render_level(cx),
             self.render_suppression(cx),
             self.render_switch("echo", "Echounterdrückung", echo, Client::set_echo_cancellation, cx),
         ];
@@ -345,9 +307,9 @@ impl Render for Settings {
         div().id("settings").flex_1().min_h_0().overflow_y_scroll().child(
             v_flex()
                 .px(theme::GUTTER)
-                .pt_3()
+                .pt(theme::GAP)
                 .pb(theme::GUTTER)
-                .gap_5()
+                .gap(theme::SECTION)
                 .child(kit::group("Mikrofon", microphone, cx))
                 .child(kit::group("Ausgabe", output, cx))
                 .child(kit::group("Automatisch", automatic, cx))
@@ -356,7 +318,6 @@ impl Render for Settings {
     }
 }
 
-/// Until the system listed its devices, only the device kept is known, by its id.
 fn kept_choice(kept: Option<String>) -> Vec<Choice> {
     let title = kept.clone().unwrap_or_else(|| "Standard".into()).into();
     vec![Choice { id: kept, title, missing: false }]

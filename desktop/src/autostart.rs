@@ -1,10 +1,5 @@
-//! Starting the app with the system, in the background: Windows' Run key, a launch agent on
-//! macOS, XDG's autostart on Linux, each for the user, starting the program that runs now with
-//! [`BACKGROUND`].
-
 use auto_launch::{AutoLaunch, AutoLaunchBuilder, LinuxLaunchMode, MacOSLaunchMode, WindowsEnableMode};
 
-/// What the app is started with by the system: into the tray, its window not shown.
 pub const BACKGROUND: &str = "--background";
 
 #[derive(Debug, thiserror::Error)]
@@ -15,7 +10,6 @@ pub enum Error {
     Launch(#[from] auto_launch::Error),
 }
 
-/// The system's start of the program running now.
 fn entry() -> Result<AutoLaunch, Error> {
     let program = std::env::current_exe()?;
     Ok(AutoLaunchBuilder::new()
@@ -28,8 +22,6 @@ fn entry() -> Result<AutoLaunch, Error> {
         .build()?)
 }
 
-/// Has the system start the app with it, or not; a start set up for another path, of an older
-/// install, is replaced.
 pub fn set(on: bool) -> Result<(), Error> {
     let entry = entry()?;
     if on {

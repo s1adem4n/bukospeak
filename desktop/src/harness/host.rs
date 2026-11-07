@@ -1,6 +1,3 @@
-//! The system as a scene gives it: settings kept nowhere, devices and an RTX card as staged,
-//! NVIDIA's effects installing without end, and no sounds from a server.
-
 use std::thread;
 
 use crate::audio::{self, Device, DeviceId, Direction};
@@ -11,11 +8,9 @@ use crate::settings::{self, Settings};
 use crate::ui::Host;
 
 pub struct Staged {
-    /// The microphones and the outputs, by id and name; the first of each is the default.
     pub inputs: Vec<(&'static str, &'static str)>,
     pub outputs: Vec<(&'static str, &'static str)>,
     pub card: Option<Architecture>,
-    /// How far an installation of NVIDIA's effects gets, where it stays.
     pub installing: Progress,
 }
 

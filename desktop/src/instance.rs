@@ -1,6 +1,3 @@
-//! One app per user: the first start listens on a local socket, and a later one connects to it,
-//! which asks the first to show its window, and ends.
-
 use std::io;
 use std::path::Path;
 use std::thread;
@@ -11,7 +8,6 @@ use interprocess::local_socket::{ListenerOptions, Name, Stream};
 
 use crate::{Action, send};
 
-/// The socket's name, from the user's config folder, so each user and each config has its own.
 fn name(folder: &Path) -> io::Result<Name<'static>> {
     #[cfg(unix)]
     let name = folder.join("instance.sock").to_fs_name::<interprocess::local_socket::GenericFilePath>()?;
@@ -21,9 +17,6 @@ fn name(folder: &Path) -> io::Result<Name<'static>> {
     Ok(name.into_owned())
 }
 
-/// Takes the place of the one app: false if another has it, which is asked to show its window.
-/// Otherwise later starts ask for [`Action::Open`]; if the socket can't be made, they start apps
-/// of their own.
 pub fn take(folder: &Path, actions: UnboundedSender<Action>) -> bool {
     let name = match name(folder) {
         Ok(name) => name,

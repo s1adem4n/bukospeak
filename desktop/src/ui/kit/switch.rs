@@ -1,5 +1,3 @@
-//! A switch: on or off, flipped by a click, or by Enter or Space once it has the focus.
-
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
@@ -16,7 +14,6 @@ type ChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 #[derive(IntoElement)]
 pub struct Switch {
     id: ElementId,
-    /// What it switches, for those who don't see the row it sits in.
     label: SharedString,
     on: bool,
     on_change: Option<ChangeHandler>,
@@ -27,7 +24,6 @@ impl Switch {
         Self { id: id.into(), label: label.into(), on, on_change: None }
     }
 
-    /// Called with what the switch is flipped to.
     pub fn on_change(mut self, handler: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_change = Some(Rc::new(handler));
         self

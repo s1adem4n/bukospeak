@@ -1,15 +1,7 @@
-//! A call on the desktop's audio devices, through cpal.
-//!
-//! [`Audio`] plays a call's microphone and speaker on an input and an output device, the
-//! system's defaults or chosen ones, or listens to the input alone, for its meter. A thread of
-//! its own holds the streams and builds them anew when a device is lost or the stream breaks,
-//! retrying every second until the device is back.
-
 mod convert;
 mod lease;
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,14 +18,11 @@ use cpal::{
 use crate::audio::convert::Format;
 use crate::audio::lease::{Half, Lease};
 
-/// How long a stream that couldn't be built waits before the next try.
 const RETRY: Duration = Duration::from_secs(1);
 
-/// How long a stream gone may take to give back what it played: PulseAudio's backend drops the
-/// callback on a thread of its own once it deleted the stream.
+// PulseAudio drops a stream's callback on a thread of its own, after deleting the stream.
 const HAND_BACK: Duration = Duration::from_millis(250);
 
-/// The rate the device runs at if it can't run at the call's: CD audio's, which many run at.
 const CD_RATE: u32 = 44_100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,16 +54,13 @@ pub enum Error {
     Device(Direction, cpal::Error),
 }
 
-/// An audio device, as the settings list it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
     pub id: DeviceId,
     pub name: String,
-    /// Whether it is the system's default, which [`Audio`] uses unless told otherwise.
     pub is_default: bool,
 }
 
-/// The devices there are for a direction.
 pub fn devices(direction: Direction) -> Result<Vec<Device>, Error> {
     let host = cpal::default_host();
     let fail = |error| Error::Device(direction, error);
@@ -93,23 +79,18 @@ pub fn devices(direction: Direction) -> Result<Vec<Device>, Error> {
         .collect())
 }
 
-/// A call playing on the devices, or the input listened to, until it is dropped.
 pub struct Audio {
     commands: mpsc::Sender<Command>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 enum Command {
-    /// Use this device, or the default for None.
     Use(Direction, Option<DeviceId>),
-    /// The stream built as this generation broke.
     Broke(Direction, u64, cpal::Error),
     Stop,
 }
 
 impl Audio {
-    /// Starts playing the call on the devices, the defaults for None; `meter`, if any, measures
-    /// the microphone. `report` hears why a device doesn't play, once each time it stops.
     pub fn call(
         microphone: Microphone,
         speaker: Speaker,
@@ -122,7 +103,6 @@ impl Audio {
         Self::start(Side::new(Direction::Input, input, capture), Some(Side::new(Direction::Output, output, speaker)), report)
     }
 
-    /// Starts listening to the input device, the default for None, for `meter` alone.
     pub fn listen(meter: Meter, input: Option<DeviceId>, report: impl Fn(Error) + Send + 'static) -> std::io::Result<Self> {
         let capture = Capture { meter: Some(meter), microphone: None };
         Self::start(Side::new(Direction::Input, input, capture), None, report)
@@ -140,13 +120,11 @@ impl Audio {
         self.send(Command::Use(Direction::Input, device));
     }
 
-    /// Plays on another output device; listening to the input, there is none.
     pub fn set_output(&self, device: Option<DeviceId>) {
         self.send(Command::Use(Direction::Output, device));
     }
 
     fn send(&self, command: Command) {
-        // The audio thread ends only when told to stop, which drop does.
         self.commands.send(command).expect("the audio thread runs until the audio is dropped");
     }
 }
@@ -196,7 +174,6 @@ fn run(
     }
 }
 
-/// What the input stream feeds: the meter, if anyone shows it, and in a call the microphone.
 struct Capture {
     meter: Option<Meter>,
     microphone: Option<Microphone>,
@@ -230,45 +207,38 @@ impl Half for Speaker {
     }
 }
 
-/// One direction's device and stream, and the half the stream plays.
 struct Side<T> {
     direction: Direction,
     device: Option<DeviceId>,
     stream: Option<Stream>,
-    /// Counts the streams built, so a break reported late by a stream replaced since is ignored.
     generation: u64,
-    /// The half comes back here whenever the stream that played it is gone.
     back: mpsc::Sender<T>,
-    idle: mpsc::Receiver<T>,
-    /// Whether the user heard why the device doesn't play.
+    handed_back: mpsc::Receiver<T>,
     reported: bool,
 }
 
-/// Builds a stream for a half on the chosen or default device; `broke` is its error callback.
 type Build<T> = fn(&Host, Option<&DeviceId>, Lease<T>, Box<dyn FnMut(cpal::Error) + Send>) -> Result<Stream, Error>;
 
 impl<T: Half> Side<T> {
     fn new(direction: Direction, device: Option<DeviceId>, half: T) -> Self {
-        let (back, idle) = mpsc::channel();
+        let (back, handed_back) = mpsc::channel();
         back.send(half).expect("the channel was just made");
-        Self { direction, device, stream: None, generation: 0, back, idle, reported: false }
+        Self { direction, device, stream: None, generation: 0, back, handed_back, reported: false }
     }
 
     fn start(&mut self, commands: &mpsc::Sender<Command>, report: &dyn Fn(Error), build: Build<T>) {
         if self.stream.is_some() {
             return;
         }
-        // Not back yet, it is waited for again with the next try.
-        let Ok(half) = self.idle.recv_timeout(HAND_BACK) else {
+        let Ok(half) = self.handed_back.recv_timeout(HAND_BACK) else {
             return;
         };
         self.generation += 1;
         let (direction, generation, commands) = (self.direction, self.generation, commands.clone());
         let broke = Box::new(move |error: cpal::Error| match error.kind() {
-            // A glitch, a stream the backend rerouted itself, or one that runs without
-            // realtime priority: all play on.
+            // A glitch, a stream the backend rerouted, or one without realtime priority play on.
             ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => {}
-            // The audio thread is gone only once the audio stopped, with this stream.
+            // The audio thread outlives its streams.
             _ => _ = commands.send(Command::Broke(direction, generation, error)),
         });
         match build(&cpal::default_host(), self.device.as_ref(), Lease::new(half, self.back.clone()), broke) {
@@ -314,8 +284,7 @@ fn build_input(
         .build_input_stream(
             config,
             move |samples: &[f32], info: &InputCallbackInfo| {
-                // The stream's clock may have an origin of its own; how long ago the samples
-                // were captured is the same on any.
+                // The stream's clock may have an origin of its own, so only the difference counts.
                 let timestamp = info.timestamp();
                 let captured = Instant::now() - timestamp.callback.duration_since(timestamp.capture);
                 input.push(samples, captured, |frame, captured| capture.push(frame, captured));
@@ -354,65 +323,9 @@ fn build_output(
     Ok(stream)
 }
 
-/// A sound played once on the output device, the default for None, while the stream returned
-/// lives: `sound` in the call's format, 48 kHz mono, then silence. Also returned: how long the
-/// sound is.
-pub fn sound(id: Option<&DeviceId>, sound: Arc<[f32]>) -> Result<(Stream, Duration), Error> {
-    let direction = Direction::Output;
+pub fn output_device(id: Option<&DeviceId>) -> Result<cpal::Device, Error> {
     let host = cpal::default_host();
-    let device = device(direction, id, host.default_output_device(), &host)?;
-    let config = config(direction, device.supported_output_configs().map_err(|error| Error::Device(direction, error))?)?;
-    let mut output = convert::Output::new(format(config)).map_err(|error| Error::Format(direction, error))?;
-    let length = Duration::from_secs_f64(sound.len() as f64 / f64::from(SAMPLE_RATE));
-    let mut played = 0;
-    let stream = device
-        .build_output_stream(
-            config,
-            move |samples: &mut [f32], _: &OutputCallbackInfo| {
-                output.pull(samples, Instant::now(), |frame, _| {
-                    for sample in frame {
-                        *sample = sound.get(played).copied().unwrap_or(0.);
-                        played += 1;
-                    }
-                });
-            },
-            |error| tracing::warn!("a sound: {error}"),
-            None,
-        )
-        .map_err(|error| Error::Device(direction, error))?;
-    stream.play().map_err(|error| Error::Device(direction, error))?;
-    Ok((stream, length))
-}
-
-/// Why a sound file couldn't be read.
-#[derive(Debug, thiserror::Error)]
-pub enum SoundError {
-    #[error(transparent)]
-    Wav(#[from] hound::Error),
-    #[error(transparent)]
-    Format(#[from] convert::Error),
-}
-
-/// The sound in the WAV file at `path`, in the call's format, 48 kHz mono: its channels mixed
-/// down and its rate converted as a microphone's are.
-pub fn read_sound(path: &std::path::Path) -> Result<Arc<[f32]>, SoundError> {
-    let mut reader = hound::WavReader::open(path)?;
-    let spec = reader.spec();
-    let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
-        hound::SampleFormat::Int => {
-            let full = (1_i64 << (spec.bits_per_sample - 1)) as f32;
-            reader.samples::<i32>().map(|sample| sample.map(|sample| sample as f32 / full)).collect::<Result<_, _>>()?
-        }
-    };
-    let mut input = convert::Input::new(Format { channels: usize::from(spec.channels), rate: spec.sample_rate })?;
-    // Silence after it lets out its last part short of a chunk and what the resampler holds back.
-    let flush = vec![0.; usize::from(spec.channels) * spec.sample_rate as usize / 20];
-    let mut sound = Vec::with_capacity(samples.len() + flush.len());
-    for part in [&samples, &flush] {
-        input.push(part, Instant::now(), |frame, _| sound.extend_from_slice(frame));
-    }
-    Ok(sound.into())
+    device(Direction::Output, id, host.default_output_device(), &host)
 }
 
 fn device(direction: Direction, id: Option<&DeviceId>, default: Option<cpal::Device>, host: &Host) -> Result<cpal::Device, Error> {
@@ -422,8 +335,6 @@ fn device(direction: Direction, id: Option<&DeviceId>, default: Option<cpal::Dev
     }
 }
 
-/// The device's float format closest to the call's: 48 kHz if it has it, fewest channels, and
-/// 10 ms buffers if it takes them.
 fn config(direction: Direction, ranges: impl Iterator<Item = SupportedStreamConfigRange>) -> Result<StreamConfig, Error> {
     let range = ranges
         .filter(|range| range.sample_format() == SampleFormat::F32)
@@ -476,29 +387,5 @@ mod tests {
         assert_eq!(with(SupportedBufferSize::Range { min: 64, max: 4096 }), BufferSize::Fixed(480));
         assert_eq!(with(SupportedBufferSize::Range { min: 1024, max: 4096 }), BufferSize::Default);
         assert_eq!(with(SupportedBufferSize::Unknown), BufferSize::Default);
-    }
-
-    #[test]
-    fn a_sound_file_comes_in_the_calls_format() {
-        let path = std::env::temp_dir().join(format!("bukospeak-sound-{}.wav", std::process::id()));
-        let spec = hound::WavSpec { channels: 2, sample_rate: CD_RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
-        // A fifth of a second of 440 Hz, the same on both channels.
-        for n in 0..CD_RATE / 5 {
-            let sample = (0.5 * (std::f32::consts::TAU * 440. * n as f32 / CD_RATE as f32).sin() * f32::from(i16::MAX)) as i16;
-            writer.write_sample(sample).unwrap();
-            writer.write_sample(sample).unwrap();
-        }
-        writer.finalize().unwrap();
-        let sound = read_sound(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        // All of it at 48 kHz, and the flush after it.
-        assert!(sound.len() >= SAMPLE_RATE as usize / 5, "{} samples", sound.len());
-        let middle = &sound[SAMPLE_RATE as usize / 20..SAMPLE_RATE as usize * 3 / 20];
-        let crossings = middle.windows(2).filter(|pair| (pair[0] < 0.) != (pair[1] < 0.)).count();
-        let pitch = crossings as f32 / 2. / (middle.len() as f32 / SAMPLE_RATE as f32);
-        assert!((pitch - 440.).abs() < 10., "{pitch} Hz");
-        let loudest = middle.iter().fold(0_f32, |most, sample| most.max(sample.abs()));
-        assert!((loudest - 0.5).abs() < 0.05, "{loudest}");
     }
 }

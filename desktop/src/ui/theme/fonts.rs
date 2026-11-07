@@ -1,11 +1,10 @@
-//! Geist and Geist Mono, in the weights the app sets, inside the binary: text looks the same on
-//! every system, and a weight is a weight, not whatever a system's variable font makes of it.
+// Built in, so text looks the same on every system and a weight is a weight, not
+// whatever a system's variable font makes of it.
 
 use std::borrow::Cow;
 
 use gpui::App;
 
-/// The family of all text, and of what is read character by character: servers, times and keys.
 pub const SANS: &str = "Geist";
 pub const MONO: &str = "Geist Mono";
 

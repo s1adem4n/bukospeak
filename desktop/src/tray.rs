@@ -1,39 +1,25 @@
-//! The icon in the system's tray: a dot on it says whether one is in the call and muted; a
-//! click opens the window, and its menu opens it, joins or leaves, mutes and quits. While it is
-//! there, closing the window keeps the app and the call going.
-//!
-//! Linux shows it through the StatusNotifierItem interface over D-Bus, which its desktops' trays
-//! read; Windows and macOS through their own tray, which `tray-icon` draws.
-
 const OPEN: &str = "Öffnen";
 const JOIN: &str = "Beitreten";
 const LEAVE: &str = "Verlassen";
 const MUTE: &str = "Stummschalten";
 const QUIT: &str = "Beenden";
 
-/// The tray's icon, the microphone of the app's icon, 64 pixels square, as RGBA.
 const ICON: &[u8] = include_bytes!("../assets/tray.rgba");
 const ICON_SIZE: u32 = 64;
 
-/// The status dot: its radius and the gap cut around it, in the icon's pixels, and its colors,
-/// the window's green and red.
 const DOT: f32 = 11.;
 const DOT_GAP: f32 = 4.;
 const GREEN: [u8; 3] = [0x3d, 0xd6, 0x8c];
 const RED: [u8; 3] = [0xe5, 0x48, 0x4d];
 
-/// Where one stands, as the tray shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
     Out,
-    /// In the call, or joining it.
     In,
-    /// In the call, muted.
     Muted,
 }
 
 impl Standing {
-    /// The menu's item that joins or leaves.
     fn call_label(self) -> &'static str {
         match self {
             Self::Out => JOIN,
@@ -42,8 +28,6 @@ impl Standing {
     }
 }
 
-/// The icon as RGBA for `standing`: in a call with a dot in its corner, cut out of the
-/// microphone so it reads on any tray.
 fn icon(standing: Standing) -> Vec<u8> {
     let color = match standing {
         Standing::Out => return ICON.to_vec(),
@@ -55,10 +39,9 @@ fn icon(standing: Standing) -> Vec<u8> {
     for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (x, y) = ((index as u32 % ICON_SIZE) as f32 + 0.5, (index as u32 / ICON_SIZE) as f32 + 0.5);
         let distance = ((x - center).powi(2) + (y - center).powi(2)).sqrt();
-        // Edges a pixel wide, so the circle isn't jagged.
-        let inside = (DOT + 0.5 - distance).clamp(0., 1.);
-        let cut = (DOT + DOT_GAP + 0.5 - distance).clamp(0., 1.);
-        let alpha = f32::from(pixel[3]) * (1. - cut);
+        let antialiased_coverage = |radius: f32| (radius + 0.5 - distance).clamp(0., 1.);
+        let inside = antialiased_coverage(DOT);
+        let alpha = f32::from(pixel[3]) * (1. - antialiased_coverage(DOT + DOT_GAP));
         let [red, green, blue] = color;
         let dot = 255. * inside;
         let total = dot + alpha * (1. - inside);
@@ -145,7 +128,6 @@ mod platform {
     pub struct Tray(Handle<Item>);
 
     impl Tray {
-        /// The tray's icon, if the desktop has a tray to show it in.
         pub fn new(actions: UnboundedSender<Action>) -> Option<Self> {
             match (Item { standing: Standing::Out, muted: false, actions }).spawn() {
                 Ok(handle) => Some(Self(handle)),
@@ -157,7 +139,7 @@ mod platform {
         }
 
         pub fn show(&self, standing: Standing, muted: bool) {
-            // None once the tray's service stopped, when there is no icon left to change.
+            // Fails only once the tray's service stopped, and with it the icon.
             let _ = self.0.update(|item| {
                 item.standing = standing;
                 item.muted = muted;
@@ -185,12 +167,10 @@ mod platform {
         call: MenuItem,
         mute: CheckMenuItem,
         icon: TrayIcon,
-        /// What the icon shows, so it is drawn anew only when that changes.
         shown: Cell<Standing>,
     }
 
     impl Tray {
-        /// The tray's icon; None if the system refused it.
         pub fn new(actions: UnboundedSender<Action>) -> Option<Self> {
             let standing = Standing::Out;
             let (open, call, mute, quit) = (
@@ -204,8 +184,8 @@ mod platform {
                 tracing::warn!("no tray: {error}");
                 return None;
             }
-            // A click shows the menu on macOS, as there; on Windows it opens the window, and the
-            // menu is on the right button, as there.
+            // As each system has it: a click shows the menu on macOS and opens the window on
+            // Windows, whose menu is on the right button.
             let built = TrayIconBuilder::new()
                 .with_icon(picture(standing))
                 .with_tooltip("BukoSpeak")

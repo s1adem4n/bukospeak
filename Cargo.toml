@@ -53,6 +53,8 @@ objc2-core-audio-types = { version = "0.3.2", default-features = false, features
 opus = { version = "0.4.0", features = ["dred"] }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 ring = "0.17.14"
+# The app's sounds: one output stream, cues mixed into it, WAV files decoded.
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "wav"] }
 rtrb = "0.4.1"
 rubato = "5.0.1"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }

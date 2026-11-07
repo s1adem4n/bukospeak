@@ -1,5 +1,3 @@
-//! How loud the microphone is, as a short rail that fills from the left.
-
 use std::time::Duration;
 
 use bukospeak_core::Meter;
@@ -7,10 +5,8 @@ use gpui::{Context, IntoElement, ParentElement, Render, Styled, Task, Window, di
 
 use crate::ui::theme::{self, ActiveTokens};
 
-/// How often the rail looks at the meter: as often as a level is seen to move.
-const LOOK_EVERY: Duration = Duration::from_millis(33);
+const POLL_INTERVAL: Duration = Duration::from_millis(33);
 
-/// The rail of a meter, redrawn only when how far it is filled changes by a step.
 pub struct InputLevel {
     meter: Meter,
     lit: usize,
@@ -21,7 +17,7 @@ impl InputLevel {
     pub fn new(meter: Meter, cx: &mut Context<Self>) -> Self {
         let looking = cx.spawn(async move |level, cx| {
             loop {
-                cx.background_executor().timer(LOOK_EVERY).await;
+                cx.background_executor().timer(POLL_INTERVAL).await;
                 let looked = level.update(cx, |level, cx| {
                     let lit = lit(level.meter.level());
                     if lit != level.lit {
@@ -38,7 +34,6 @@ impl InputLevel {
     }
 }
 
-/// How many of the rail's steps a level fills.
 fn lit(level: f32) -> usize {
     (level.clamp(0., 1.) * theme::LEVEL_STEPS as f32).round() as usize
 }
@@ -48,9 +43,8 @@ impl Render for InputLevel {
         let tokens = cx.tokens();
         let filled = self.lit as f32 / theme::LEVEL_STEPS as f32;
         div()
-            .flex_none()
-            .w(theme::LEVEL.width)
-            .h(theme::LEVEL.height)
+            .flex_1()
+            .h(theme::LEVEL)
             .rounded_full()
             .bg(tokens.hover)
             .child(div().h_full().w(relative(filled)).rounded_full().bg(tokens.speaking))

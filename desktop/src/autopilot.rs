@@ -1,7 +1,3 @@
-//! What the app does on its own, so it stays out of the way: it joins the call when a game
-//! starts, leaves a call one has been alone in a while without a game, and sounds what happens
-//! in the call, for while its window isn't looked at.
-
 use std::time::{Duration, Instant};
 
 use bukospeak_core::proto::MemberId;
@@ -15,53 +11,40 @@ use crate::cues::{self, Cue, Cues};
 use crate::games::Watcher;
 use crate::ui::Client;
 
-/// How long one is left alone in a call, with no game running, before the app leaves it.
 const ALONE: Duration = Duration::from_secs(5 * 60);
 
-/// How often the app looks whether that time is up, besides whenever the call changes.
 const TICK: Duration = Duration::from_secs(15);
 
-/// What the rules have the app do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Do {
     Join,
     Leave,
 }
 
-/// What the rules look at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Seen {
-    /// Whether a game of the settings runs.
-    game: bool,
-    /// Whether one is out of the call, not joining it either.
-    out: bool,
-    /// Whether one is alone in a call that is up.
+    game_runs: bool,
+    out_of_call: bool,
     alone: bool,
-    /// Whether there is all that joining takes.
-    ready: bool,
+    can_join: bool,
 }
 
-/// When to join and leave. A game starting asks for a join, which happens once one is out of
-/// the call and all is there for it; a join one leaves, or a game running when one joined
-/// another way, isn't asked for again until a game starts anew.
 #[derive(Debug, Default)]
 struct Rules {
-    game: bool,
-    /// A game started, and the join it asks for hasn't happened.
-    asked: bool,
-    /// Since when one is alone in the call with no game running.
+    game_ran: bool,
+    join_asked: bool,
     alone_since: Option<Instant>,
 }
 
 impl Rules {
     fn step(&mut self, now: Instant, seen: Seen) -> Option<Do> {
-        self.asked = seen.game && (self.asked || !self.game) && seen.out;
-        self.game = seen.game;
-        if self.asked && seen.ready {
-            self.asked = false;
+        self.join_asked = seen.game_runs && (self.join_asked || !self.game_ran) && seen.out_of_call;
+        self.game_ran = seen.game_runs;
+        if self.join_asked && seen.can_join {
+            self.join_asked = false;
             return Some(Do::Join);
         }
-        if !seen.alone || seen.game {
+        if !seen.alone || seen.game_runs {
             self.alone_since = None;
             return None;
         }
@@ -73,14 +56,11 @@ impl Rules {
     }
 }
 
-/// What the cues follow of the call.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Snapshot {
-    /// Whether a call is up, joining again included.
+    active: bool,
     in_call: bool,
-    /// Whether it is connected, so who is in it is known.
     connected: bool,
-    /// Who else is in it.
     others: Vec<MemberId>,
     muted: bool,
 }
@@ -89,6 +69,7 @@ impl Snapshot {
     fn of(call: &Call) -> Self {
         let you = call.you();
         Self {
+            active: matches!(call.phase(), Phase::Joining | Phase::Connected | Phase::Reconnecting),
             in_call: call.is_in_call(),
             connected: *call.phase() == Phase::Connected,
             others: call.members().iter().map(|member| member.id).filter(|id| Some(*id) != you).collect(),
@@ -97,13 +78,12 @@ impl Snapshot {
     }
 }
 
-/// The cues for what changed from `before` to `after`.
 fn changes(before: &Snapshot, after: &Snapshot) -> Vec<Cue> {
     let mut cues = Vec::new();
     match (before.in_call, after.in_call) {
         (false, true) => cues.push(Cue::Joined),
         (true, false) => cues.push(Cue::Left),
-        // Who comes and goes is known only while connected: joining again, the call is empty.
+        // Who is in the call is known only while connected; joining again, it is empty.
         _ if before.connected && after.connected => {
             if after.others.iter().any(|id| !before.others.contains(id)) {
                 cues.push(Cue::Came);
@@ -125,15 +105,10 @@ fn changes(before: &Snapshot, after: &Snapshot) -> Vec<Cue> {
 pub struct Autopilot {
     client: Entity<Client>,
     rules: Rules,
-    /// Whether a game of the settings runs, as the watcher told last.
-    game: bool,
-    /// The games watched for, as the settings had them.
+    game_runs: bool,
     games: Vec<String>,
-    /// The call as the cues followed it last.
     seen: Snapshot,
-    /// None if its thread didn't start: then no game is seen running.
     watcher: Option<Watcher>,
-    /// None if its thread didn't start: then the app is silent.
     cues: Option<Cues>,
     _client: Subscription,
     _games: Task<()>,
@@ -141,7 +116,6 @@ pub struct Autopilot {
 }
 
 impl Autopilot {
-    /// Starts following `client`.
     pub fn new(client: Entity<Client>, cx: &mut App) -> Entity<Self> {
         cx.new(|cx| {
             let (tell, mut told) = mpsc::unbounded();
@@ -156,7 +130,7 @@ impl Autopilot {
             let following = cx.spawn(async move |this, cx| {
                 while let Some(runs) = told.next().await {
                     let applied = this.update(cx, |autopilot: &mut Self, cx| {
-                        autopilot.game = runs;
+                        autopilot.game_runs = runs;
                         autopilot.decide(cx);
                     });
                     if applied.is_err() {
@@ -174,7 +148,7 @@ impl Autopilot {
             });
             Self {
                 rules: Rules::default(),
-                game: false,
+                game_runs: false,
                 games,
                 seen: Snapshot::of(&client.read(cx).call),
                 watcher,
@@ -187,14 +161,21 @@ impl Autopilot {
         })
     }
 
-    /// Sounds what changed in the call, watches for the games the settings have now, and
-    /// decides anew.
     fn follow(&mut self, cx: &mut Context<Self>) {
         let client = self.client.read(cx);
         let now = Snapshot::of(&client.call);
         if let Some(cues) = &self.cues {
-            for cue in changes(&self.seen, &now) {
-                cues.play(cue, client.settings.device(Direction::Output));
+            let output = client.settings.device(Direction::Output);
+            // Open from the start of a join, so the device is awake by the time its cue plays.
+            if now.active && !self.seen.active {
+                cues.open(output.clone());
+            }
+            let changed = changes(&self.seen, &now);
+            if !changed.is_empty() {
+                cues.play(changed, output.clone());
+            }
+            if !now.active && self.seen.active {
+                cues.close();
             }
         }
         self.seen = now;
@@ -211,10 +192,10 @@ impl Autopilot {
         let client = self.client.read(cx);
         let call = &client.call;
         let seen = Seen {
-            game: self.game,
-            out: matches!(call.phase(), Phase::Idle | Phase::Failed(_)),
+            game_runs: self.game_runs,
+            out_of_call: matches!(call.phase(), Phase::Idle | Phase::Failed(_)),
             alone: call.is_in_call() && call.members().len() <= 1,
-            ready: client.settings.is_complete(),
+            can_join: client.settings.is_complete(),
         };
         match self.rules.step(Instant::now(), seen) {
             Some(Do::Join) => self.client.update(cx, |client, cx| client.join(cx)),
@@ -228,9 +209,9 @@ impl Autopilot {
 mod tests {
     use super::*;
 
-    const OUT: Seen = Seen { game: false, out: true, alone: false, ready: true };
-    const PLAYING: Seen = Seen { game: true, ..OUT };
-    const IN_A_GAME_CALL: Seen = Seen { game: true, out: false, alone: false, ready: true };
+    const OUT: Seen = Seen { game_runs: false, out_of_call: true, alone: false, can_join: true };
+    const PLAYING: Seen = Seen { game_runs: true, ..OUT };
+    const IN_A_GAME_CALL: Seen = Seen { game_runs: true, out_of_call: false, alone: false, can_join: true };
 
     #[test]
     fn a_game_starting_joins_once() {
@@ -238,7 +219,6 @@ mod tests {
         assert_eq!(rules.step(now, OUT), None);
         assert_eq!(rules.step(now, PLAYING), Some(Do::Join));
         assert_eq!(rules.step(now, IN_A_GAME_CALL), None);
-        // Left during the game: not joined again until a game starts anew.
         assert_eq!(rules.step(now, PLAYING), None);
         assert_eq!(rules.step(now, OUT), None);
         assert_eq!(rules.step(now, PLAYING), Some(Do::Join));
@@ -247,14 +227,14 @@ mod tests {
     #[test]
     fn a_game_running_at_the_start_joins_once_all_is_there() {
         let (mut rules, now) = (Rules::default(), Instant::now());
-        assert_eq!(rules.step(now, Seen { ready: false, ..PLAYING }), None);
+        assert_eq!(rules.step(now, Seen { can_join: false, ..PLAYING }), None);
         assert_eq!(rules.step(now, PLAYING), Some(Do::Join));
     }
 
     #[test]
     fn a_game_starting_in_a_call_joins_nothing() {
         let (mut rules, now) = (Rules::default(), Instant::now());
-        assert_eq!(rules.step(now, Seen { game: false, ..IN_A_GAME_CALL }), None);
+        assert_eq!(rules.step(now, Seen { game_runs: false, ..IN_A_GAME_CALL }), None);
         assert_eq!(rules.step(now, IN_A_GAME_CALL), None);
         assert_eq!(rules.step(now, PLAYING), None);
     }
@@ -262,7 +242,7 @@ mod tests {
     #[test]
     fn alone_without_a_game_leaves_after_a_while() {
         let (mut rules, start) = (Rules::default(), Instant::now());
-        let alone = Seen { game: false, out: false, alone: true, ready: true };
+        let alone = Seen { game_runs: false, out_of_call: false, alone: true, can_join: true };
         assert_eq!(rules.step(start, alone), None);
         assert_eq!(rules.step(start + ALONE - Duration::from_secs(1), alone), None);
         assert_eq!(rules.step(start + ALONE, alone), Some(Do::Leave));
@@ -271,17 +251,17 @@ mod tests {
     #[test]
     fn company_or_a_game_keeps_one_in_the_call() {
         let (mut rules, start) = (Rules::default(), Instant::now());
-        let alone = Seen { game: false, out: false, alone: true, ready: true };
+        let alone = Seen { game_runs: false, out_of_call: false, alone: true, can_join: true };
         assert_eq!(rules.step(start, alone), None);
         assert_eq!(rules.step(start + ALONE / 2, Seen { alone: false, ..alone }), None);
         assert_eq!(rules.step(start + ALONE, alone), None);
-        assert_eq!(rules.step(start + ALONE * 2, Seen { game: true, ..alone }), None);
+        assert_eq!(rules.step(start + ALONE * 2, Seen { game_runs: true, ..alone }), None);
         assert_eq!(rules.step(start + ALONE * 3, alone), None);
         assert_eq!(rules.step(start + ALONE * 4, alone), Some(Do::Leave));
     }
 
     fn snapshot(in_call: bool, others: &[u16], muted: bool) -> Snapshot {
-        Snapshot { in_call, connected: in_call, others: others.iter().map(|&id| MemberId(id)).collect(), muted }
+        Snapshot { active: in_call, in_call, connected: in_call, others: others.iter().map(|&id| MemberId(id)).collect(), muted }
     }
 
     #[test]
