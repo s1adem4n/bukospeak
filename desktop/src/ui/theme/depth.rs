@@ -40,11 +40,6 @@ pub fn floating(tokens: &Tokens) -> Vec<BoxShadow> {
     vec![shadow(step(0.5), step(1.5), tokens.shadow_soft), shadow(step(2.), step(6.), tokens.shadow_soft)]
 }
 
-/// A dialog, above a scrim.
-pub fn overlay(tokens: &Tokens) -> Vec<BoxShadow> {
-    vec![edge_light(tokens.highlight), shadow(step(1.), step(3.), tokens.shadow_soft), shadow(step(6.), step(12.), tokens.shadow)]
-}
-
 /// The window's edge where the app draws it, in `color`, dimmed while the window is inactive.
 pub fn frame(color: Hsla) -> Vec<BoxShadow> {
     vec![shadow(step(0.5), FRAME_SHADOW / 2., color)]

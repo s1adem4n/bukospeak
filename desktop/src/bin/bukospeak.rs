@@ -6,10 +6,9 @@ use std::sync::{Arc, mpsc};
 
 use anyhow::Context;
 use bukospeak_core::proto::MemberId;
-use bukospeak_core::{Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Update};
+use bukospeak_core::{Channel, Conditioning, Engine, Joined, Listener, Update};
 use bukospeak_desktop::audio::{self, Audio, DeviceId, Direction};
 use bukospeak_desktop::install::Progress;
-use bukospeak_desktop::known_servers::KnownServers;
 use bukospeak_desktop::nvidia::{self, Effects};
 use bukospeak_desktop::settings::Suppression;
 use clap::{Parser, Subcommand};
@@ -26,14 +25,11 @@ struct Args {
 enum Command {
     /// List the audio devices, the defaults marked with *.
     Devices,
-    /// Join the channel and talk, printing who comes, goes and speaks, until Ctrl-C.
+    /// Join the channel as this device on the server's tailnet and talk, printing who comes,
+    /// goes and speaks, until Ctrl-C.
     Join {
         /// The server as host:port.
         server: String,
-        #[arg(long, env = "BUKOSPEAK_NAME")]
-        name: String,
-        #[arg(long, env = "BUKOSPEAK_ROOM_KEY", hide_env_values = true)]
-        room_key: String,
         /// The microphone's id, as `devices` lists it; the default if not given.
         #[arg(long)]
         input: Option<DeviceId>,
@@ -74,9 +70,9 @@ fn main() -> anyhow::Result<()> {
         .init();
     match Args::parse().command {
         Command::Devices => devices(),
-        Command::Join { server, name, room_key, input, output, suppression, no_echo_cancellation } => {
+        Command::Join { server, input, output, suppression, no_echo_cancellation } => {
             let processing = Processing { suppression, echo_cancellation: !no_echo_cancellation };
-            join(JoinConfig { server, name, room_key, pin: None }, input, output, processing)
+            join(&server, input, output, processing)
         }
     }
 }
@@ -97,14 +93,9 @@ struct Processing {
     echo_cancellation: bool,
 }
 
-fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, processing: Processing) -> anyhow::Result<()> {
-    let folder = bukospeak_desktop::config_folder().context("this system has no config folder")?;
-    let known = KnownServers::at(folder.join("known_servers"));
-    let server = config.server.clone();
-    let pin = known.get(&server)?;
-
+fn join(server: &str, input: Option<DeviceId>, output: Option<DeviceId>, processing: Processing) -> anyhow::Result<()> {
     let effects = match processing.suppression.nvidia() {
-        Some(_) => Some(install(&config, &known)?),
+        Some(_) => Some(install(server)?),
         None => None,
     };
 
@@ -113,17 +104,7 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, p
     let engine = Engine::new(Conditioning::Engine, Arc::new(Forward(happenings.clone())))?;
     engine.set_suppression(processing.suppression.engines(effects.as_ref()))?;
     engine.set_echo_cancellation(processing.echo_cancellation);
-    let Joined { fingerprint, microphone, speaker } = match engine.join(JoinConfig { pin, ..config }) {
-        Err(Error::FingerprintChanged { pinned, presented }) => anyhow::bail!(
-            "{server}'s certificate changed from {pinned} to {presented}: if the server was set up anew, remove its line from {}",
-            known.path().display()
-        ),
-        joined => joined.with_context(|| format!("joining {server}"))?,
-    };
-    if pin.is_none() {
-        known.insert(&server, fingerprint)?;
-        println!("trusting {server} from now on by its fingerprint {fingerprint}");
-    }
+    let Joined { microphone, speaker } = engine.join(server).with_context(|| format!("joining {server}"))?;
 
     let failures = happenings.clone();
     // The client stops listening only on its way out.
@@ -169,10 +150,10 @@ fn join(config: JoinConfig, input: Option<DeviceId>, output: Option<DeviceId>, p
 
 /// Installs NVIDIA's effects for the system's card from the server, unless they are installed,
 /// telling how far it got.
-fn install(config: &JoinConfig, known: &KnownServers) -> anyhow::Result<Arc<Effects>> {
+fn install(server: &str) -> anyhow::Result<Arc<Effects>> {
     let architecture = nvidia::card().context("NVIDIA's effects need an RTX card under Windows")?;
     let mut shown = None;
-    nvidia::install(&config.server, config.room_key.clone(), known, architecture, |progress| {
+    nvidia::install(server, architecture, |progress| {
         let (what, done, total) = match progress {
             Progress::Preparing { done, total } => ("the server gets NVIDIA's effects", done, total),
             Progress::Fetching { done, total } => ("downloading NVIDIA's effects", done, total),

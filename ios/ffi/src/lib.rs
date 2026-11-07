@@ -14,12 +14,12 @@ mod ios;
 mod voice_unit;
 
 use std::ffi::{CStr, c_char, c_void};
+use std::ptr;
 use std::str::Utf8Error;
 use std::sync::{Arc, Mutex};
 
-use bukospeak_core::proto::Fingerprint;
-use bukospeak_core::proto::control::Member;
-use bukospeak_core::{Conditioning, Engine, Error, JoinConfig, Joined, Listener, State, Suppression, Update};
+use bukospeak_core::proto::control::{Member, Rejection};
+use bukospeak_core::{Conditioning, Engine, Error, Joined, Listener, Lost, State, Suppression, Update};
 
 #[cfg(target_os = "ios")]
 use crate::ios::Audio;
@@ -35,13 +35,6 @@ impl BukoSpeakStr {
     fn of(text: &str) -> Self {
         Self { ptr: text.as_ptr(), len: text.len() }
     }
-}
-
-/// A server's certificate fingerprint, its SHA-256.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct BukoSpeakFingerprint {
-    pub bytes: [u8; 32],
 }
 
 #[repr(C)]
@@ -86,8 +79,8 @@ pub struct BukoSpeakUpdate {
     pub speaking_len: usize,
     /// What to tell the user aloud about the change, in German; empty if nothing.
     pub announcement: BukoSpeakStr,
-    /// The call ended without a leave: why, for the user; empty otherwise.
-    pub lost: BukoSpeakStr,
+    /// Why the call ended without a leave; null otherwise.
+    pub lost: *const BukoSpeakError,
     /// Who is in the channel while the engine watches it from outside, in the order they came.
     pub present: *const BukoSpeakMember,
     pub present_len: usize,
@@ -96,36 +89,50 @@ pub struct BukoSpeakUpdate {
 /// Hears the channel after each change, in order, on a thread of the engine's.
 pub type BukoSpeakListener = extern "C" fn(context: *mut c_void, update: &BukoSpeakUpdate);
 
+/// Why a join failed or a call was lost, as far as the app tells it apart.
 #[repr(C)]
-pub enum BukoSpeakJoinStatus {
-    Joined,
-    /// The server presented another certificate than the one pinned: it was set up anew, or
-    /// someone pretends to be it.
-    FingerprintChanged,
-    Failed,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BukoSpeakReason {
+    /// Anything else: the server didn't answer, the connection broke, and the like.
+    Other,
+    /// The server's tailnet doesn't know this device: it isn't on that tailnet, or Tailscale is
+    /// off.
+    Stranger,
+    /// The server couldn't ask its tailnet who this device is.
+    Unidentified,
+    /// This device joined the channel again elsewhere, which took the call's place.
+    Replaced,
 }
 
-/// How a join went; only its status's fields mean something.
-#[repr(C)]
-pub struct BukoSpeakJoinResult {
-    pub status: BukoSpeakJoinStatus,
-    /// Joined: the server's, to pin for the next join. FingerprintChanged: the one presented.
-    pub fingerprint: BukoSpeakFingerprint,
-    /// FingerprintChanged: the one pinned.
-    pub pinned: BukoSpeakFingerprint,
-    /// FingerprintChanged and Failed: what happened, for the user.
-    pub message: BukoSpeakStr,
-}
+impl BukoSpeakReason {
+    fn of(error: &Error) -> Self {
+        match error {
+            Error::Rejected(Rejection::Stranger) => Self::Stranger,
+            Error::Rejected(Rejection::Unidentified) => Self::Unidentified,
+            Error::Replaced => Self::Replaced,
+            _ => Self::Other,
+        }
+    }
 
-impl BukoSpeakJoinResult {
-    fn new(status: BukoSpeakJoinStatus, message: &str) -> Self {
-        let unknown = BukoSpeakFingerprint { bytes: [0; 32] };
-        Self { status, fingerprint: unknown, pinned: unknown, message: BukoSpeakStr::of(message) }
+    /// Why a call was lost: after its connection was, why joining again failed.
+    fn lost(lost: &Lost) -> Self {
+        match lost {
+            Lost::Unrecovered { rejoin, .. } => Self::of(rejoin),
+            Lost::Replaced => Self::Replaced,
+        }
     }
 }
 
-/// Hears a join's result.
-pub type BukoSpeakJoinDone = extern "C" fn(context: *mut c_void, result: &BukoSpeakJoinResult);
+/// Why a join failed or a call was lost.
+#[repr(C)]
+pub struct BukoSpeakError {
+    pub reason: BukoSpeakReason,
+    /// What happened, in English, for the log.
+    pub message: BukoSpeakStr,
+}
+
+/// Hears how a join went: null if it joined, otherwise why not.
+pub type BukoSpeakJoinDone = extern "C" fn(context: *mut c_void, error: Option<&BukoSpeakError>);
 
 /// Hears why something failed, for the user.
 pub type BukoSpeakFailed = extern "C" fn(context: *mut c_void, message: BukoSpeakStr);
@@ -159,7 +166,8 @@ impl Listener for Foreign {
         let speaking: Vec<u16> = channel.speaking().iter().map(|id| id.0).collect();
         let present: Vec<BukoSpeakMember> = channel.present().iter().map(BukoSpeakMember::of).collect();
         let announcement = announcement.map(|announcement| announcement.to_string()).unwrap_or_default();
-        let lost = lost.map(|lost| lost.to_string()).unwrap_or_default();
+        let lost = lost.map(|lost| (BukoSpeakReason::lost(&lost), lost.to_string()));
+        let lost = lost.as_ref().map(|(reason, message)| BukoSpeakError { reason: *reason, message: BukoSpeakStr::of(message) });
         let state = match channel.state() {
             State::Out => BukoSpeakState::Out,
             State::Connected => BukoSpeakState::Connected,
@@ -176,7 +184,7 @@ impl Listener for Foreign {
                 speaking: speaking.as_ptr(),
                 speaking_len: speaking.len(),
                 announcement: BukoSpeakStr::of(&announcement),
-                lost: BukoSpeakStr::of(&lost),
+                lost: lost.as_ref().map_or(ptr::null(), ptr::from_ref),
                 present: present.as_ptr(),
                 present_len: present.len(),
             },
@@ -207,50 +215,32 @@ pub extern "C" fn bukospeak_engine_free(engine: Box<BukoSpeakEngine>) {
     drop(engine);
 }
 
-/// Leaves the call before, if there is one, and joins the channel, trusting the server by its
-/// fingerprint `pin`, or on first use if it is null. Blocks until the server welcomes this
-/// member or turns it away, 5 s at most, and hands `done` the result before it returns. Who is
-/// in the call comes as the next update.
+/// Leaves the call before, if there is one, and joins the channel of `server`, as `host:port`,
+/// as this device, which the server knows from its tailnet. Blocks until the server welcomes
+/// this member or turns it away, 5 s at most, and hands `done` the result before it returns. Who
+/// is in the call comes as the next update.
 ///
 /// # Safety
 ///
-/// `server`, `name` and `room_key` aren't null and are NUL-terminated.
+/// `server` isn't null and is NUL-terminated.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bukospeak_engine_join(
     engine: &BukoSpeakEngine,
     server: *const c_char,
-    name: *const c_char,
-    room_key: *const c_char,
-    pin: Option<&BukoSpeakFingerprint>,
     context: *mut c_void,
     done: BukoSpeakJoinDone,
 ) {
-    // SAFETY: the caller vouches for the strings.
-    let texts = unsafe { (text(server), text(name), text(room_key)) };
-    let (Ok(server), Ok(name), Ok(room_key)) = texts else {
-        return done(context, &BukoSpeakJoinResult::new(BukoSpeakJoinStatus::Failed, "the server, name or room key isn't UTF-8"));
+    // SAFETY: the caller vouches for the string.
+    let Ok(server) = (unsafe { text(server) }) else {
+        let message = BukoSpeakStr::of("the server isn't UTF-8");
+        return done(context, Some(&BukoSpeakError { reason: BukoSpeakReason::Other, message }));
     };
-    let pin = pin.map(|pin| Fingerprint(pin.bytes));
-    match engine.join(JoinConfig { server, name, room_key, pin }) {
-        Ok(fingerprint) => done(
-            context,
-            &BukoSpeakJoinResult {
-                fingerprint: BukoSpeakFingerprint { bytes: fingerprint.0 },
-                ..BukoSpeakJoinResult::new(BukoSpeakJoinStatus::Joined, "")
-            },
-        ),
-        Err(error @ Error::FingerprintChanged { pinned, presented }) => {
+    match engine.join(&server) {
+        Ok(()) => done(context, None),
+        Err(error) => {
             let message = error.to_string();
-            done(
-                context,
-                &BukoSpeakJoinResult {
-                    fingerprint: BukoSpeakFingerprint { bytes: presented.0 },
-                    pinned: BukoSpeakFingerprint { bytes: pinned.0 },
-                    ..BukoSpeakJoinResult::new(BukoSpeakJoinStatus::FingerprintChanged, &message)
-                },
-            );
+            done(context, Some(&BukoSpeakError { reason: BukoSpeakReason::of(&error), message: BukoSpeakStr::of(&message) }));
         }
-        Err(error) => done(context, &BukoSpeakJoinResult::new(BukoSpeakJoinStatus::Failed, &error.to_string())),
     }
 }
 
@@ -262,26 +252,21 @@ pub extern "C" fn bukospeak_engine_leave(engine: &BukoSpeakEngine) -> u64 {
     engine.leave()
 }
 
-/// Watches who is in the channel without joining it, until `bukospeak_engine_unwatch` or a join;
-/// the updates tell them as present. The server is trusted by `pin` only, from a join before.
-/// Returns at once; a watch that fails shows nobody and starts again after a while.
+/// Watches who is in the channel of `server` without joining it, until `bukospeak_engine_unwatch`
+/// or a join; the updates tell them as present. Returns at once; a watch that fails shows nobody
+/// and starts again after a while.
 ///
 /// # Safety
 ///
-/// `server` and `room_key` aren't null and are NUL-terminated.
+/// `server` isn't null and is NUL-terminated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bukospeak_engine_watch(
-    engine: &BukoSpeakEngine,
-    server: *const c_char,
-    room_key: *const c_char,
-    pin: &BukoSpeakFingerprint,
-) {
-    // SAFETY: the caller vouches for the strings.
-    let (Ok(server), Ok(room_key)) = (unsafe { text(server) }, unsafe { text(room_key) }) else {
+pub unsafe extern "C" fn bukospeak_engine_watch(engine: &BukoSpeakEngine, server: *const c_char) {
+    // SAFETY: the caller vouches for the string.
+    let Ok(server) = (unsafe { text(server) }) else {
         // An app's own settings are UTF-8; text that isn't can't name a server to watch.
         return;
     };
-    engine.engine.watch(server, room_key, Fingerprint(pin.bytes));
+    engine.engine.watch(server);
 }
 
 /// Stops watching who is in the channel, if the engine does.
@@ -344,10 +329,10 @@ pub extern "C" fn bukospeak_engine_stop_audio(engine: &BukoSpeakEngine) {
 }
 
 impl BukoSpeakEngine {
-    fn join(&self, config: JoinConfig) -> Result<Fingerprint, Error> {
+    fn join(&self, server: &str) -> Result<(), Error> {
         let _calls = self.calls.lock().expect("the calls lock is never poisoned");
         self.stop_call_audio();
-        let Joined { fingerprint, microphone, speaker } = self.engine.join(config)?;
+        let Joined { microphone, speaker } = self.engine.join(server)?;
         #[cfg(target_os = "ios")]
         {
             *self.audio.lock().expect("the audio lock is never poisoned") = Audio::Idle(microphone, speaker);
@@ -355,7 +340,7 @@ impl BukoSpeakEngine {
         // Off iOS the call goes without audio: there it runs only in the tests.
         #[cfg(not(target_os = "ios"))]
         drop((microphone, speaker));
-        Ok(fingerprint)
+        Ok(())
     }
 
     fn leave(&self) -> u64 {

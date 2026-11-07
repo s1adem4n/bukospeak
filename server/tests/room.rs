@@ -3,36 +3,45 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bukospeak_core::Error;
+use bukospeak_core::download::Download;
 use bukospeak_core::proto::control::{Member, Rejection};
-use bukospeak_core::proto::{Fingerprint, IDLE_TIMEOUT, MemberId, audio};
-use bukospeak_core::session::{Entry, Event, Session, Watch};
-use bukospeak_core::{Error, JoinConfig};
-use bukospeak_server::{Downloads, Identity, Room, endpoint};
+use bukospeak_core::proto::{IDLE_TIMEOUT, MemberId, audio};
+use bukospeak_core::session::{Event, Session, Watch};
+use bukospeak_server::{Device, Downloads, Room, Tailnet, endpoint};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-const ROOM_KEY: &str = "room-key";
-
-struct Server {
-    address: SocketAddr,
-    fingerprint: Fingerprint,
+/// A tailnet in which each connection is a device of its own.
+fn own(peer: SocketAddr) -> Option<Device> {
+    Some(Device { id: peer.to_string(), name: format!("member {}", peer.port()) })
 }
 
-fn serve() -> Server {
-    let identity = Identity::generate().unwrap();
-    let endpoint = endpoint(&identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+/// A tailnet in which every connection is the same phone.
+fn phone(_: SocketAddr) -> Option<Device> {
+    Some(Device { id: "phone".into(), name: "Phone Owner".into() })
+}
+
+/// A tailnet whose tailscaled doesn't answer.
+struct Down;
+
+impl Tailnet for Down {
+    fn whois(&self, _: SocketAddr) -> anyhow::Result<Option<Device>> {
+        anyhow::bail!("tailscaled isn't running")
+    }
+}
+
+/// A room on localhost whose members `tailnet` tells; its address.
+fn serve(tailnet: impl Tailnet) -> String {
+    let endpoint = endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = endpoint.local_addr().unwrap();
-    tokio::spawn(Room::new(ROOM_KEY.into(), Downloads::none()).serve(endpoint));
-    Server { address, fingerprint: identity.fingerprint() }
+    tokio::spawn(Room::new(tailnet, Downloads::none()).serve(endpoint));
+    address.to_string()
 }
 
-fn config(server: &Server, name: &str) -> JoinConfig {
-    JoinConfig { server: server.address.to_string(), name: name.into(), room_key: ROOM_KEY.into(), pin: Some(server.fingerprint) }
-}
-
-/// Joins unmuted, as a new member.
-async fn join(config: JoinConfig) -> Result<Session, Error> {
-    Session::join(config, Entry::default()).await
+/// Joins unmuted.
+async fn join(server: &str) -> Result<Session, Error> {
+    Session::join(server, false).await
 }
 
 async fn next(session: &mut Session) -> Event {
@@ -44,22 +53,26 @@ async fn next_within(session: &mut Session, within: Duration) -> Event {
 }
 
 async fn changed(watch: &mut Watch) {
-    timeout(Duration::from_secs(2), watch.changed()).await.expect("a change in time").unwrap();
+    changed_within(watch, Duration::from_secs(2)).await;
 }
 
-fn names(members: &[Member]) -> Vec<&str> {
-    members.iter().map(|member| member.name.as_str()).collect()
+async fn changed_within(watch: &mut Watch, within: Duration) {
+    timeout(within, watch.changed()).await.expect("a change in time").unwrap();
+}
+
+fn ids(members: &[Member]) -> Vec<MemberId> {
+    members.iter().map(|member| member.id).collect()
 }
 
 #[tokio::test]
 async fn members_hear_each_other_and_see_who_comes_and_goes() {
-    let server = serve();
-    let mut first = join(config(&server, "first")).await.unwrap();
-    let mut second = join(config(&server, " second ")).await.unwrap();
+    let server = serve(own);
+    let mut first = join(&server).await.unwrap();
+    let mut second = join(&server).await.unwrap();
 
-    assert_eq!(names(second.members()), ["first", "second"]);
+    assert_eq!(ids(second.members()), [first.you(), second.you()]);
     let Event::Joined(joined) = next(&mut first).await else { panic!("the first member isn't told the second joined") };
-    assert_eq!((joined.id, joined.name.as_str()), (second.you(), "second"));
+    assert_eq!(joined.id, second.you());
 
     let frame = audio::Frame { from: MemberId(0), index: 7, last: true, level: audio::Level::new(30), opus: vec![1, 2, 3] };
     first.audio_sender().send(&frame).unwrap();
@@ -71,77 +84,65 @@ async fn members_hear_each_other_and_see_who_comes_and_goes() {
 }
 
 #[tokio::test]
-async fn a_wrong_room_key_is_turned_away() {
-    let server = serve();
-    let joined = join(JoinConfig { room_key: "guess".into(), ..config(&server, "stranger") }).await;
-    assert!(matches!(joined, Err(Error::Rejected(Rejection::RoomKey))));
+async fn a_member_is_named_after_its_devices_owner_without_control_characters() {
+    let server = serve(|_| Some(Device { id: "first".into(), name: " First\u{1b}[2J Member ".into() }));
+    let first = join(&server).await.unwrap();
+    assert_eq!(first.members()[0].name, "First[2J Member");
 }
 
 #[tokio::test]
-async fn a_name_with_control_characters_is_turned_away() {
-    let server = serve();
-    let joined = join(config(&server, "first\u{1b}[2J")).await;
-    assert!(matches!(joined, Err(Error::Rejected(Rejection::Name))));
+async fn a_device_the_tailnet_doesnt_know_is_turned_away() {
+    let server = serve(|_| None);
+    assert!(matches!(join(&server).await, Err(Error::Rejected(Rejection::Stranger))));
+    assert!(matches!(Watch::start(&server).await, Err(Error::Rejected(Rejection::Stranger))));
+    let download = Download::start(&server, "sounds".into(), |_, _| ()).await;
+    assert!(matches!(download, Err(Error::Rejected(Rejection::Stranger))));
 }
 
 #[tokio::test]
-async fn the_first_join_learns_the_fingerprint_and_a_changed_one_is_refused() {
-    let server = serve();
-    let first = join(JoinConfig { pin: None, ..config(&server, "first") }).await.unwrap();
-    assert_eq!(first.fingerprint(), server.fingerprint);
-
-    let stale = Fingerprint::of(b"another certificate");
-    let joined = join(JoinConfig { pin: Some(stale), ..config(&server, "first") }).await;
-    let Err(Error::FingerprintChanged { pinned, presented }) = joined else { panic!("joined despite a changed certificate") };
-    assert_eq!((pinned, presented), (stale, server.fingerprint));
+async fn a_server_that_cant_ask_its_tailnet_turns_everyone_away() {
+    let server = serve(Down);
+    assert!(matches!(join(&server).await, Err(Error::Rejected(Rejection::Unidentified))));
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_server_that_never_answers_times_the_join_out() {
-    let identity = Identity::generate().unwrap();
-    let silent = endpoint(&identity, "127.0.0.1:0".parse().unwrap()).unwrap();
-    let server = Server { address: silent.local_addr().unwrap(), fingerprint: identity.fingerprint() };
+    let silent = endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
+    let server = silent.local_addr().unwrap().to_string();
     // It completes the handshake but never reads the Hello.
     tokio::spawn(async move {
         let connection = silent.accept().await.unwrap().await.unwrap();
         connection.closed().await;
     });
-    assert!(matches!(join(config(&server, "first")).await, Err(Error::TimedOut)));
+    assert!(matches!(join(&server).await, Err(Error::TimedOut)));
 }
 
 #[tokio::test]
 async fn a_watcher_sees_who_comes_and_goes_without_joining() {
-    let server = serve();
-    let first = join(config(&server, "first")).await.unwrap();
-    let mut watch = Watch::start(&server.address.to_string(), ROOM_KEY.into(), server.fingerprint).await.unwrap();
-    assert_eq!(names(watch.members()), ["first"]);
+    let server = serve(own);
+    let first = join(&server).await.unwrap();
+    let mut watch = Watch::start(&server).await.unwrap();
+    assert_eq!(ids(watch.members()), [first.you()]);
 
-    let second = join(config(&server, "second")).await.unwrap();
+    let second = join(&server).await.unwrap();
     changed(&mut watch).await;
-    assert_eq!(names(watch.members()), ["first", "second"]);
+    assert_eq!(ids(watch.members()), [first.you(), second.you()]);
     // The watcher isn't in the channel.
-    assert_eq!(names(second.members()), ["first", "second"]);
+    assert_eq!(ids(second.members()), [first.you(), second.you()]);
 
     first.leave().await;
     changed(&mut watch).await;
-    assert_eq!(names(watch.members()), ["second"]);
-}
-
-#[tokio::test]
-async fn a_watch_with_a_wrong_room_key_is_turned_away() {
-    let server = serve();
-    let watch = Watch::start(&server.address.to_string(), "guess".into(), server.fingerprint).await;
-    assert!(matches!(watch, Err(Error::Rejected(Rejection::RoomKey))));
+    assert_eq!(ids(watch.members()), [second.you()]);
 }
 
 #[tokio::test]
 async fn members_and_watchers_see_who_is_muted() {
-    let server = serve();
-    let mut first = join(config(&server, "first")).await.unwrap();
-    let second = Session::join(config(&server, "second"), Entry { muted: true, resume: None }).await.unwrap();
+    let server = serve(own);
+    let mut first = join(&server).await.unwrap();
+    let second = Session::join(&server, true).await.unwrap();
     let Event::Joined(joined) = next(&mut first).await else { panic!("the first member isn't told the second joined") };
     assert!(joined.muted);
-    let mut watch = Watch::start(&server.address.to_string(), ROOM_KEY.into(), server.fingerprint).await.unwrap();
+    let mut watch = Watch::start(&server).await.unwrap();
     assert_eq!(watch.members().iter().map(|member| member.muted).collect::<Vec<_>>(), [false, true]);
 
     first.set_muted(true).await.unwrap();
@@ -153,68 +154,65 @@ async fn members_and_watchers_see_who_is_muted() {
 }
 
 #[tokio::test]
-async fn a_resume_takes_the_members_place_while_its_old_connection_lingers() {
-    let server = serve();
-    let mut first = join(config(&server, "first")).await.unwrap();
-    let mut second = join(config(&server, "second")).await.unwrap();
-    next(&mut first).await;
+async fn a_device_that_joins_again_takes_its_place_and_its_old_connection_is_replaced() {
+    let server = serve(phone);
+    let mut old = join(&server).await.unwrap();
+    let mut watch = Watch::start(&server).await.unwrap();
 
-    let entry = Entry { muted: true, resume: Some(second.resume()) };
-    let resumed = Session::join(config(&server, "second"), entry).await.unwrap();
-    assert_eq!(resumed.you(), second.you());
-    assert_eq!(names(resumed.members()), ["first", "second"]);
-    let Event::Changed(changed) = next(&mut first).await else { panic!("the first member sees the second leave or join") };
-    assert_eq!((changed.id, changed.muted), (second.you(), true));
-    // The server closed the old connection.
-    assert!(timeout(Duration::from_secs(2), second.next_event()).await.unwrap().is_err());
+    let new = Session::join(&server, true).await.unwrap();
+    assert_eq!(new.you(), old.you());
+    assert_eq!(ids(new.members()), [old.you()]);
+    // The others see it change, not leave and join.
+    changed(&mut watch).await;
+    assert_eq!((ids(watch.members()), watch.members()[0].muted), (vec![old.you()], true));
+    assert!(matches!(timeout(Duration::from_secs(2), old.next_event()).await.unwrap(), Err(Error::Replaced)));
 
-    resumed.leave().await;
-    assert_eq!(next(&mut first).await, Event::Left(second.you()));
+    new.leave().await;
+    changed(&mut watch).await;
+    assert!(watch.members().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_lost_member_keeps_its_place_for_a_while_and_comes_back_or_leaves() {
-    let server = serve();
-    let mut first = join(config(&server, "first")).await.unwrap();
+async fn a_lost_member_keeps_its_place_for_a_while_and_its_device_comes_back_or_it_leaves() {
+    let server = serve(phone);
+    let mut watch = Watch::start(&server).await.unwrap();
     for comes_back in [true, false] {
-        let relay = Relay::new(server.address).await;
-        let second = join(JoinConfig { server: relay.address.to_string(), ..config(&server, "second") }).await.unwrap();
-        let id = second.you();
-        assert!(matches!(next(&mut first).await, Event::Joined(_)));
+        let relay = Relay::new(server.parse().unwrap()).await;
+        let lost = join(&relay.address.to_string()).await.unwrap();
+        let id = lost.you();
+        changed(&mut watch).await;
 
         relay.cut.store(true, Ordering::Relaxed);
-        let Event::Changed(reconnecting) = next_within(&mut first, Duration::from_secs(5)).await else {
-            panic!("the second member leaves")
-        };
-        assert_eq!((reconnecting.id, reconnecting.reconnecting), (id, true));
+        changed_within(&mut watch, Duration::from_secs(5)).await;
+        assert_eq!((ids(watch.members()), watch.members()[0].reconnecting), (vec![id], true));
         // The connection times out meanwhile, and the server holds the place on.
-        assert!(timeout(IDLE_TIMEOUT + Duration::from_secs(5), first.next_event()).await.is_err());
-        let entry = Entry { muted: false, resume: Some(second.resume()) };
+        assert!(timeout(IDLE_TIMEOUT + Duration::from_secs(5), watch.changed()).await.is_err());
         if comes_back {
-            let resumed = Session::join(config(&server, "second"), entry).await.unwrap();
-            assert_eq!(resumed.you(), id);
-            let Event::Changed(back) = next(&mut first).await else { panic!("the second member doesn't come back") };
-            assert!(!back.reconnecting);
-            resumed.leave().await;
-            assert_eq!(next(&mut first).await, Event::Left(id));
+            let back = join(&server).await.unwrap();
+            assert_eq!(back.you(), id);
+            changed(&mut watch).await;
+            assert_eq!((ids(watch.members()), watch.members()[0].reconnecting), (vec![id], false));
+            back.leave().await;
         } else {
-            assert_eq!(next_within(&mut first, Duration::from_secs(60)).await, Event::Left(id));
-            // Once the place is given up, the token joins as a new member.
-            let late = Session::join(config(&server, "second"), entry).await.unwrap();
+            changed_within(&mut watch, Duration::from_secs(60)).await;
+            assert!(watch.members().is_empty());
+            // Once the place is given up, the device joins as a new member.
+            let late = join(&server).await.unwrap();
             assert_ne!(late.you(), id);
-            assert!(matches!(next(&mut first).await, Event::Joined(_)));
+            changed(&mut watch).await;
             late.leave().await;
-            next(&mut first).await;
         }
+        changed(&mut watch).await;
+        assert!(watch.members().is_empty());
     }
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_member_nothing_comes_from_shows_reconnecting_until_it_is_heard_again() {
-    let server = serve();
-    let mut first = join(config(&server, "first")).await.unwrap();
-    let relay = Relay::new(server.address).await;
-    let second = join(JoinConfig { server: relay.address.to_string(), ..config(&server, "second") }).await.unwrap();
+    let server = serve(own);
+    let mut first = join(&server).await.unwrap();
+    let relay = Relay::new(server.parse().unwrap()).await;
+    let second = join(&relay.address.to_string()).await.unwrap();
     assert!(matches!(next(&mut first).await, Event::Joined(_)));
 
     // Well before the connection would time out.

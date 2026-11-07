@@ -9,8 +9,6 @@ use std::path::{Component, Path, PathBuf};
 
 use bukospeak_core::download::Download;
 
-use crate::known_servers::{self, KnownServers};
-
 /// The list of an installed download's files, in its folder, written once all of them are
 /// there.
 const INSTALLED: &str = "installed.json";
@@ -36,8 +34,6 @@ pub enum Error {
     #[error("this system has no folder for programs' data")]
     NoFolder,
     #[error(transparent)]
-    KnownServers(#[from] known_servers::Error),
-    #[error(transparent)]
     Download(#[from] bukospeak_core::Error),
     #[error("the server lists a file outside the download: {0}")]
     Path(String),
@@ -50,26 +46,14 @@ pub fn is_installed(folder: &Path) -> bool {
     folder.join(INSTALLED).is_file()
 }
 
-/// Installs the download `name` that `server` offers, which the room key opens, into `folder`,
-/// unless the folder holds it as the server lists it now; `progress` hears how far it got.
-/// Trusts the server by its fingerprint in `known`, or on first use. Blocks until it is
-/// installed, which may take minutes.
-pub fn install(
-    server: &str,
-    room_key: String,
-    known: &KnownServers,
-    name: &str,
-    folder: &Path,
-    mut progress: impl FnMut(Progress),
-) -> Result<(), Error> {
-    let pin = known.get(server)?;
+/// Installs the download `name` that `server` offers into `folder`, unless the folder holds it
+/// as the server lists it now; `progress` hears how far it got. Blocks until it is installed,
+/// which may take minutes.
+pub fn install(server: &str, name: &str, folder: &Path, mut progress: impl FnMut(Progress)) -> Result<(), Error> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let preparing = |done, total| progress(Progress::Preparing { done, total });
-        let download = Download::start(server, room_key, pin, name.to_owned(), preparing).await?;
-        if pin.is_none() {
-            known.insert(server, download.fingerprint())?;
-        }
+        let download = Download::start(server, name.to_owned(), preparing).await?;
         let files = download.files().to_vec();
         let list = serde_json::to_string(&files).expect("a list of files is plain text");
         if read(&folder.join(INSTALLED))?.as_deref() == Some(list.as_str()) {

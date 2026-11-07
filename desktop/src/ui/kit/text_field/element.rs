@@ -8,7 +8,7 @@ use gpui::{
     Style, TextAlign, TextRun, UnderlineStyle, Window, fill, point, relative, size,
 };
 
-use super::{Layout, TextField, edit};
+use super::{Layout, TextField};
 use crate::ui::theme::{self, ActiveTokens};
 
 pub struct TextElement {
@@ -31,7 +31,6 @@ impl IntoElement for TextElement {
 
 pub struct Prepaint {
     line: ShapedLine,
-    masked: bool,
     /// Where the line's start is drawn, and how far it is scrolled to get there.
     origin: gpui::Point<Pixels>,
     scroll: Pixels,
@@ -82,21 +81,13 @@ impl Element for TextElement {
         let line_height = window.line_height();
         let inset = theme::FIELD_INSET - theme::HAIRLINE;
         let content = field.text.content();
-        let masked = field.masked() && !content.is_empty();
-        let to_line = |offset: usize| if masked { edit::to_masked(content, offset) } else { offset };
 
-        let (shown, color): (SharedString, _) = if content.is_empty() {
-            (field.placeholder.clone(), tokens.text_faint)
-        } else if masked {
-            (edit::masked(content).into(), style.color)
-        } else {
-            (content.to_owned().into(), style.color)
-        };
+        let (shown, color): (SharedString, _) =
+            if content.is_empty() { (field.placeholder.clone(), tokens.text_faint) } else { (content.to_owned().into(), style.color) };
         let run = TextRun { len: shown.len(), font: style.font(), color, background_color: None, underline: None, strikethrough: None };
         // What an input method composes is underlined until it is committed.
         let runs = match field.text.marked().filter(|_| !content.is_empty()) {
             Some(marked) => {
-                let marked = to_line(marked.start)..to_line(marked.end);
                 let underline = UnderlineStyle { color: Some(color), thickness: theme::HAIRLINE, wavy: false };
                 [
                     TextRun { len: marked.start, ..run.clone() },
@@ -119,7 +110,7 @@ impl Element for TextElement {
             size((bounds.size.width - inset * 2.).max(Pixels::ZERO), line_height),
         );
         let selection = field.text.selection();
-        let cursor_x = if content.is_empty() { Pixels::ZERO } else { line.x_for_index(to_line(field.text.cursor())) };
+        let cursor_x = if content.is_empty() { Pixels::ZERO } else { line.x_for_index(field.text.cursor()) };
         // Scrolled no further than the line reaches, and far enough that the cursor shows.
         let most = (line.width + theme::CURSOR - text.size.width).max(Pixels::ZERO);
         let scroll = field.scroll.min(most).max(cursor_x + theme::CURSOR - text.size.width).min(cursor_x).max(Pixels::ZERO);
@@ -127,13 +118,13 @@ impl Element for TextElement {
 
         let focused = field.focus.is_focused(window);
         let selection_bounds = (!selection.is_empty()).then(|| {
-            let (start, end) = (line.x_for_index(to_line(selection.start)), line.x_for_index(to_line(selection.end)));
+            let (start, end) = (line.x_for_index(selection.start), line.x_for_index(selection.end));
             Bounds::from_corners(point(origin.x + start, text.top()), point(origin.x + end, text.bottom()))
         });
         let cursor = (focused && field.cursor_shown && selection.is_empty())
             .then(|| Bounds::new(point(origin.x + cursor_x, text.top()), size(theme::CURSOR, line_height)));
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        Prepaint { line, masked, origin, scroll, line_height, text, selection: selection_bounds, cursor, hitbox }
+        Prepaint { line, origin, scroll, line_height, text, selection: selection_bounds, cursor, hitbox }
     }
 
     fn paint(
@@ -166,8 +157,7 @@ impl Element for TextElement {
             window.paint_quad(fill(cursor, cursor_color));
         }
 
-        let layout =
-            Layout { line: prepaint.line.clone(), origin: prepaint.origin, line_height: prepaint.line_height, masked: prepaint.masked };
+        let layout = Layout { line: prepaint.line.clone(), origin: prepaint.origin, line_height: prepaint.line_height };
         let scroll = prepaint.scroll;
         self.field.update(cx, |field, _| {
             field.layout = Some(layout);

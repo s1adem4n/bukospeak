@@ -74,7 +74,7 @@ pub struct Tokens {
     pub base: Hsla,
     /// A panel on the window.
     pub raised: Hsla,
-    /// Something set into a panel: a field, a hovered row, a fingerprint.
+    /// Something set into a panel: a field, a hovered row.
     pub inset: Hsla,
     /// A hovered control on an inset surface, a switch's track.
     pub hover: Hsla,
@@ -94,8 +94,6 @@ pub struct Tokens {
     /// further off.
     pub shadow: Hsla,
     pub shadow_soft: Hsla,
-    /// What darkens the window behind a dialog.
-    pub scrim: Hsla,
 
     pub text: Hsla,
     /// Labels and values that aren't the point of a line.
@@ -146,7 +144,6 @@ impl Tokens {
             focus: rgba(0xffffff3d).into(),
             shadow: rgba(0x00000066).into(),
             shadow_soft: rgba(0x00000073).into(),
-            scrim: rgba(0x00000099).into(),
             text: rgb(0xededef).into(),
             text_muted: rgb(0x9d9da6).into(),
             text_faint: rgb(0x63636c).into(),
@@ -183,7 +180,6 @@ impl Tokens {
             focus: rgba(0x00000047).into(),
             shadow: rgba(0x0000001a).into(),
             shadow_soft: rgba(0x00000012).into(),
-            scrim: rgba(0x00000040).into(),
             text: rgb(0x18181b).into(),
             text_muted: rgb(0x6b6b73).into(),
             text_faint: rgb(0x9b9ba3).into(),

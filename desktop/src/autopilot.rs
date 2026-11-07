@@ -214,7 +214,7 @@ impl Autopilot {
             game: self.game,
             out: matches!(call.phase(), Phase::Idle | Phase::Failed(_)),
             alone: call.is_in_call() && call.members().len() <= 1,
-            ready: client.missing().is_none() && !client.room_key().is_empty(),
+            ready: client.settings.is_complete(),
         };
         match self.rules.step(Instant::now(), seen) {
             Some(Do::Join) => self.client.update(cx, |client, cx| client.join(cx)),

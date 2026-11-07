@@ -1,6 +1,6 @@
-//! The settings: the microphone, the output, what the app does on its own, and who one is
-//! where, each kept as soon as it is changed: the fields once Enter is pressed or the focus
-//! goes, the rest at once.
+//! The settings: the microphone, the output, what the app does on its own, and the server, each
+//! kept as soon as it is changed: the server once Enter is pressed or the focus goes, the rest at
+//! once.
 
 use crate::audio::{self, Direction};
 use crate::games;
@@ -14,7 +14,7 @@ use gpui::{
 
 use crate::ui::client::Client;
 use crate::ui::kit::menu::{Item, Menu, Place, Popover};
-use crate::ui::kit::{self, InlineField, InlineFieldEvent, InputLevel, Look, Slider, SliderEvent, Spinner, Switch, h_flex, v_flex};
+use crate::ui::kit::{self, InlineField, InlineFieldEvent, InputLevel, Slider, SliderEvent, Spinner, Switch, h_flex, v_flex};
 use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 /// A device to choose: the system's default for None.
@@ -59,9 +59,7 @@ const SUPPRESSIONS: [(Suppression, &str); 4] = [
 
 pub struct Settings {
     client: Entity<Client>,
-    name: Entity<InlineField>,
     server: Entity<InlineField>,
-    room_key: Entity<InlineField>,
     /// The choices of microphones and of outputs; until the system listed its devices, only
     /// the one kept.
     inputs: Vec<Choice>,
@@ -80,23 +78,21 @@ pub struct Settings {
 impl Settings {
     pub fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let read = client.read(cx);
-        let (name, server, room_key) = (read.settings.name.clone(), read.settings.server.clone(), read.room_key().to_owned());
+        let server = read.settings.server.clone();
         let kept = |direction| read.settings.device_id(direction).map(str::to_owned);
         let (kept_input, kept_output) = (kept(Direction::Input), kept(Direction::Output));
         let most = (MAX_VOLUME * 100.0) as u16;
         let percent = read.settings.volume.min(most);
         let meter = read.call.meter().clone();
 
-        let name = cx.new(|cx| InlineField::new(name, "Name", Look::Plain, window, cx).required());
-        let server = cx.new(|cx| InlineField::new(server, "server.example:9988", Look::Mono, window, cx));
-        let room_key = cx.new(|cx| InlineField::new(room_key, "Nicht gesetzt", Look::Secret, window, cx));
+        let server = cx.new(|cx| InlineField::new(server, "server.example:9988", window, cx));
         let level = cx.new(|cx| InputLevel::new(meter, cx));
         let volume = cx.new(|cx| Slider::new("Lautstärke", f32::from(percent), 0., f32::from(most), 5., cx));
         let subscriptions = vec![
             cx.observe(&client, |_, _, cx| cx.notify()),
-            keep(&name, &client, Client::set_name, cx),
-            keep(&server, &client, Client::set_server, cx),
-            keep(&room_key, &client, Client::set_room_key, cx),
+            cx.subscribe(&server, |settings, _, InlineFieldEvent(server), cx| {
+                settings.client.update(cx, |client, cx| client.set_server(server.clone(), cx));
+            }),
             cx.subscribe(&volume, |settings, _, event: &SliderEvent, cx| {
                 settings.client.update(cx, |client, cx| client.set_volume(event.value as u16, event.done, cx));
             }),
@@ -130,21 +126,13 @@ impl Settings {
             inputs: kept_choice(kept_input),
             outputs: kept_choice(kept_output),
             client,
-            name,
             server,
-            room_key,
             volume,
             level,
             menu: None,
             _subscriptions: subscriptions,
             _listing: listing,
         }
-    }
-
-    /// Shows the room key the keyring kept, which came after the settings opened.
-    pub fn read_room_key(&mut self, cx: &mut Context<Self>) {
-        let key = self.client.read(cx).room_key().to_owned();
-        self.room_key.update(cx, |field, cx| field.set_value(key, cx));
     }
 
     /// A row that chooses a device from a menu, which the row opens below its end: the device's
@@ -353,11 +341,7 @@ impl Render for Settings {
         let start = self.client.read(cx).settings.start_with_system;
         let automatic =
             [self.render_switch("start", "Mit dem System starten", start, Client::set_start_with_system, cx), self.render_games(cx)];
-        let account = [
-            kit::row("Name", cx).child(self.name.clone()).into_any_element(),
-            kit::row("Server", cx).child(self.server.clone()).into_any_element(),
-            kit::row("Raumschlüssel", cx).child(self.room_key.clone()).into_any_element(),
-        ];
+        let connection = [kit::row("Server", cx).child(self.server.clone()).into_any_element()];
         div().id("settings").flex_1().min_h_0().overflow_y_scroll().child(
             v_flex()
                 .px(theme::GUTTER)
@@ -367,7 +351,7 @@ impl Render for Settings {
                 .child(kit::group("Mikrofon", microphone, cx))
                 .child(kit::group("Ausgabe", output, cx))
                 .child(kit::group("Automatisch", automatic, cx))
-                .child(kit::group("Konto", account, cx)),
+                .child(kit::group("Verbindung", connection, cx)),
         )
     }
 }
@@ -376,17 +360,6 @@ impl Render for Settings {
 fn kept_choice(kept: Option<String>) -> Vec<Choice> {
     let title = kept.clone().unwrap_or_else(|| "Standard".into()).into();
     vec![Choice { id: kept, title, missing: false }]
-}
-
-/// Keeps what `field` was changed to, by `set`.
-fn keep(
-    field: &Entity<InlineField>,
-    client: &Entity<Client>,
-    set: fn(&mut Client, String, &mut Context<Client>),
-    cx: &mut Context<Settings>,
-) -> Subscription {
-    let client = client.clone();
-    cx.subscribe(field, move |_, _, InlineFieldEvent(value), cx| client.update(cx, |client, cx| set(client, value.clone(), cx)))
 }
 
 #[cfg(test)]

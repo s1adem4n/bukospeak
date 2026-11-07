@@ -34,7 +34,7 @@ pub enum Size {
     /// In bars and rows.
     Small,
     Medium,
-    /// What a screen is for: the dock's, the welcome's, a dialog's.
+    /// What a screen is for: the dock's, the welcome's.
     Large,
 }
 
@@ -96,8 +96,6 @@ pub struct Button {
     disabled: bool,
     /// The focus it takes, if not one of its own.
     focus: Option<FocusHandle>,
-    /// Whether Tab and a click give it the focus.
-    focusable: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -117,7 +115,6 @@ impl Button {
             loading: false,
             disabled: false,
             focus: None,
-            focusable: true,
             on_click: None,
         }
     }
@@ -168,13 +165,6 @@ impl Button {
     /// Takes the focus by `focus`, so it can be given the focus.
     pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
         self.focus = Some(focus.clone());
-        self
-    }
-
-    /// Leaves the focus where it is when clicked, and is passed over by Tab: a control inside a
-    /// field, which keeps the focus.
-    pub fn unfocusable(mut self) -> Self {
-        self.focusable = false;
         self
     }
 
@@ -253,7 +243,7 @@ impl RenderOnce for Button {
             button = button
                 .cursor_pointer()
                 .map(|button| hovered(button, self.variant, tokens))
-                .when(self.focusable, |button| {
+                .map(|button| {
                     let button = match &self.focus {
                         Some(focus) => button.track_focus(focus),
                         None => button.tab_index(0),

@@ -251,24 +251,6 @@ pub fn from_utf16(text: &str, utf16: usize) -> usize {
     text.len()
 }
 
-/// What a secret field shows for each character of its text.
-pub const MASK: char = '•';
-
-/// The text as a secret field shows it: a dot for each character.
-pub fn masked(content: &str) -> String {
-    content.graphemes(true).map(|_| MASK).collect()
-}
-
-/// Where `offset` into `content` lies in its masked form.
-pub fn to_masked(content: &str, offset: usize) -> usize {
-    content.grapheme_indices(true).take_while(|(index, _)| *index < offset).count() * MASK.len_utf8()
-}
-
-/// Where `index` into the masked form of `content` lies in `content`.
-pub fn from_masked(content: &str, index: usize) -> usize {
-    content.grapheme_indices(true).nth(index / MASK.len_utf8()).map_or(content.len(), |(offset, _)| offset)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,14 +347,5 @@ mod tests {
         assert_eq!(text.to_utf16(5), 3);
         assert_eq!(text.offset_at_utf16(3), 5);
         assert_eq!(text.range_from_utf16(&(1..3)), 1..5);
-    }
-
-    #[test]
-    fn a_mask_shows_a_dot_for_each_character() {
-        let content = "ä😀b";
-        assert_eq!(masked(content), "•••");
-        assert_eq!(to_masked(content, 2), 3);
-        assert_eq!(from_masked(content, 6), 6);
-        assert_eq!(from_masked(content, 9), content.len());
     }
 }

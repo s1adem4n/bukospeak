@@ -12,7 +12,7 @@ use gpui::{
     ease_out_quint, pulsating_between,
 };
 
-use crate::ui::client::{Client, Missing};
+use crate::ui::client::Client;
 use crate::ui::glyph::Glyph;
 use crate::ui::kit::{self, Avatar, Button, Icon, Size, Variant, h_flex, v_flex};
 use crate::ui::marks::Mark;
@@ -26,8 +26,8 @@ const PULSE: Duration = Duration::from_millis(1400);
 /// Where the channel sends the window.
 pub enum ChannelEvent {
     Settings,
-    /// Something is missing to join, which the welcome asks for.
-    Setup(Missing),
+    /// There is no server to join, which the welcome asks for.
+    Setup,
 }
 
 pub struct Channel {
@@ -71,9 +71,9 @@ impl Channel {
     }
 
     fn join(&mut self, cx: &mut Context<Self>) {
-        match self.client.read(cx).missing() {
-            Some(missing) => cx.emit(ChannelEvent::Setup(missing)),
-            None => self.client.update(cx, |client, cx| client.join(cx)),
+        match self.client.read(cx).settings.is_complete() {
+            true => self.client.update(cx, |client, cx| client.join(cx)),
+            false => cx.emit(ChannelEvent::Setup),
         }
     }
 
@@ -112,7 +112,7 @@ impl Channel {
                     reconnecting: member.reconnecting,
                 })
             });
-            let you = Seat::Waiting { name: client.settings.name.clone().into(), joining: *call.phase() == Phase::Joining };
+            let you = Seat::Waiting { joining: *call.phase() == Phase::Joining };
             present.chain([you]).collect()
         }
     }
@@ -280,9 +280,9 @@ impl Render for Channel {
 /// A place on the stage.
 enum Seat {
     Member(Member),
-    /// One's own place before joining, which pulses while the join is under way.
+    /// One's own place before joining, which pulses while the join is under way; the server
+    /// names one only in the call.
     Waiting {
-        name: SharedString,
         joining: bool,
     },
     /// The place of whoever comes next, while one is alone in the call.
@@ -317,9 +317,9 @@ impl Seat {
         };
         match self {
             Self::Empty => place.child(outline()).into_any_element(),
-            Self::Waiting { name, joining } => {
-                let you = v_flex().items_center().gap(layout.gap).child(Avatar::new(name.clone(), layout.avatar)).child(name_line(
-                    name.clone(),
+            Self::Waiting { joining } => {
+                let you = v_flex().items_center().gap(layout.gap).child(Avatar::unnamed(layout.avatar)).child(name_line(
+                    "Du".into(),
                     layout,
                     tokens.text_muted,
                 ));

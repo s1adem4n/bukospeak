@@ -38,12 +38,15 @@ pub(crate) enum Event {
     Present(Vec<Member>),
 }
 
-/// Why a call ended without a leave: its connection was lost, and joining again failed.
+/// Why a call ended without a leave.
 #[derive(Debug, thiserror::Error)]
-#[error("{connection}; joining again failed: {rejoin}")]
-pub struct Lost {
-    pub connection: Error,
-    pub rejoin: Error,
+pub enum Lost {
+    /// The connection was lost, and joining again failed.
+    #[error("{connection}; joining again failed: {rejoin}")]
+    Unrecovered { connection: Error, rejoin: Error },
+    /// This device joined again elsewhere, which took the call's place in the channel.
+    #[error("this device joined again elsewhere")]
+    Replaced,
 }
 
 /// Whether this member is in the channel.
@@ -264,7 +267,7 @@ mod tests {
 
     #[test]
     fn a_call_that_ends_leaves_the_channel_empty_but_tells_which_call_it_was() {
-        let lost = || Lost { connection: Error::TimedOut, rejoin: Error::TimedOut };
+        let lost = || Lost::Unrecovered { connection: Error::TimedOut, rejoin: Error::TimedOut };
         for end in [Event::Ended, Event::Lost(lost())] {
             let mut channel = Channel::default();
             assert_eq!(channel.call(), 0);
@@ -279,7 +282,7 @@ mod tests {
 
     #[test]
     fn only_the_watch_tells_who_is_present() {
-        let lost = || Lost { connection: Error::TimedOut, rejoin: Error::TimedOut };
+        let lost = || Lost::Unrecovered { connection: Error::TimedOut, rejoin: Error::TimedOut };
         for end in [Event::Ended, Event::Lost(lost())] {
             let mut channel = Channel::default();
             channel.apply(&Event::Present(vec![member(1, "first")]));

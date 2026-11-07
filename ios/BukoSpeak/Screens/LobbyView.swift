@@ -47,9 +47,9 @@ struct LobbyView: View {
         call.settings.server.trimmingCharacters(in: .whitespaces)
     }
 
-    /// Why the last call failed; a changed certificate asks the user instead.
+    /// Why the last call failed.
     private var failure: String? {
-        guard case .failed(let message) = call.phase, call.changedServer == nil else { return nil }
+        guard case .failed(let message) = call.phase else { return nil }
         return message
     }
 

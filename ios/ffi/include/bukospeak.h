@@ -19,15 +19,28 @@ typedef enum BukoSpeakState {
   BUKO_SPEAK_STATE_RECONNECTING,
 } BukoSpeakState;
 
-typedef enum BukoSpeakJoinStatus {
-  BUKO_SPEAK_JOIN_STATUS_JOINED,
+/**
+ * Why a join failed or a call was lost, as far as the app tells it apart.
+ */
+typedef enum BukoSpeakReason {
   /**
-   * The server presented another certificate than the one pinned: it was set up anew, or
-   * someone pretends to be it.
+   * Anything else: the server didn't answer, the connection broke, and the like.
    */
-  BUKO_SPEAK_JOIN_STATUS_FINGERPRINT_CHANGED,
-  BUKO_SPEAK_JOIN_STATUS_FAILED,
-} BukoSpeakJoinStatus;
+  BUKO_SPEAK_REASON_OTHER,
+  /**
+   * The server's tailnet doesn't know this device: it isn't on that tailnet, or Tailscale is
+   * off.
+   */
+  BUKO_SPEAK_REASON_STRANGER,
+  /**
+   * The server couldn't ask its tailnet who this device is.
+   */
+  BUKO_SPEAK_REASON_UNIDENTIFIED,
+  /**
+   * This device joined the channel again elsewhere, which took the call's place.
+   */
+  BUKO_SPEAK_REASON_REPLACED,
+} BukoSpeakReason;
 
 /**
  * The engine: joins and leaves the channel, one call at a time.
@@ -51,6 +64,17 @@ typedef struct BukoSpeakMember {
    */
   bool reconnecting;
 } BukoSpeakMember;
+
+/**
+ * Why a join failed or a call was lost.
+ */
+typedef struct BukoSpeakError {
+  enum BukoSpeakReason reason;
+  /**
+   * What happened, in English, for the log.
+   */
+  struct BukoSpeakStr message;
+} BukoSpeakError;
 
 /**
  * The channel after a change, and what changed.
@@ -82,9 +106,9 @@ typedef struct BukoSpeakUpdate {
    */
   struct BukoSpeakStr announcement;
   /**
-   * The call ended without a leave: why, for the user; empty otherwise.
+   * Why the call ended without a leave; null otherwise.
    */
-  struct BukoSpeakStr lost;
+  const struct BukoSpeakError *lost;
   /**
    * Who is in the channel while the engine watches it from outside, in the order they came.
    */
@@ -98,35 +122,9 @@ typedef struct BukoSpeakUpdate {
 typedef void (*BukoSpeakListener)(void *context, const struct BukoSpeakUpdate *update);
 
 /**
- * A server's certificate fingerprint, its SHA-256.
+ * Hears how a join went: null if it joined, otherwise why not.
  */
-typedef struct BukoSpeakFingerprint {
-  uint8_t bytes[32];
-} BukoSpeakFingerprint;
-
-/**
- * How a join went; only its status's fields mean something.
- */
-typedef struct BukoSpeakJoinResult {
-  enum BukoSpeakJoinStatus status;
-  /**
-   * Joined: the server's, to pin for the next join. FingerprintChanged: the one presented.
-   */
-  struct BukoSpeakFingerprint fingerprint;
-  /**
-   * FingerprintChanged: the one pinned.
-   */
-  struct BukoSpeakFingerprint pinned;
-  /**
-   * FingerprintChanged and Failed: what happened, for the user.
-   */
-  struct BukoSpeakStr message;
-} BukoSpeakJoinResult;
-
-/**
- * Hears a join's result.
- */
-typedef void (*BukoSpeakJoinDone)(void *context, const struct BukoSpeakJoinResult *result);
+typedef void (*BukoSpeakJoinDone)(void *context, const struct BukoSpeakError *error);
 
 /**
  * Hears why something failed, for the user.
@@ -146,20 +144,17 @@ struct BukoSpeakEngine *bukospeak_engine_new(void *context, BukoSpeakListener li
 void bukospeak_engine_free(struct BukoSpeakEngine *engine);
 
 /**
- * Leaves the call before, if there is one, and joins the channel, trusting the server by its
- * fingerprint `pin`, or on first use if it is null. Blocks until the server welcomes this
- * member or turns it away, 5 s at most, and hands `done` the result before it returns. Who is
- * in the call comes as the next update.
+ * Leaves the call before, if there is one, and joins the channel of `server`, as `host:port`,
+ * as this device, which the server knows from its tailnet. Blocks until the server welcomes
+ * this member or turns it away, 5 s at most, and hands `done` the result before it returns. Who
+ * is in the call comes as the next update.
  *
  * # Safety
  *
- * `server`, `name` and `room_key` aren't null and are NUL-terminated.
+ * `server` isn't null and is NUL-terminated.
  */
 void bukospeak_engine_join(const struct BukoSpeakEngine *engine,
                            const char *server,
-                           const char *name,
-                           const char *room_key,
-                           const struct BukoSpeakFingerprint *pin,
                            void *context,
                            BukoSpeakJoinDone done);
 
@@ -171,18 +166,15 @@ void bukospeak_engine_join(const struct BukoSpeakEngine *engine,
 uint64_t bukospeak_engine_leave(const struct BukoSpeakEngine *engine);
 
 /**
- * Watches who is in the channel without joining it, until `bukospeak_engine_unwatch` or a join;
- * the updates tell them as present. The server is trusted by `pin` only, from a join before.
- * Returns at once; a watch that fails shows nobody and starts again after a while.
+ * Watches who is in the channel of `server` without joining it, until `bukospeak_engine_unwatch`
+ * or a join; the updates tell them as present. Returns at once; a watch that fails shows nobody
+ * and starts again after a while.
  *
  * # Safety
  *
- * `server` and `room_key` aren't null and are NUL-terminated.
+ * `server` isn't null and is NUL-terminated.
  */
-void bukospeak_engine_watch(const struct BukoSpeakEngine *engine,
-                            const char *server,
-                            const char *room_key,
-                            const struct BukoSpeakFingerprint *pin);
+void bukospeak_engine_watch(const struct BukoSpeakEngine *engine, const char *server);
 
 /**
  * Stops watching who is in the channel, if the engine does.

@@ -4,8 +4,8 @@
 use std::io::SeekFrom;
 use std::path::Path;
 
+use bukospeak_proto::PROTOCOL_VERSION;
 use bukospeak_proto::control::{self, ClientMessage, File, FileRequest, ServerMessage};
-use bukospeak_proto::{Fingerprint, PROTOCOL_VERSION};
 use quinn::{Connection, Endpoint, SendStream};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -18,25 +18,17 @@ pub struct Download {
     // Kept open: the server serves the download while the connection is.
     _send: SendStream,
     files: Vec<File>,
-    fingerprint: Fingerprint,
 }
 
 impl Download {
-    /// Asks the server, trusted by `pin`, or on first use if it is None, for the download `name`, and waits until it lists its files;
-    /// `preparing` hears meanwhile how many of how many bytes the server has, if it prepares
+    /// Asks `server` for the download `name`, and waits until it lists its files; `preparing`
+    /// hears meanwhile how many of how many bytes the server has, if it prepares
     /// the download first. Fails if the server doesn't answer within
     /// [`JOIN_TIMEOUT`](crate::session::JOIN_TIMEOUT), or turns the client away, as when it
     /// doesn't offer the download or preparing it failed.
-    pub async fn start(
-        server: &str,
-        room_key: String,
-        pin: Option<Fingerprint>,
-        name: String,
-        mut preparing: impl FnMut(u64, u64),
-    ) -> Result<Self, Error> {
-        let download = ClientMessage::Download { version: PROTOCOL_VERSION, room_key, name };
-        let (opened, mut answer) = Opened::with(server, pin, &download).await?;
-        let Opened { endpoint, connection, send, mut control, fingerprint } = opened;
+    pub async fn start(server: &str, name: String, mut preparing: impl FnMut(u64, u64)) -> Result<Self, Error> {
+        let (opened, mut answer) = Opened::with(server, &ClientMessage::Download { version: PROTOCOL_VERSION, name }).await?;
+        let Opened { endpoint, connection, send, mut control } = opened;
         let files = loop {
             match answer {
                 ServerMessage::Preparing { done, total } => preparing(done, total),
@@ -49,17 +41,12 @@ impl Download {
                 None => return Err(Error::Protocol("the control stream ended before the files")),
             };
         };
-        Ok(Self { endpoint, connection, _send: send, files, fingerprint })
+        Ok(Self { endpoint, connection, _send: send, files })
     }
 
     /// The download's files, as the server keeps them.
     pub fn files(&self) -> &[File] {
         &self.files
-    }
-
-    /// The server's fingerprint, to pin for the next download or join.
-    pub fn fingerprint(&self) -> Fingerprint {
-        self.fingerprint
     }
 
     /// Fetches `file`, which is one of [`files`](Self::files), to `to`, going on from where a

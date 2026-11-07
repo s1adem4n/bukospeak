@@ -65,30 +65,17 @@ impl RenderOnce for Field {
     }
 }
 
-/// How an inline field shows its value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Look {
-    /// At a row's end, quieter than the row's label: a name.
-    Plain,
-    /// At a row's end, quieter than the row's label, in the mono font: a server.
-    Mono,
-    /// At a row's end, but dots: a key, which the field shows while typing only on request.
-    Secret,
-}
-
 /// What an inline field holds changed: an edit ended with another value than before.
 pub struct InlineFieldEvent(pub String);
 
-/// A value shown as text until clicked, then edited in place: Enter or the focus going keeps
-/// what was typed, Escape goes back.
+/// A value read character by character, as a server, shown at a row's end in the mono font,
+/// quieter than the row's label, until clicked, then edited in place: Enter or the focus going
+/// keeps what was typed, Escape goes back.
 pub struct InlineField {
     field: Entity<TextField>,
-    look: Look,
     placeholder: SharedString,
     /// The value outside an edit: kept, shown, and gone back to on Escape.
     value: String,
-    /// Whether an empty value is refused, the field going back instead.
-    required: bool,
     editing: bool,
     /// Where the focus goes after an edit, so the keys go on from here.
     focus: FocusHandle,
@@ -98,38 +85,13 @@ pub struct InlineField {
 impl EventEmitter<InlineFieldEvent> for InlineField {}
 
 impl InlineField {
-    pub fn new(value: String, placeholder: &'static str, look: Look, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let field = cx.new(|cx| {
-            let field = TextField::new(String::new(), placeholder, window, cx);
-            if look == Look::Secret { field.secret() } else { field }
-        });
+    pub fn new(value: String, placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let field = cx.new(|cx| TextField::new(String::new(), placeholder, window, cx));
         let events = cx.subscribe_in(&field, window, |inline, _, event: &TextFieldEvent, window, cx| match event {
             TextFieldEvent::Confirmed | TextFieldEvent::Left => inline.keep(window, cx),
             TextFieldEvent::Changed => {}
         });
-        Self {
-            field,
-            look,
-            placeholder: placeholder.into(),
-            value,
-            required: false,
-            editing: false,
-            focus: cx.focus_handle().tab_stop(true),
-            _events: events,
-        }
-    }
-
-    pub fn required(mut self) -> Self {
-        self.required = true;
-        self
-    }
-
-    /// Shows `value`, unless the user is editing.
-    pub fn set_value(&mut self, value: String, cx: &mut Context<Self>) {
-        if !self.editing {
-            self.value = value;
-            cx.notify();
-        }
+        Self { field, placeholder: placeholder.into(), value, editing: false, focus: cx.focus_handle().tab_stop(true), _events: events }
     }
 
     fn edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -149,7 +111,7 @@ impl InlineField {
         }
         self.end(window, cx);
         let typed = self.field.read(cx).value().trim().to_owned();
-        if typed != self.value && !(self.required && typed.is_empty()) {
+        if typed != self.value {
             self.value = typed.clone();
             cx.emit(InlineFieldEvent(typed));
         }
@@ -173,11 +135,7 @@ impl InlineField {
     fn render_value(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
         let empty = self.value.is_empty();
-        let text: SharedString = match (self.look, empty) {
-            (_, true) => self.placeholder.clone(),
-            (Look::Secret, false) => "••••••••".into(),
-            (_, false) => self.value.clone().into(),
-        };
+        let text: SharedString = if empty { self.placeholder.clone() } else { self.value.clone().into() };
         Button::new("value", Variant::Bare)
             .track_focus(&self.focus)
             .w_full()
@@ -190,7 +148,8 @@ impl InlineField {
                     .font_weight(FontWeight::NORMAL)
                     // A value takes the button's color, which brightens on hover.
                     .when(empty, |text| text.text_color(tokens.text_faint))
-                    .when(self.look == Look::Mono, |text| text.font_family(theme::MONO).typeset(theme::TEXT_SM))
+                    .font_family(theme::MONO)
+                    .typeset(theme::TEXT_SM)
                     .child(text),
             )
             .on_click(cx.listener(|inline, _, window, cx| inline.edit(window, cx)))
@@ -200,9 +159,7 @@ impl InlineField {
 impl Render for InlineField {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = if self.editing {
-            Field::new(&self.field, Size::Small)
-                .when(self.look == Look::Mono, |field| field.font_family(theme::MONO).typeset(theme::TEXT_SM))
-                .into_any_element()
+            Field::new(&self.field, Size::Small).font_family(theme::MONO).typeset(theme::TEXT_SM).into_any_element()
         } else {
             self.render_value(cx).into_any_element()
         };

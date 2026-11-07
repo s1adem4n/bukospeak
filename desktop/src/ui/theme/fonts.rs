@@ -5,8 +5,7 @@ use std::borrow::Cow;
 
 use gpui::App;
 
-/// The family of all text, and of what is read character by character: servers, fingerprints,
-/// times and keys.
+/// The family of all text, and of what is read character by character: servers, times and keys.
 pub const SANS: &str = "Geist";
 pub const MONO: &str = "Geist Mono";
 

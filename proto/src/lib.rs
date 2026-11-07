@@ -1,23 +1,29 @@
 //! What the server and its clients say to each other.
 //!
-//! A client opens one QUIC connection: its first bidirectional stream carries the control
-//! messages of [`control`], and its datagrams carry the Opus frames of [`audio`].
+//! A client opens one QUIC connection over the tailnet: its first bidirectional stream carries
+//! the control messages of [`control`], and its datagrams carry the Opus frames of [`audio`].
+//!
+//! The tailnet tells the server who connects, and that the server is who it says: TLS, which
+//! QUIC can't do without, proves nothing here, so the server's certificate is made anew on each
+//! start and clients take any.
 
 pub mod audio;
 pub mod control;
-mod fingerprint;
-
-pub use fingerprint::{Fingerprint, ParseFingerprintError};
 
 /// The version a client states in its Hello; the server turns away any other.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The ALPN protocol of the QUIC connection.
 pub const ALPN: &[u8] = b"bukospeak/1";
 
-/// The name the server's self-signed certificate is issued to. Clients trust the certificate by
-/// its pinned fingerprint, not by this name.
+/// The name the server's certificate is issued to and clients connect to; they take any
+/// certificate, so it only has to agree.
 pub const SERVER_NAME: &str = "bukospeak";
+
+/// The code the server closes a member's connection with once another connection of the
+/// member's device took its place: that one is the member now, and this one mustn't take it
+/// back.
+pub const REPLACED: u32 = 1;
 
 /// How often a client sends at least a keep-alive, so the server notices soon when nothing
 /// comes from it.

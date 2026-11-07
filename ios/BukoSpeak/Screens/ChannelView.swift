@@ -49,12 +49,6 @@ struct ChannelView: View {
                 .interactiveDismissDisabled()
         }
         .onAppear { isOnboarding = !call.settings.isComplete }
-        .alert("Zertifikat geändert", isPresented: asksToTrust) {
-            Button("Abbrechen", role: .cancel) {}
-            if let server = call.changedServer {
-                Button("Vertrauen") { call.trustAnew(server) }
-            }
-        }
     }
 
     private var isInCall: Bool {
@@ -65,19 +59,13 @@ struct ChannelView: View {
         }
     }
 
-    /// The server and room key the start screen watches while it shows in the foreground.
+    /// The server the start screen watches while it shows in the foreground.
     private var watched: String? {
         guard scenePhase == .active, !isInCall else { return nil }
-        return "\(call.settings.server)\n\(call.settings.roomKey)"
+        return call.settings.server
     }
 
-    /// Whether the server's certificate changed, for the user to decide on: the one failure the
-    /// start screen doesn't tell by itself.
-    private var asksToTrust: Binding<Bool> {
-        Binding(get: { call.changedServer != nil }, set: { if !$0 { call.dismissFailure() } })
-    }
-
-    /// Without a name, server or room key, joining opens the settings to fill them in.
+    /// Without a server, joining opens the settings to fill it in.
     private func join() {
         if call.settings.isComplete {
             Task { await call.join() }

@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bukospeak_server::{Downloads, Identity, Ngc, Room, Sounds, Source, endpoint};
+use bukospeak_server::{Downloads, LocalApi, Ngc, Room, Sounds, Source, endpoint};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -14,13 +14,14 @@ struct Args {
     /// The UDP address to listen on.
     #[arg(long, env = "BUKOSPEAK_LISTEN", default_value = "[::]:9988")]
     listen: SocketAddr,
-    /// Where the server keeps its certificate and the downloads it offers, and finds the call's
-    /// sounds it offers, in `sounds`.
+    /// Where the server keeps the downloads it offers, and finds the call's sounds it offers, in
+    /// `sounds`.
     #[arg(long, env = "BUKOSPEAK_DATA", default_value = "data")]
     data: PathBuf,
-    /// The key members need to join.
-    #[arg(long, env = "BUKOSPEAK_ROOM_KEY", hide_env_values = true)]
-    room_key: String,
+    /// The LocalAPI socket of the tailscaled the server runs beside, which tells who connects:
+    /// whoever is on its tailnet may join.
+    #[arg(long, env = "BUKOSPEAK_TAILSCALED", default_value = LocalApi::DEFAULT_SOCKET)]
+    tailscaled: PathBuf,
     /// An API key of NGC, NVIDIA's catalogue, with which the server offers its members NVIDIA's
     /// effects for their cards, downloading them from NGC the first time each is asked for.
     #[arg(long, env = "BUKOSPEAK_NGC_KEY", hide_env_values = true)]
@@ -36,15 +37,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
-    let identity = Identity::load_or_create(&args.data)?;
-    let endpoint = endpoint(&identity, args.listen)?;
-    tracing::info!(listen = %args.listen, fingerprint = %identity.fingerprint(), "serving");
+    let endpoint = endpoint(args.listen)?;
+    tracing::info!(listen = %args.listen, tailscaled = %args.tailscaled.display(), "serving");
 
     let mut sources: Vec<Arc<dyn Source>> = vec![Arc::new(Sounds::new(args.data.join("sounds")))];
     sources.extend(args.ngc_key.map(|key| Arc::new(Ngc::new(key)) as Arc<dyn Source>));
     let downloads = Downloads::new(args.data.join("downloads"), sources);
     tokio::select! {
-        () = Room::new(args.room_key, downloads).serve(endpoint.clone()) => {}
+        () = Room::new(LocalApi::new(args.tailscaled), downloads).serve(endpoint.clone()) => {}
         () = shutdown() => {}
     }
     endpoint.close(0u32.into(), b"server stopped");

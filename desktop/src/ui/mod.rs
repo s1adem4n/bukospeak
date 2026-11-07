@@ -1,6 +1,6 @@
 //! The window: a welcome the first time, then the channel with who is in it and the dock to
-//! join, mute and leave; the settings; and the dialog for a changed certificate. Before it, at
-//! the start, the update window, while a newer release is looked for.
+//! join, mute and leave; and the settings. Before it, at the start, the update window, while a
+//! newer release is looked for.
 
 mod chrome;
 mod client;
@@ -12,27 +12,25 @@ mod screens;
 mod text;
 pub(crate) mod theme;
 
-use crate::call::{Failure, Phase};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement,
     KeyBinding, ParentElement, Render, Styled, Subscription, Window, WindowOptions, actions, div, ease_out_quint, size,
 };
 
 use crate::ui::chrome::TitleBar;
-use crate::ui::client::Missing;
-pub use crate::ui::client::{Client, RoomKeyRead};
+pub use crate::ui::client::Client;
 pub use crate::ui::glyph::Assets;
 use crate::ui::glyph::Glyph;
 pub use crate::ui::host::{Desktop, Host};
 use crate::ui::kit::{Button, Size, Variant, h_flex};
-use crate::ui::screens::{Channel, ChannelEvent, Settings, Update, Welcome, WelcomeEvent, certificate};
+use crate::ui::screens::{Channel, ChannelEvent, Settings, Update, Welcome, WelcomeEvent};
 use crate::ui::theme::{ActiveTokens, Typeset};
 use crate::update::Updater;
 
 actions!(
     bukospeak,
     [
-        /// Escape: closes the dialog or the settings, or goes a step back.
+        /// Escape: closes the settings.
         Back,
         /// Tab: the focus on to the next control.
         FocusNext,
@@ -93,9 +91,6 @@ pub enum Trouble {
     /// The settings file couldn't be read: the app starts from the defaults.
     Unreadable,
     NotSaved,
-    /// The keyring couldn't be read: the room key is to be given anew.
-    RoomKeyUnreadable,
-    RoomKeyNotKept,
     /// The server offers no NVIDIA effects for the card: Standard suppresses the noise.
     NvidiaUnavailable,
     /// NVIDIA's effects didn't install: Standard suppresses the noise.
@@ -121,13 +116,12 @@ pub struct Main {
     focus: FocusHandle,
     /// What the window hears from its screen, if the screen tells it anything.
     _screen: Option<Subscription>,
-    _subscriptions: [Subscription; 3],
+    _subscriptions: [Subscription; 2],
 }
 
 impl Main {
     pub(crate) fn new(client: Entity<Client>, updater: Option<Entity<Updater>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&client, |_, _, cx| cx.notify());
-        let read = cx.subscribe_in(&client, window, |main, _, _: &RoomKeyRead, window, cx| main.read_room_key(window, cx));
         let appearance = cx.observe_window_appearance(window, |_, window, cx| theme::follow(window, cx));
         // A closed window no longer shows who is in the channel, nor the microphone's level.
         cx.on_release(|main, cx| {
@@ -139,11 +133,11 @@ impl Main {
         .detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let (screen, subscription) = match client.read(cx).missing() {
-            Some(missing) => Self::welcome(&client, missing, window, cx),
-            None => Self::channel(&client, updater.as_ref(), window, cx),
+        let (screen, subscription) = match client.read(cx).settings.is_complete() {
+            true => Self::channel(&client, updater.as_ref(), window, cx),
+            false => Self::welcome(&client, window, cx),
         };
-        let main = Self { client, updater, screen, focus, _screen: Some(subscription), _subscriptions: [observed, read, appearance] };
+        let main = Self { client, updater, screen, focus, _screen: Some(subscription), _subscriptions: [observed, appearance] };
         main.watch(cx);
         main
     }
@@ -157,13 +151,13 @@ impl Main {
         let channel = cx.new(|cx| Channel::new(client.clone(), updater.cloned(), cx));
         let subscription = cx.subscribe_in(&channel, window, |main, _, event: &ChannelEvent, window, cx| match event {
             ChannelEvent::Settings => main.show_settings(window, cx),
-            ChannelEvent::Setup(missing) => main.show_welcome(*missing, window, cx),
+            ChannelEvent::Setup => main.show_welcome(window, cx),
         });
         (Screen::Channel(channel), subscription)
     }
 
-    fn welcome(client: &Entity<Client>, missing: Missing, window: &mut Window, cx: &mut Context<Self>) -> (Screen, Subscription) {
-        let welcome = cx.new(|cx| Welcome::new(client.clone(), missing, window, cx));
+    fn welcome(client: &Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> (Screen, Subscription) {
+        let welcome = cx.new(|cx| Welcome::new(client.clone(), window, cx));
         let subscription = cx.subscribe_in(&welcome, window, |main, _, _: &WelcomeEvent, window, cx| {
             main.show_channel(window, cx);
             main.client.update(cx, |client, cx| client.join(cx));
@@ -186,8 +180,8 @@ impl Main {
         self.show(screen, Some(subscription), window, cx);
     }
 
-    fn show_welcome(&mut self, missing: Missing, window: &mut Window, cx: &mut Context<Self>) {
-        let (screen, subscription) = Self::welcome(&self.client, missing, window, cx);
+    fn show_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (screen, subscription) = Self::welcome(&self.client, window, cx);
         self.show(screen, Some(subscription), window, cx);
     }
 
@@ -207,33 +201,10 @@ impl Main {
         });
     }
 
-    /// Takes the room key the keyring kept into the screen that shows it; asks for it if
-    /// there is none.
-    fn read_room_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.screen {
-            Screen::Welcome(welcome) => welcome.update(cx, |welcome, cx| welcome.read_room_key(cx)),
-            Screen::Settings(settings) => settings.update(cx, |settings, cx| settings.read_room_key(cx)),
-            Screen::Channel(_) => {
-                if let Some(missing) = self.client.read(cx).missing() {
-                    self.show_welcome(missing, window, cx);
-                }
-            }
-        }
-    }
-
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.client.read(cx).call.phase(), Phase::Failed(Failure::CertificateChanged { .. })) {
-            self.client.update(cx, |client, cx| client.dismiss(cx));
-            return;
-        }
         match &self.screen {
             Screen::Settings(_) => self.show_channel(window, cx),
-            Screen::Welcome(welcome) => {
-                if !welcome.update(cx, |welcome, cx| welcome.back(window, cx)) {
-                    cx.propagate();
-                }
-            }
-            Screen::Channel(_) => cx.propagate(),
+            Screen::Welcome(_) | Screen::Channel(_) => cx.propagate(),
         }
     }
 
@@ -294,19 +265,7 @@ impl Main {
                     )
                     .into_any_element(),
             ),
-            Screen::Welcome(welcome) => (welcome.read(cx).step() == Missing::Place).then(|| {
-                let welcome = welcome.clone();
-                div()
-                    .occlude()
-                    // The chevron's stroke, not its blank, lines up with the panels' edges.
-                    .ml(-inset - theme::BACK_BEARING)
-                    .child(Button::new("back", Variant::Ghost).size(Size::Small).square().icon(Glyph::Back).on_click(
-                        move |_, window, cx| {
-                            welcome.update(cx, |welcome, cx| welcome.back(window, cx));
-                        },
-                    ))
-                    .into_any_element()
-            }),
+            Screen::Welcome(_) => None,
         };
         // A button's icon lines up on the bar's inset, the button's surface reaching past it.
         TitleBar::new(content.map(|content| h_flex().flex_1().min_w_0().h_full().mr(-inset).child(content).into_any_element()))
@@ -326,12 +285,6 @@ impl Render for Main {
             Animation::new(theme::APPEAR).with_easing(ease_out_quint()),
             move |content, delta| content.opacity(delta).left(theme::RISE * from * (1. - delta)),
         );
-        let dialog = match *self.client.read(cx).call.phase() {
-            Phase::Failed(Failure::CertificateChanged { pinned, presented, .. }) => {
-                Some(certificate::dialog(&self.client, pinned, presented, window, cx))
-            }
-            _ => None,
-        };
         let tokens = cx.tokens();
         let main = div()
             .size_full()
@@ -348,8 +301,7 @@ impl Render for Main {
             .on_action(cx.listener(Self::focus_next))
             .on_action(cx.listener(Self::focus_previous))
             .child(self.render_title_bar(cx))
-            .child(content)
-            .children(dialog);
+            .child(content);
         chrome::frame(chrome::rounded(main, window), window, cx)
     }
 }

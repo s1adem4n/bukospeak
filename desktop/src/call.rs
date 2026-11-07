@@ -17,14 +17,12 @@ use std::thread;
 use std::time::Instant;
 
 use crate::audio::{self, Audio, DeviceId, Direction};
+use bukospeak_core::proto::MemberId;
 use bukospeak_core::proto::control::{Member, Rejection};
-use bukospeak_core::proto::{Fingerprint, MemberId};
 use bukospeak_core::{
-    Channel, Conditioning, Engine, Error, JoinConfig, Joined, Listener, Meter, Microphone, Speaker, State, Suppression, Update,
+    Channel, Conditioning, Engine, Error, Joined, Listener, Lost, Meter, Microphone, Speaker, State, Suppression, Update,
 };
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-
-use crate::known_servers::KnownServers;
 
 /// Where the call is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,13 +38,6 @@ pub enum Phase {
 /// Why a join failed or a call ended without a leave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// The server presented another certificate than the one pinned: it was set up anew, or
-    /// someone pretends to be it.
-    CertificateChanged {
-        server: String,
-        pinned: Fingerprint,
-        presented: Fingerprint,
-    },
     Rejected(Rejection),
     /// The server's name doesn't resolve.
     NotFound,
@@ -54,12 +45,13 @@ pub enum Failure {
     NoAnswer,
     /// No connection to the server came about, or it broke during the join.
     Unreachable,
-    /// The fingerprints of servers joined before couldn't be read.
-    KnownServers,
     /// The microphone and speakers didn't start.
     Audio,
     /// The connection was lost, and joining again failed.
     ConnectionLost,
+    /// This device joined the channel again elsewhere, as another of its clients, which took
+    /// the call's place: the call isn't joined again, else the two would take turns.
+    Replaced,
 }
 
 /// Something the user should know beside the call, which goes on without it.
@@ -69,9 +61,6 @@ pub enum Notice {
     DeviceMissing(Direction),
     /// A device is there but doesn't play.
     DeviceFailed(Direction),
-    /// The server's fingerprint wasn't kept: the next join trusts it on first use again, or,
-    /// for a changed certificate, asks again.
-    PinNotKept,
 }
 
 /// The devices a call plays on; the system's defaults for None.
@@ -86,8 +75,6 @@ pub struct Devices {
 pub struct Join {
     /// The server as `host:port`.
     pub server: String,
-    pub name: String,
-    pub room_key: String,
     pub devices: Devices,
 }
 
@@ -155,13 +142,12 @@ enum Event {
     Left(u64),
     /// A call's device report, by the call's number.
     Device(u64, audio::Error),
-    Notice(Notice),
 }
 
 enum Command {
-    Join { number: u64, join: Join, trust: Option<Fingerprint>, asked: Instant },
+    Join { number: u64, join: Join, asked: Instant },
     Leave,
-    Watch { server: String, room_key: String },
+    Watch(String),
     Unwatch,
     Listen(bool),
     SetDevice(Direction, Option<DeviceId>),
@@ -176,8 +162,8 @@ pub struct Call {
     /// another doesn't play, and the leave after it ends it.
     current: Arc<AtomicU64>,
     numbers: u64,
-    /// The join under way or the call up, by its number, and its server.
-    call: Option<(u64, String)>,
+    /// The join under way or the call up, by its number.
+    call: Option<u64>,
     /// Whether the call's join came back.
     joined: bool,
     /// When the join under way or the call up was asked for, for the log to tell how long each
@@ -189,12 +175,10 @@ pub struct Call {
     leaves: usize,
     /// The engine's call left last: updates of it or of one before are stale.
     left_call: u64,
-    /// The server and room key to watch while out of a call, if any.
-    watched: Option<(String, String)>,
+    /// The server to watch while out of a call, if any.
+    watched: Option<String>,
     /// How loud the input is, in a call or listened to.
     meter: Meter,
-    /// The servers pinned, which the worker pins joins by.
-    known: KnownServers,
     /// Whether the input is to be listened to out of a call.
     listening: bool,
     /// The call as the engine told it last, which may join again before its join came back
@@ -228,12 +212,11 @@ impl Call {
     /// A call as `stage` says, for the harness: it has no worker, so it joins, watches and plays
     /// nothing, and stays where it is staged until staged anew.
     #[cfg(feature = "harness")]
-    pub fn staged(known: KnownServers, stage: Stage) -> io::Result<(Self, UnboundedReceiver<Happening>)> {
+    pub fn staged(stage: Stage) -> io::Result<(Self, UnboundedReceiver<Happening>)> {
         let (happenings, received) = unbounded();
         let engine = Arc::new(Engine::new(Conditioning::Engine, Arc::new(Forward(happenings)))?);
         let mut call = Self {
             engine,
-            known,
             commands: None,
             worker: None,
             current: Arc::new(AtomicU64::new(0)),
@@ -274,9 +257,9 @@ impl Call {
         self.since = stage.up_for.map(|up_for| Instant::now() - up_for);
     }
 
-    /// A call with no one in it yet, which pins servers in `known` and plays through `player`;
-    /// what happens comes on the receiver.
-    pub fn new(known: KnownServers, player: impl Player) -> io::Result<(Self, UnboundedReceiver<Happening>)> {
+    /// A call with no one in it yet, which plays through `player`; what happens comes on the
+    /// receiver.
+    pub fn new(player: impl Player) -> io::Result<(Self, UnboundedReceiver<Happening>)> {
         let (happenings, received) = unbounded();
         // The desktop's audio passes the microphone's signal as it is.
         let engine = Arc::new(Engine::new(Conditioning::Engine, Arc::new(Forward(happenings.clone())))?);
@@ -285,7 +268,6 @@ impl Call {
         let meter = Meter::default();
         let worker = Worker {
             engine: Arc::clone(&engine),
-            known: known.clone(),
             player: Box::new(player),
             happenings,
             current: Arc::clone(&current),
@@ -298,7 +280,6 @@ impl Call {
         let worker = thread::Builder::new().name("bukospeak-call".into()).spawn(move || worker.run(&inbox))?;
         let call = Self {
             engine,
-            known,
             commands: Some(commands),
             worker: Some(worker),
             current,
@@ -365,20 +346,21 @@ impl Call {
         self.notice.as_ref()
     }
 
-    /// Joins the channel, trusting the server by its pinned fingerprint, or on first use if none
-    /// is; the worker leaves the call before first.
+    /// Joins the channel, unless a call is up or joining; the worker stops watching first.
     pub fn join(&mut self, join: Join) {
-        self.start(join, None);
-    }
-
-    /// Joins again after the server's certificate changed, trusting exactly the one it presented.
-    pub fn trust(&mut self, join: Join) {
-        if let Phase::Failed(Failure::CertificateChanged { server, presented, .. }) = &self.phase
-            && *server == join.server
-        {
-            let presented = *presented;
-            self.start(join, Some(presented));
+        if self.call.is_some() {
+            return;
         }
+        self.numbers += 1;
+        let number = self.numbers;
+        self.call = Some(number);
+        (self.joined, self.channel) = (false, Channel::default());
+        self.phase = Phase::Joining;
+        self.notice = None;
+        self.current.store(number, Ordering::Relaxed);
+        self.asked = Instant::now();
+        // The engine stops watching on a join.
+        self.send(Command::Join { number, join, asked: self.asked });
     }
 
     /// Leaves the call, or the join under way.
@@ -397,11 +379,6 @@ impl Call {
     pub fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
         self.engine.set_muted(muted);
-    }
-
-    /// The servers pinned, by their fingerprints.
-    pub fn known_servers(&self) -> &KnownServers {
-        &self.known
     }
 
     pub fn set_suppression(&self, suppression: Suppression) {
@@ -438,11 +415,10 @@ impl Call {
         self.send(Command::SetDevice(direction, device));
     }
 
-    /// Watches who is in the channel on a server joined before, while out of a call; for None,
-    /// nowhere.
-    pub fn watch(&mut self, channel: Option<(String, String)>) {
-        if self.watched != channel {
-            self.watched = channel;
+    /// Watches who is in the channel on `server` while out of a call; for None, nowhere.
+    pub fn watch(&mut self, server: Option<String>) {
+        if self.watched != server {
+            self.watched = server;
             self.rewatch();
         }
     }
@@ -458,36 +434,15 @@ impl Call {
             }
             Event::Device(number, error) => {
                 tracing::warn!("{error}");
-                if self.number() == Some(number) {
+                if self.call == Some(number) {
                     self.notice = Some(notice(&error));
                 }
             }
-            Event::Notice(notice) => self.notice = Some(notice),
         }
-    }
-
-    fn number(&self) -> Option<u64> {
-        self.call.as_ref().map(|(number, _)| *number)
-    }
-
-    fn start(&mut self, join: Join, trust: Option<Fingerprint>) {
-        if self.call.is_some() {
-            return;
-        }
-        self.numbers += 1;
-        let number = self.numbers;
-        self.call = Some((number, join.server.clone()));
-        (self.joined, self.channel) = (false, Channel::default());
-        self.phase = Phase::Joining;
-        self.notice = None;
-        self.current.store(number, Ordering::Relaxed);
-        self.asked = Instant::now();
-        // The engine stops watching on a join.
-        self.send(Command::Join { number, join, trust, asked: self.asked });
     }
 
     fn joined(&mut self, number: u64, result: Result<(), Failure>) {
-        if self.number() != Some(number) {
+        if self.call != Some(number) {
             return;
         }
         match result {
@@ -509,17 +464,15 @@ impl Call {
     fn update(&mut self, update: Update) {
         let Update { channel, lost, .. } = update;
         self.present = channel.present().to_vec();
-        let Some((_, server)) = &self.call else { return };
-        // Of a call left whose last updates still arrive.
-        if self.leaves > 0 || channel.call() <= self.left_call {
+        // Out of a call, or of one left whose last updates still arrive.
+        if self.call.is_none() || self.leaves > 0 || channel.call() <= self.left_call {
             return;
         }
         if let Some(lost) = lost {
-            let failure = match lost.rejoin {
-                Error::FingerprintChanged { pinned, presented } => {
-                    Failure::CertificateChanged { server: server.clone(), pinned, presented }
-                }
-                _ => Failure::ConnectionLost,
+            tracing::warn!("the call ended: {lost}");
+            let failure = match lost {
+                Lost::Unrecovered { .. } => Failure::ConnectionLost,
+                Lost::Replaced => Failure::Replaced,
             };
             return self.end(Some(failure));
         }
@@ -569,7 +522,7 @@ impl Call {
             return;
         }
         let command = match &self.watched {
-            Some((server, room_key)) => Command::Watch { server: server.clone(), room_key: room_key.clone() },
+            Some(server) => Command::Watch(server.clone()),
             None => Command::Unwatch,
         };
         self.send(command);
@@ -605,11 +558,11 @@ fn notice(error: &audio::Error) -> Notice {
     }
 }
 
-/// What the user is told of a failed join to `server`.
-fn failure(error: Error, server: String) -> Failure {
+/// What the user is told of a failed join.
+fn failure(error: Error) -> Failure {
     match error {
-        Error::FingerprintChanged { pinned, presented } => Failure::CertificateChanged { server, pinned, presented },
         Error::Rejected(rejection) => Failure::Rejected(rejection),
+        Error::Replaced => Failure::Replaced,
         Error::Resolve(_) => Failure::NotFound,
         Error::TimedOut => Failure::NoAnswer,
         Error::Connect(_)
@@ -641,7 +594,6 @@ impl Listener for Forward {
 /// out of a call the input listened to.
 struct Worker {
     engine: Arc<Engine>,
-    known: KnownServers,
     player: Box<dyn Player>,
     happenings: UnboundedSender<Happening>,
     current: Arc<AtomicU64>,
@@ -659,8 +611,8 @@ impl Worker {
     fn run(mut self, inbox: &mpsc::Receiver<Command>) {
         for command in inbox {
             match command {
-                Command::Join { number, join, trust, asked } => {
-                    self.playing = self.join(number, join, trust, asked);
+                Command::Join { number, join, asked } => {
+                    self.playing = self.join(number, join, asked);
                     self.relisten();
                 }
                 Command::Leave => {
@@ -670,16 +622,7 @@ impl Worker {
                     self.tell(Event::Left(left));
                     self.relisten();
                 }
-                Command::Watch { server, room_key } => match self.known.get(&server) {
-                    Ok(Some(pin)) => self.engine.watch(server, room_key, pin),
-                    // A server never joined isn't trusted yet.
-                    Ok(None) => self.engine.unwatch(),
-                    // Who is in the channel is a glance before joining; a join tells the user.
-                    Err(error) => {
-                        tracing::warn!("{error}");
-                        self.engine.unwatch();
-                    }
-                },
+                Command::Watch(server) => self.engine.watch(server),
                 Command::Unwatch => self.engine.unwatch(),
                 Command::Listen(on) => {
                     self.listening = on;
@@ -715,38 +658,24 @@ impl Worker {
         }
     }
 
-    /// Joins, pins the server and starts the call's audio, and tells the call how it went; the
-    /// audio returned plays the call until the next leave.
-    fn join(&mut self, number: u64, join: Join, trust: Option<Fingerprint>, asked: Instant) -> Option<Box<dyn Playing>> {
-        let Join { server, name, room_key, devices } = join;
+    /// Joins and starts the call's audio, and tells the call how it went; the audio returned
+    /// plays the call until the next leave.
+    fn join(&mut self, number: u64, join: Join, asked: Instant) -> Option<Box<dyn Playing>> {
+        let Join { server, devices } = join;
         self.devices = devices.clone();
-        let pinned = match self.known.get(&server) {
-            Ok(pinned) => pinned,
-            Err(error) => {
-                tracing::warn!("{error}");
-                return self.joined(number, Err(Failure::KnownServers));
-            }
-        };
-        let config = JoinConfig { server: server.clone(), name, room_key, pin: trust.or(pinned) };
-        let Joined { fingerprint, microphone, speaker } = match self.engine.join(config) {
+        let Joined { microphone, speaker } = match self.engine.join(&server) {
             Ok(joined) => {
                 log_step("the server welcomed the join", asked);
                 joined
             }
             Err(error) => {
                 tracing::warn!("joining {server}: {error}");
-                return self.joined(number, Err(failure(error, server)));
+                return self.joined(number, Err(failure(error)));
             }
         };
         if self.current.load(Ordering::Relaxed) != number {
             // Left while joining: the leave after this join ends the call before it plays.
             return None;
-        }
-        if pinned != Some(fingerprint)
-            && let Err(error) = self.known.insert(&server, fingerprint)
-        {
-            tracing::warn!("{error}");
-            self.tell(Event::Notice(Notice::PinNotKept));
         }
         let happenings = self.happenings.clone();
         let report: Report = Box::new(move |error| {

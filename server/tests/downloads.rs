@@ -1,14 +1,12 @@
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bukospeak_core::Error;
 use bukospeak_core::download::Download;
-use bukospeak_core::proto::Fingerprint;
 use bukospeak_core::proto::control::Rejection;
-use bukospeak_server::{Downloads, Identity, Room, Source, compress, endpoint};
-
-const ROOM_KEY: &str = "room-key";
+use bukospeak_server::{Device, Downloads, Room, Source, compress, endpoint};
 
 /// Offers `first`, of a small file and a large one, from what `stamp` says, failing as many
 /// times first as `failures` says.
@@ -52,7 +50,6 @@ impl Source for Fake {
 
 struct Server {
     address: String,
-    fingerprint: Fingerprint,
     prepared: Arc<AtomicU32>,
     stamp: Arc<AtomicU32>,
     _folder: Folder,
@@ -78,20 +75,24 @@ impl Drop for Folder {
     }
 }
 
+/// A tailnet in which each connection is a device of its own.
+fn own(peer: SocketAddr) -> Option<Device> {
+    Some(Device { id: peer.to_string(), name: format!("member {}", peer.port()) })
+}
+
 fn serve(name: &str, failures: u32) -> Server {
-    let identity = Identity::generate().unwrap();
-    let endpoint = endpoint(&identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = endpoint.local_addr().unwrap().to_string();
     let folder = Folder::new(name);
     let (prepared, stamp) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
     let fake = Fake { prepared: Arc::clone(&prepared), stamp: Arc::clone(&stamp), failures };
     let downloads = Downloads::new(folder.0.clone(), vec![Arc::new(fake)]);
-    tokio::spawn(Room::new(ROOM_KEY.into(), downloads).serve(endpoint));
-    Server { address, fingerprint: identity.fingerprint(), prepared, stamp, _folder: folder }
+    tokio::spawn(Room::new(own, downloads).serve(endpoint));
+    Server { address, prepared, stamp, _folder: folder }
 }
 
 async fn start(server: &Server, name: &str) -> Result<Download, Error> {
-    Download::start(&server.address, ROOM_KEY.into(), Some(server.fingerprint), name.into(), |_, _| ()).await
+    Download::start(&server.address, name.into(), |_, _| ()).await
 }
 
 #[tokio::test]
@@ -99,11 +100,7 @@ async fn a_download_is_prepared_once_and_its_files_come_whole_and_go_on_where_th
     let server = serve("whole", 0);
     let into = Folder::new("whole-into");
     let mut heard = Vec::new();
-    let download = Download::start(&server.address, ROOM_KEY.into(), Some(server.fingerprint), "first".into(), |done, total| {
-        heard.push((done, total))
-    })
-    .await
-    .unwrap();
+    let download = Download::start(&server.address, "first".into(), |done, total| heard.push((done, total))).await.unwrap();
     assert!(heard.iter().all(|&(done, total)| done <= total), "{heard:?}");
     let paths: Vec<_> = download.files().iter().map(|file| file.path.as_str()).collect();
     assert_eq!(paths, ["small", "sub/large"]);
@@ -148,11 +145,9 @@ async fn a_download_that_failed_to_prepare_is_turned_away_and_prepared_anew_when
 }
 
 #[tokio::test]
-async fn a_download_not_offered_or_asked_for_with_a_wrong_room_key_is_turned_away() {
+async fn a_download_not_offered_is_turned_away() {
     let server = serve("unoffered", 0);
     assert!(matches!(start(&server, "second").await, Err(Error::Rejected(Rejection::Unavailable))));
-    let wrong = Download::start(&server.address, "guess".into(), Some(server.fingerprint), "first".into(), |_, _| ()).await;
-    assert!(matches!(wrong, Err(Error::Rejected(Rejection::RoomKey))));
     assert_eq!(server.prepared.load(Ordering::Relaxed), 0);
 }
 

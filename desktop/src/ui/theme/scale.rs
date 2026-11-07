@@ -55,13 +55,11 @@ pub const CONTROL_SM_INSET: Pixels = step(2.5);
 pub const CONTROL_INSET: Pixels = step(3.5);
 pub const CONTROL_LG_INSET: Pixels = step(4.);
 
-/// The space inside a panel, a menu and a dialog, around what is set into them, in steps.
+/// The space inside a panel and a menu, around what is set into them, in steps.
 const PANEL_PAD_STEPS: f32 = 1.;
 const MENU_PAD_STEPS: f32 = 1.;
-const DIALOG_PAD_STEPS: f32 = 1.5;
 pub const PANEL_PAD: Pixels = step(PANEL_PAD_STEPS);
 pub const MENU_PAD: Pixels = step(MENU_PAD_STEPS);
-pub const DIALOG_PAD: Pixels = step(DIALOG_PAD_STEPS);
 /// Where a panel's content starts: a row's inset inside the panel's padding, so labels line up
 /// with titles above the panel.
 pub const PANEL_INSET: Pixels = step(4.);
@@ -79,7 +77,6 @@ pub const RADIUS_CONTROL: Pixels = step(RADIUS_CONTROL_STEPS);
 pub const RADIUS_CONTROL_LG: Pixels = step(RADIUS_CONTROL_LG_STEPS);
 pub const RADIUS_PANEL: Pixels = step(RADIUS_CONTROL_STEPS + PANEL_PAD_STEPS);
 pub const RADIUS_MENU: Pixels = step(RADIUS_CONTROL_SM_STEPS + MENU_PAD_STEPS);
-pub const RADIUS_DIALOG: Pixels = step(RADIUS_CONTROL_LG_STEPS + DIALOG_PAD_STEPS);
 pub const RADIUS_TILE: Pixels = step(5.);
 pub const RADIUS_TILE_SM: Pixels = step(4.);
 
@@ -166,8 +163,6 @@ pub const KEYCAP: Pixels = step(4.);
 /// A status's dot and the halo around it.
 pub const DOT: Pixels = step(1.75);
 pub const DOT_HALO: Pixels = step(0.75);
-/// A dialog's width.
-pub const DIALOG: Pixels = step(85.);
 /// A menu: the least width of one, its items, and its distance from what opened it.
 pub const MENU: Pixels = step(56.);
 pub const MENU_ITEM: Pixels = CONTROL_SM;
@@ -176,12 +171,9 @@ pub const MENU_GAP: Pixels = step(1.);
 pub const TOOLTIP_OFFSET: Pixels = step(2.5);
 /// The volume's value after its slider, wide enough for the loudest.
 pub const VOLUME_VALUE: Pixels = step(10.);
-/// The welcome's column, how far below the title bar it hangs at most, and its dots of where
-/// in it one is.
+/// The welcome's column, and how far below the title bar it hangs at most.
 pub const WELCOME: Pixels = step(74.);
 pub const WELCOME_TOP: Pixels = step(20.);
-pub const STEP_DOT: Pixels = step(1.5);
-pub const STEP_DOT_CURRENT: Pixels = step(5.);
 /// The app's mark in the welcome and the update window.
 pub const MARK: Pixels = step(20.);
 /// The microphone's level: a rail as wide as a short value, as thick as the volume's, and how many
@@ -207,8 +199,7 @@ mod tests {
         for size in [TEXT_XS, TEXT_SM, TEXT, TEXT_MD, TEXT_XL, TEXT_2XL, TEXT_3XL].map(|kind| kind.line) {
             assert_eq!(size.as_f32() % 4., 0., "a line of {size:?} is off the grid");
         }
-        let sizes =
-            [ICON_SM, ICON, ICON_LG, CONTROL_SM, CONTROL, CONTROL_LG, RADIUS_PANEL, RADIUS_MENU, RADIUS_DIALOG, AVATAR_XL.size, DIALOG];
+        let sizes = [ICON_SM, ICON, ICON_LG, CONTROL_SM, CONTROL, CONTROL_LG, RADIUS_PANEL, RADIUS_MENU, AVATAR_XL.size];
         assert!(sizes.into_iter().all(on_grid));
     }
 
@@ -216,6 +207,5 @@ mod tests {
     fn nested_corners_take_the_space_between() {
         assert_eq!(RADIUS_PANEL - PANEL_PAD, RADIUS_CONTROL);
         assert_eq!(RADIUS_MENU - MENU_PAD, RADIUS_CONTROL_SM);
-        assert_eq!(RADIUS_DIALOG - DIALOG_PAD, RADIUS_CONTROL_LG);
     }
 }

@@ -16,7 +16,7 @@ use std::sync::{Arc, LazyLock};
 
 pub use avatar::Avatar;
 pub use button::{Button, Size, Variant, icon_inset};
-pub use field::{Field, InlineField, InlineFieldEvent, Look};
+pub use field::{Field, InlineField, InlineFieldEvent};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, Div, FontWeight, Hsla, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, Pixels, Styled, StyledImage, div,

@@ -1,5 +1,5 @@
-//! What outlives the window: the call, the settings and the room key. The window shows them
-//! and the tray and the hotkey act on them, with or without a window open.
+//! What outlives the window: the call and the settings. The window shows them and the tray and
+//! the hotkey act on them, with or without a window open.
 
 use std::sync::Arc;
 
@@ -7,29 +7,15 @@ use crate::audio::Direction;
 use crate::call::{Call, Happening, Phase};
 use crate::install::{self, Progress};
 use crate::nvidia::{Architecture, Effects};
-use crate::settings::{self as stored, Settings, Suppression};
+use crate::settings::{Settings, Suppression};
 use crate::ui::host::Host;
 use bukospeak_core::Error;
 use bukospeak_core::proto::control::Rejection;
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
-use gpui::{AppContext, Context, EventEmitter, Task};
+use gpui::{AppContext, Context, Task};
 
 use crate::ui::Trouble;
-
-/// The room key came from the keyring, or didn't: [`Client::room_key`] is known from now on.
-pub struct RoomKeyRead;
-
-/// What is missing to join, in the order the welcome asks for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Missing {
-    /// The name the others see.
-    Name,
-    /// The server and its room key.
-    Place,
-}
-
-impl EventEmitter<RoomKeyRead> for Client {}
 
 /// NVIDIA's effects on the system's RTX card.
 pub struct Nvidia {
@@ -61,8 +47,6 @@ pub struct Client {
     pub call: Call,
     pub settings: Settings,
     host: Arc<dyn Host>,
-    /// None until the keyring answered, or a key is given before.
-    room_key: Option<String>,
     pub trouble: Option<Trouble>,
     /// The keys that mute and unmute from any app, if the system took them.
     pub mute_keys: Option<&'static str>,
@@ -73,7 +57,6 @@ pub struct Client {
     /// The server's sounds being installed, if they are.
     syncing: Option<Task<()>>,
     _happenings: Task<()>,
-    _room_key: Task<()>,
     _card: Task<()>,
 }
 
@@ -108,13 +91,6 @@ impl Client {
                 }
             }
         });
-        // The keyring may ask the system, and the system the user: not on the app's thread.
-        let keyring = Arc::clone(&host);
-        let room_key = cx.spawn(async move |this, cx| {
-            let read = cx.background_spawn(async move { keyring.room_key() }).await;
-            // The app may be quitting before the keyring answered.
-            let _ = this.update(cx, |client, cx| client.read_room_key(read, cx));
-        });
         // CUDA takes a moment to tell the card.
         let system = Arc::clone(&host);
         let card = cx.spawn(async move |this, cx| {
@@ -123,20 +99,7 @@ impl Client {
                 let _ = this.update(cx, |client, cx| client.found(architecture, cx));
             }
         });
-        Self {
-            call,
-            settings,
-            host,
-            room_key: None,
-            trouble,
-            mute_keys,
-            lobby: false,
-            nvidia: None,
-            syncing: None,
-            _happenings: happenings,
-            _room_key: room_key,
-            _card: card,
-        }
+        Self { call, settings, host, trouble, mute_keys, lobby: false, nvidia: None, syncing: None, _happenings: happenings, _card: card }
     }
 
     /// Takes in the system's RTX card: NVIDIA's effects suppress the noise from now on if they
@@ -180,8 +143,7 @@ impl Client {
     /// Installs NVIDIA's effects for `architecture` from the server, on a thread of its own:
     /// it may take minutes.
     fn install(&mut self, architecture: Architecture, cx: &mut Context<Self>) {
-        let (server, room_key, known) =
-            (self.settings.server.trim().to_owned(), self.room_key().to_owned(), self.call.known_servers().clone());
+        let server = self.settings.server().to_owned();
         if let Some(nvidia) = &mut self.nvidia {
             nvidia.installing = Some(Progress::Preparing { done: 0, total: 0 });
         }
@@ -192,7 +154,7 @@ impl Client {
             .name("bukospeak-nvidia".into())
             .spawn(move || {
                 let mut shown = None;
-                let installed = host.install(&server, room_key, &known, architecture, &mut |now| {
+                let installed = host.install(&server, architecture, &mut |now| {
                     // Each percent, not each chunk: the window redraws for each.
                     let percent = match now {
                         Progress::Preparing { done, total } | Progress::Fetching { done, total } => (done * 100).checked_div(total),
@@ -247,16 +209,15 @@ impl Client {
     }
 
     /// Installs the sounds the server of the call offers as it has them now, in the background,
-    /// unless that is going on: the server is trusted then, and its room key right.
+    /// unless that is going on.
     fn sync_sounds(&mut self, cx: &mut Context<Self>) {
         if self.syncing.is_some() {
             return;
         }
-        let (server, room_key, known) =
-            (self.settings.server.trim().to_owned(), self.room_key().to_owned(), self.call.known_servers().clone());
+        let server = self.settings.server().to_owned();
         let host = Arc::clone(&self.host);
         self.syncing = Some(cx.spawn(async move |this, cx| {
-            let synced = cx.background_spawn(async move { host.sync_sounds(&server, room_key, &known) }).await;
+            let synced = cx.background_spawn(async move { host.sync_sounds(&server) }).await;
             // Without them, the cues are the app's own tones.
             if let Err(error) = synced {
                 tracing::warn!("installing the server's sounds: {error}");
@@ -266,50 +227,14 @@ impl Client {
         }));
     }
 
-    /// Takes in the room key the keyring kept, unless one was given meanwhile.
-    fn read_room_key(&mut self, read: Result<Option<String>, stored::Error>, cx: &mut Context<Self>) {
-        let key = read.unwrap_or_else(|error| {
-            tracing::warn!("the room key isn't readable: {error}");
-            self.trouble = Some(Trouble::RoomKeyUnreadable);
-            None
-        });
-        if self.room_key.is_none() {
-            self.room_key = Some(key.unwrap_or_default());
-            self.watch();
-            cx.emit(RoomKeyRead);
-            cx.notify();
-        }
-    }
-
     /// What the window asks of the system.
     pub fn host(&self) -> &Arc<dyn Host> {
         &self.host
     }
 
-    /// The room key; empty until the keyring answered.
-    pub fn room_key(&self) -> &str {
-        self.room_key.as_deref().unwrap_or_default()
-    }
-
-    /// What is missing to join, if anything is; the room key only once the keyring answered.
-    pub fn missing(&self) -> Option<Missing> {
-        if self.settings.name.trim().is_empty() {
-            Some(Missing::Name)
-        } else if self.settings.server.trim().is_empty() || self.room_key.is_some() && !self.settings.is_complete(self.room_key()) {
-            Some(Missing::Place)
-        } else {
-            None
-        }
-    }
-
     pub fn join(&mut self, cx: &mut Context<Self>) {
         self.trouble = None;
-        self.call.join(self.settings.join(self.room_key()));
-        cx.notify();
-    }
-
-    pub fn trust(&mut self, cx: &mut Context<Self>) {
-        self.call.trust(self.settings.join(self.room_key()));
+        self.call.join(self.settings.join());
         cx.notify();
     }
 
@@ -344,39 +269,14 @@ impl Client {
     /// Watches who is in the channel while a window shows it from outside.
     fn watch(&mut self) {
         let outside = matches!(self.call.phase(), Phase::Idle | Phase::Failed(_)) && self.lobby;
-        let channel = (outside && self.settings.is_complete(self.room_key()))
-            .then(|| (self.settings.server.trim().to_owned(), self.room_key().to_owned()));
-        self.call.watch(channel);
-    }
-
-    pub fn set_name(&mut self, name: String, cx: &mut Context<Self>) {
-        self.change(|settings| settings.name = name, cx);
+        let server = (outside && self.settings.is_complete()).then(|| self.settings.server().to_owned());
+        self.call.watch(server);
     }
 
     /// Takes another server, which the channel is watched on from now on.
     pub fn set_server(&mut self, server: String, cx: &mut Context<Self>) {
         self.change(|settings| settings.server = server, cx);
         self.watch();
-    }
-
-    /// Takes another room key, kept in the keyring; the channel is watched with it from now on.
-    pub fn set_room_key(&mut self, room_key: String, cx: &mut Context<Self>) {
-        self.room_key = Some(room_key.clone());
-        self.watch();
-        cx.notify();
-        let host = Arc::clone(&self.host);
-        cx.spawn(async move |this, cx| {
-            let kept = cx.background_spawn(async move { host.set_room_key(&room_key) }).await;
-            if let Err(error) = kept {
-                tracing::warn!("the room key isn't kept: {error}");
-                // The app may be quitting before the keyring answered.
-                let _ = this.update(cx, |client, cx| {
-                    client.trouble = Some(Trouble::RoomKeyNotKept);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
     }
 
     /// Changes the settings and keeps them.

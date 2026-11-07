@@ -1,32 +1,38 @@
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bukospeak_proto::control::{self, ClientMessage, MAX_NAME_CHARS, Member, Rejection, ResumeToken, ServerMessage};
-use bukospeak_proto::{KEEP_ALIVE, MemberId, PROTOCOL_VERSION, SILENT_AFTER, audio};
+use anyhow::Context;
+use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ServerMessage};
+use bukospeak_proto::{KEEP_ALIVE, MemberId, PROTOCOL_VERSION, REPLACED, SILENT_AFTER, audio};
 use bytes::Bytes;
-use quinn::{Connection, ConnectionError, Endpoint, Incoming, RecvStream, SendStream};
+use quinn::{Connection, ConnectionError, Endpoint, Incoming, RecvStream, SendStream, VarInt};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 
 use crate::downloads::Downloads;
+use crate::tailnet::{Device, Tailnet};
 
 /// More than a group of friends needs, and few enough that relaying to all stays cheap.
 const MAX_MEMBERS: usize = 16;
 
-/// How long a new connection has to say Hello.
+/// The longest name members see, in characters; a longer one is cut.
+const MAX_NAME_CHARS: usize = 32;
+
+/// How long a new connection has to say Hello, and the tailnet to tell who it is.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a turned-away client has to read why before the server closes on it.
 const REJECTION_GRACE: Duration = Duration::from_secs(1);
 
-/// How long the place of a member whose connection was lost is held for it to come back: the
-/// member notices the loss about when the server does, and then has a join's time.
+/// How long the place of a member whose connection was lost is held for its device to come
+/// back: the member notices the loss about when the server does, and then has a join's time.
 const RESUME_GRACE: Duration = Duration::from_secs(20);
 
 /// The one channel: who is in it, and the relay of their audio.
 pub struct Room {
-    room_key: String,
+    tailnet: Arc<dyn Tailnet>,
     members: Mutex<Members>,
     downloads: Downloads,
 }
@@ -40,10 +46,11 @@ struct Members {
 }
 
 struct Peer {
+    /// The [`Device::id`] of the device the member is.
+    device: String,
     name: String,
     muted: bool,
     reconnecting: bool,
-    resume: ResumeToken,
     connection: Connection,
     control: mpsc::UnboundedSender<ServerMessage>,
 }
@@ -60,9 +67,10 @@ impl Peer {
 }
 
 impl Room {
-    /// The channel members join with `room_key`, who may also download what `downloads` offers.
-    pub fn new(room_key: String, downloads: Downloads) -> Arc<Self> {
-        Arc::new(Self { room_key, members: Mutex::default(), downloads })
+    /// The channel that whoever `tailnet` knows may join, watch, and download what `downloads`
+    /// offers from.
+    pub fn new(tailnet: impl Tailnet, downloads: Downloads) -> Arc<Self> {
+        Arc::new(Self { tailnet: Arc::new(tailnet), members: Mutex::default(), downloads })
     }
 
     /// Admits the endpoint's connections until it closes.
@@ -79,29 +87,42 @@ impl Room {
     }
 
     /// Lets a connection join once its Hello checks out, and relays for it until it leaves or is
-    /// lost and not resumed; once its Watch checks out, tells it who is in the channel until it
-    /// closes; or once its Download checks out, sends it the download.
+    /// lost and its device doesn't come back; once its Watch checks out, tells it who is in the
+    /// channel until it closes; or once its Download checks out, sends it the download. A
+    /// first message checks out if it is of this protocol's version and the tailnet knows the
+    /// device it comes from.
     async fn admit(&self, incoming: Incoming) -> anyhow::Result<()> {
         let connection = incoming.await?;
-        let (send, recv, first) = timeout(HELLO_TIMEOUT, async {
+        let (send, recv, first, device) = timeout(HELLO_TIMEOUT, async {
             let (send, mut recv) = connection.accept_bi().await?;
-            let first = control::read(&mut recv).await?;
-            anyhow::Ok((send, recv, first))
+            let first = control::read(&mut recv).await?.context("the stream ended before a Hello, a Watch or a Download")?;
+            let device = self.whois(connection.remote_address()).await;
+            anyhow::Ok((send, recv, first, device))
         })
         .await??;
+        let (version, asked) = match first {
+            ClientMessage::Hello { version, muted } => (version, Asked::Join { muted }),
+            ClientMessage::Watch { version } => (version, Asked::Watch),
+            ClientMessage::Download { version, name } => (version, Asked::Download(name)),
+            ClientMessage::Mute { .. } => anyhow::bail!("a Mute before a Hello"),
+        };
+        let device = match (version == PROTOCOL_VERSION, device) {
+            (false, _) => return reject(send, &connection, Rejection::Version).await,
+            (true, Ok(Some(device))) => device,
+            (true, Ok(None)) => return reject(send, &connection, Rejection::Stranger).await,
+            (true, Err(error)) => {
+                tracing::warn!(remote = %connection.remote_address(), "asking the tailnet who connects: {error:#}");
+                return reject(send, &connection, Rejection::Unidentified).await;
+            }
+        };
         let (control, outbox) = mpsc::unbounded_channel();
-        match first {
-            Some(ClientMessage::Hello { version, name, room_key, muted, resume }) => {
-                let name = name.trim();
-                let joined = self
-                    .check(version, &room_key)
-                    .and_then(|()| check_name(name))
-                    .and_then(|()| self.join(name, muted, resume, &connection, control));
-                let id = match joined {
+        match asked {
+            Asked::Join { muted } => {
+                let id = match self.join(&device, muted, &connection, control) {
                     Ok(id) => id,
                     Err(reason) => return reject(send, &connection, reason).await,
                 };
-                tracing::info!(id = id.0, name, remote = %connection.remote_address(), "joined");
+                tracing::info!(id = id.0, device = device.id, remote = %connection.remote_address(), "joined");
                 tokio::select! {
                     () = deliver(send, outbox) => {}
                     () = self.relay(id, &connection) => {}
@@ -115,79 +136,63 @@ impl Room {
                 }
                 self.leave(id, &connection);
             }
-            Some(ClientMessage::Watch { version, room_key }) => {
-                if let Err(reason) = self.check(version, &room_key) {
-                    return reject(send, &connection, reason).await;
-                }
+            Asked::Watch => {
                 self.watch(control);
-                tracing::debug!(remote = %connection.remote_address(), "watching");
+                tracing::debug!(device = device.id, remote = %connection.remote_address(), "watching");
                 tokio::select! {
                     () = deliver(send, outbox) => {}
                     () = drain(recv) => {}
                 }
             }
-            Some(ClientMessage::Download { version, room_key, name }) => {
-                if let Err(reason) = self.check(version, &room_key) {
-                    return reject(send, &connection, reason).await;
-                }
-                tracing::debug!(name, remote = %connection.remote_address(), "downloading");
+            Asked::Download(name) => {
+                tracing::debug!(name, device = device.id, remote = %connection.remote_address(), "downloading");
                 // The client says nothing more on the control stream.
                 drop(recv);
                 self.downloads.serve(&name, &connection, send).await?;
             }
-            Some(ClientMessage::Mute { .. }) => anyhow::bail!("a Mute before a Hello"),
-            None => anyhow::bail!("the stream ended before a Hello, a Watch or a Download"),
         }
         Ok(())
     }
 
-    fn check(&self, version: u32, room_key: &str) -> Result<(), Rejection> {
-        if version != PROTOCOL_VERSION {
-            return Err(Rejection::Version);
-        }
-        if room_key != self.room_key {
-            return Err(Rejection::RoomKey);
-        }
-        Ok(())
+    /// The device that connects from `peer`, as the tailnet tells it.
+    async fn whois(&self, peer: SocketAddr) -> anyhow::Result<Option<Device>> {
+        let tailnet = Arc::clone(&self.tailnet);
+        tokio::task::spawn_blocking(move || tailnet.whois(peer)).await.context("asking the tailnet panicked")?
     }
 
-    /// Adds a member, or puts the one the Hello resumes on the connection, closing its old
+    /// Adds the device as a member, or puts the member it is on the connection, closing its old
     /// one; welcomes it with everyone in the channel and tells the others.
     fn join(
         &self,
-        name: &str,
+        device: &Device,
         muted: bool,
-        resume: Option<ResumeToken>,
         connection: &Connection,
         control: mpsc::UnboundedSender<ServerMessage>,
     ) -> Result<MemberId, Rejection> {
         let mut members = self.members.lock().expect("the members lock is never poisoned");
-        let resumed = resume.and_then(|token| members.peers.iter().find(|(_, peer)| peer.resume == token).map(|(&id, _)| id));
-        let (id, peer, back) = match resumed.and_then(|id| members.peers.remove_entry(&id)) {
+        let held = members.peers.iter().find(|(_, peer)| peer.device == device.id).map(|(&id, _)| id);
+        let peer = Peer {
+            device: device.id.clone(),
+            name: shown(&device.name),
+            muted,
+            reconnecting: false,
+            connection: connection.clone(),
+            control: control.clone(),
+        };
+        let (id, back) = match held.and_then(|id| members.peers.remove_entry(&id)) {
             Some((id, old)) => {
-                old.connection.close(0u32.into(), b"resumed");
-                (id, Peer { muted, reconnecting: false, connection: connection.clone(), control: control.clone(), ..old }, true)
+                old.connection.close(VarInt::from_u32(REPLACED), b"replaced");
+                (id, true)
             }
             None if members.peers.len() >= MAX_MEMBERS => return Err(Rejection::Full),
-            None => {
-                let peer = Peer {
-                    name: name.to_owned(),
-                    muted,
-                    reconnecting: false,
-                    resume: ResumeToken(random()),
-                    connection: connection.clone(),
-                    control: control.clone(),
-                };
-                (members.next_id(), peer, false)
-            }
+            None => (members.next_id(), false),
         };
         let member = peer.member(id);
         // Told while the member is out of the map: it hears of itself only in its Welcome.
         members.tell(&if back { ServerMessage::Changed { member } } else { ServerMessage::Joined { member } });
-        let resume = peer.resume;
         members.peers.insert(id, peer);
         // The channel is fresh and its receiver alive, so the Welcome is queued first.
-        let _ = control.send(ServerMessage::Welcome { you: id, members: members.everyone(), resume });
+        let _ = control.send(ServerMessage::Welcome { you: id, members: members.everyone() });
         Ok(id)
     }
 
@@ -248,7 +253,7 @@ impl Room {
         }
         let peer = members.peers.remove(&id).expect("the member is in the channel");
         members.tell(&ServerMessage::Left { id });
-        tracing::info!(id = id.0, name = peer.name, "left");
+        tracing::info!(id = id.0, device = peer.device, "left");
     }
 
     /// Forwards the member's audio to everyone else until its connection is lost.
@@ -296,12 +301,18 @@ impl Members {
     }
 }
 
-/// Control characters would let a name rewrite the terminals and logs that show it.
-fn check_name(name: &str) -> Result<(), Rejection> {
-    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS || name.chars().any(char::is_control) {
-        return Err(Rejection::Name);
-    }
-    Ok(())
+/// What a connection asks for with its first message.
+enum Asked {
+    Join { muted: bool },
+    Watch,
+    Download(String),
+}
+
+/// A device's name as members see it: without control characters, which would let it rewrite
+/// the terminals that show it, and cut to [`MAX_NAME_CHARS`].
+fn shown(name: &str) -> String {
+    let name: String = name.chars().filter(|char| !char.is_control()).collect();
+    name.trim().chars().take(MAX_NAME_CHARS).collect()
 }
 
 /// Tells the client why it was turned away, and closes the connection once it has read it.
@@ -336,9 +347,13 @@ fn is_lost(connection: &Connection) -> bool {
         .is_some_and(|reason| !matches!(reason, ConnectionError::ApplicationClosed(_) | ConnectionError::LocallyClosed))
 }
 
-/// Bytes from the system's secure randomness.
-fn random<const N: usize>() -> [u8; N] {
-    let mut bytes = [0; N];
-    rustls::crypto::ring::default_provider().secure_random.fill(&mut bytes).expect("the system has secure randomness");
-    bytes
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_is_shown_without_control_characters_and_cut() {
+        assert_eq!(shown(" First\u{1b}[2J Member "), "First[2J Member");
+        assert_eq!(shown(&"long".repeat(10)).chars().count(), MAX_NAME_CHARS);
+    }
 }

@@ -1,19 +1,16 @@
-//! The system as a scene gives it: settings kept nowhere, a room key in memory, devices and an
-//! RTX card as staged, NVIDIA's effects installing without end, and no sounds from a server.
+//! The system as a scene gives it: settings kept nowhere, devices and an RTX card as staged,
+//! NVIDIA's effects installing without end, and no sounds from a server.
 
-use std::sync::Mutex;
 use std::thread;
 
 use crate::audio::{self, Device, DeviceId, Direction};
 use crate::autostart;
 use crate::install::{self, Progress};
-use crate::known_servers::KnownServers;
 use crate::nvidia::Architecture;
 use crate::settings::{self, Settings};
 use crate::ui::Host;
 
 pub struct Staged {
-    pub room_key: Mutex<Option<String>>,
     /// The microphones and the outputs, by id and name; the first of each is the default.
     pub inputs: Vec<(&'static str, &'static str)>,
     pub outputs: Vec<(&'static str, &'static str)>,
@@ -24,15 +21,6 @@ pub struct Staged {
 
 impl Host for Staged {
     fn save_settings(&self, _: &Settings) -> Result<(), settings::Error> {
-        Ok(())
-    }
-
-    fn room_key(&self) -> Result<Option<String>, settings::Error> {
-        Ok(self.room_key.lock().expect("the room key's lock is never poisoned").clone())
-    }
-
-    fn set_room_key(&self, key: &str) -> Result<(), settings::Error> {
-        *self.room_key.lock().expect("the room key's lock is never poisoned") = (!key.is_empty()).then(|| key.to_owned());
         Ok(())
     }
 
@@ -64,14 +52,7 @@ impl Host for Staged {
         self.card
     }
 
-    fn install(
-        &self,
-        _: &str,
-        _: String,
-        _: &KnownServers,
-        _: Architecture,
-        progress: &mut dyn FnMut(Progress),
-    ) -> Result<(), install::Error> {
+    fn install(&self, _: &str, _: Architecture, progress: &mut dyn FnMut(Progress)) -> Result<(), install::Error> {
         progress(self.installing);
         // Stays where it got, as the scene shows it; the harness ends without waiting for it.
         loop {
@@ -79,7 +60,7 @@ impl Host for Staged {
         }
     }
 
-    fn sync_sounds(&self, _: &str, _: String, _: &KnownServers) -> Result<(), install::Error> {
+    fn sync_sounds(&self, _: &str) -> Result<(), install::Error> {
         Ok(())
     }
 }

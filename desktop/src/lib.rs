@@ -9,7 +9,6 @@ pub mod games;
 #[cfg(feature = "harness")]
 pub mod harness;
 pub mod install;
-pub mod known_servers;
 pub mod nvidia;
 pub mod settings;
 pub mod ui;
@@ -23,7 +22,7 @@ use std::{fs, io, process};
 /// after listing the devices.
 pub const LOG_FILTER: &str = "warn,pulseaudio::client::reactor=off";
 
-/// The folder the desktop clients keep their files in, if the system has a config folder.
+/// The folder the desktop app keeps its files in, if the system has a config folder.
 pub fn config_folder() -> Option<PathBuf> {
     dirs::config_dir().map(|folder| folder.join("bukospeak"))
 }

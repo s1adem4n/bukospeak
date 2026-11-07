@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
+use bukospeak_core::proto::MemberId;
 use bukospeak_core::proto::control::{Member, Rejection};
-use bukospeak_core::proto::{Fingerprint, MemberId};
 
 use crate::audio::Direction;
 use crate::call::{Failure, Notice, Phase, Stage};
@@ -17,7 +17,6 @@ pub struct Scene {
     pub name: &'static str,
     pub about: &'static str,
     pub settings: Settings,
-    pub room_key: Option<&'static str>,
     pub card: Option<Architecture>,
     pub installing: Progress,
     pub stage: Stage,
@@ -48,7 +47,7 @@ fn five() -> Vec<Member> {
 }
 
 fn complete() -> Settings {
-    Settings { name: "Nachtfalke".into(), server: "voice.example:9988".into(), ..Settings::default() }
+    Settings { server: "voice.example:9988".into(), ..Settings::default() }
 }
 
 fn idle() -> Stage {
@@ -76,29 +75,16 @@ fn in_call() -> Stage {
 }
 
 fn scene(name: &'static str, about: &'static str, stage: Stage) -> Scene {
-    Scene {
-        name,
-        about,
-        settings: complete(),
-        room_key: Some("room-key"),
-        card: None,
-        installing: Progress::Preparing { done: 0, total: 0 },
-        stage,
-        steps: "",
-    }
+    Scene { name, about, settings: complete(), card: None, installing: Progress::Preparing { done: 0, total: 0 }, stage, steps: "" }
 }
 
 pub fn all() -> Vec<Scene> {
-    let fingerprint: Fingerprint =
-        "c8:69:8f:c4:83:66:58:80:12:28:d6:ef:a0:6e:62:65:af:6c:b9:09:c3:8c:a4:3a:7d:25:9f:1d:a5:a2:95:81".parse().expect("a fingerprint");
-    let other: Fingerprint =
-        "10:e7:e6:ac:63:24:fd:51:77:44:f1:ca:5e:71:10:1a:72:0d:eb:c4:58:76:cd:61:92:f0:7e:3e:46:8d:80:55".parse().expect("a fingerprint");
     vec![
-        Scene { settings: Settings::default(), room_key: None, ..scene("welcome", "the first start: the name", idle()) },
+        Scene { settings: Settings::default(), ..scene("welcome", "the first start: the server", idle()) },
         Scene {
-            settings: Settings { name: "Nachtfalke".into(), ..Settings::default() },
-            room_key: None,
-            ..scene("welcome-place", "the first start: the server and its room key", idle())
+            settings: Settings::default(),
+            steps: "type voice.example:9988",
+            ..scene("welcome-typed", "the first start, the server typed", idle())
         },
         scene("lobby", "out of a call, another in the channel", Stage { present: two()[1..].to_vec(), ..idle() }),
         scene("lobby-three", "out of a call, three in the channel", Stage { present: five()[1..4].to_vec(), ..idle() }),
@@ -142,21 +128,14 @@ pub fn all() -> Vec<Scene> {
             Stage { phase: Phase::Failed(Failure::Unreachable), present: two()[1..].to_vec(), ..idle() },
         ),
         scene(
-            "rejected",
-            "a join with the wrong room key",
-            Stage { phase: Phase::Failed(Failure::Rejected(Rejection::RoomKey)), ..idle() },
+            "stranger",
+            "a join from a device the server's tailnet doesn't know",
+            Stage { phase: Phase::Failed(Failure::Rejected(Rejection::Stranger)), ..idle() },
         ),
         scene(
-            "certificate",
-            "the server's certificate changed",
-            Stage {
-                phase: Phase::Failed(Failure::CertificateChanged {
-                    server: "voice.example:9988".into(),
-                    pinned: fingerprint,
-                    presented: other,
-                }),
-                ..idle()
-            },
+            "replaced",
+            "a call ended by joining again elsewhere on this device",
+            Stage { phase: Phase::Failed(Failure::Replaced), present: two()[1..].to_vec(), ..idle() },
         ),
         Scene { steps: "click settings", ..scene("settings", "the settings", idle()) },
         Scene {

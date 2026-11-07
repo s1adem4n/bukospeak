@@ -7,7 +7,7 @@ latency, Opus at high bitrates, and an iOS app that keeps its microphone through
 
 | Folder | What |
 |---|---|
-| `proto/` | The protocol: control messages, audio datagrams, certificate fingerprints |
+| `proto/` | The protocol: control messages and audio datagrams |
 | `server/` | The server, which relays each member's audio to everyone else |
 | `core/` | The client side the apps share: the engine, joining and pinning the server and joining again after a lost connection, the channel as the member sees it and what to announce about it, noise suppression, gain control, echo cancellation, voice activation, Opus, jitter buffers and the mix |
 | `ios/` | The iOS app (SwiftUI, CallKit) and `ios/dev`, which builds it on a Mac |
@@ -15,9 +15,12 @@ latency, Opus at high bitrates, and an iOS app that keeps its microphone through
 | `maxine/` | NVIDIA Maxine's audio effects on RTX cards, through NVIDIA's runtime loaded while running; `measure`, an example that times an effect on the machine's card |
 | `desktop/` | The desktop app for Windows, macOS and Linux (GPUI), and `bukospeak`, a terminal client for trying the server on the desktop's devices; both play the call through cpal |
 
-One QUIC connection per member (TLS 1.3): control messages on its first stream, Opus frames as
-datagrams. The server's certificate is self-signed; clients pin its fingerprint on the first
-join, as SSH does with known hosts, and refuse to connect if it changes.
+One QUIC connection per member, over a [Tailscale](https://tailscale.com) tailnet: control
+messages on its first stream, Opus frames as datagrams. The tailnet says who connects: the
+server asks the tailscaled beside it whose device an address is, lets in whoever is on the
+tailnet, and names each member after the device's owner. A device is one member: joining again,
+as after the connection was lost, takes its place back. QUIC's TLS proves nothing the tailnet
+doesn't, so the server's certificate is made anew on each start and clients take any.
 
 ## Development
 
@@ -25,10 +28,10 @@ Tools come from [mise](https://mise.jdx.dev): `mise install`, then `mise tasks` 
 
 ```sh
 mise run check                                                  # formatting, lints and tests, as CI runs them
-BUKOSPEAK_ROOM_KEY=dev cargo run -p bukospeak-server            # a server on [::]:9988, its identity in data/
+cargo run -p bukospeak-server                                   # a server on [::]:9988, asking the host's tailscaled
 cargo run --bin bukospeak-desktop                               # the desktop app
 cargo run --bin bukospeak -- devices                            # the audio devices and their ids
-cargo run --bin bukospeak -- join localhost:9988 --name first --room-key dev
+cargo run --bin bukospeak -- join this-machine:9988             # joins by the machine's tailnet name, not localhost
 cargo run -F bukospeak-desktop/harness --bin bukospeak-ui -- list  # the desktop app's window, headless
 ```
 
@@ -59,11 +62,14 @@ The workspace's `version` raised, committed, and tagged with it (`v0.2.0`): push
 ## Running the server
 
 ```sh
-podman run -d --name bukospeak -p 9988:9988/udp -v bukospeak:/data \
-  -e BUKOSPEAK_ROOM_KEY=… ghcr.io/s1adem4n/bukospeak-server
+podman run -d --name bukospeak --network host -v bukospeak:/data \
+  -v /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock \
+  ghcr.io/s1adem4n/bukospeak-server
 ```
 
-It logs its certificate's fingerprint on start, which clients show on their first join.
+on a machine of the tailnet: the server asks its tailscaled, through the socket, who each
+connection comes from, which needs the connection's own address, as the host's network keeps it.
+Members join it by the machine's tailnet name, as `server:9988`.
 
 WAV files in `/data/sounds`, named after what each tells (`joined`, `left`, `came`, `went`,
 `muted`, `unmuted`, each `.wav`), replace the desktop app's own tones: the app installs them

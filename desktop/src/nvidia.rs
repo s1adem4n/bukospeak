@@ -10,7 +10,6 @@ pub use bukospeak_maxine::{Architecture, Kind};
 use bukospeak_maxine::{Effect, Runtime};
 
 use crate::install::{self, Progress};
-use crate::known_servers::KnownServers;
 
 /// The system's RTX card, if it has one the effects run on.
 pub fn card() -> Option<Architecture> {
@@ -114,16 +113,10 @@ impl Suppressor for Nvidia {
 
 /// Installs the effects for `architecture` from the download `server` offers, as
 /// [`install::install`] does, unless they are installed.
-pub fn install(
-    server: &str,
-    room_key: String,
-    known: &KnownServers,
-    architecture: Architecture,
-    progress: impl FnMut(Progress),
-) -> Result<(), install::Error> {
+pub fn install(server: &str, architecture: Architecture, progress: impl FnMut(Progress)) -> Result<(), install::Error> {
     let folder = folder(architecture).ok_or(install::Error::NoFolder)?;
     if install::is_installed(&folder) {
         return Ok(());
     }
-    install::install(server, room_key, known, &architecture.download(), &folder, progress)
+    install::install(server, &architecture.download(), &folder, progress)
 }

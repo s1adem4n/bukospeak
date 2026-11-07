@@ -2,10 +2,10 @@
 
 mod certificate;
 mod downloads;
-mod identity;
 mod ngc;
 mod room;
 mod sounds;
+mod tailnet;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,16 +15,17 @@ use bukospeak_proto::{ALPN, IDLE_TIMEOUT};
 use quinn::crypto::rustls::QuicServerConfig;
 
 pub use downloads::{Downloads, Source, compress};
-pub use identity::Identity;
 pub use ngc::Ngc;
 pub use room::Room;
 pub use sounds::Sounds;
+pub use tailnet::{Device, LocalApi, Tailnet};
 
-/// A QUIC endpoint on `listen` that presents the identity's certificate.
-pub fn endpoint(identity: &Identity, listen: SocketAddr) -> anyhow::Result<quinn::Endpoint> {
+/// A QUIC endpoint on `listen` that presents a certificate made for it.
+pub fn endpoint(listen: SocketAddr) -> anyhow::Result<quinn::Endpoint> {
+    let (certificate, key) = certificate::generate()?;
     let mut tls = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth()
-        .with_single_cert(vec![identity.certificate.clone()], identity.key.clone_key())?;
+        .with_single_cert(vec![certificate], key)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
 
     let mut transport = quinn::TransportConfig::default();

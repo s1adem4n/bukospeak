@@ -15,7 +15,6 @@ use cpal::DeviceId;
 
 use crate::audio;
 use crate::install::{self, Error};
-use crate::known_servers::KnownServers;
 
 /// The folder the server's sounds are installed in, if the system has a folder for programs'
 /// data.
@@ -23,14 +22,10 @@ pub fn folder() -> Option<PathBuf> {
     dirs::data_local_dir().map(|folder| folder.join("bukospeak").join(SOUNDS))
 }
 
-/// Installs the sounds `server` offers, which the room key opens, as it has them now, into
-/// `folder`, or removes them once it offers none. Only a server already trusted is asked: the
-/// sounds aren't worth trusting one. Blocks until they are installed.
-pub fn sync(server: &str, room_key: String, known: &KnownServers, folder: &Path) -> Result<(), Error> {
-    if known.get(server)?.is_none() {
-        return Ok(());
-    }
-    match install::install(server, room_key, known, SOUNDS, folder, |_| ()) {
+/// Installs the sounds `server` offers as it has them now into `folder`, or removes them once it
+/// offers none. Blocks until they are installed.
+pub fn sync(server: &str, folder: &Path) -> Result<(), Error> {
+    match install::install(server, SOUNDS, folder, |_| ()) {
         Err(Error::Download(CallError::Rejected(Rejection::Unavailable))) => Ok(install::remove(folder)?),
         installed => installed,
     }

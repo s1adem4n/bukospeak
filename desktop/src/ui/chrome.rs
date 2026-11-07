@@ -154,7 +154,7 @@ fn round<E: Styled + FluentBuilder>(element: E, tiling: Tiling, radius: Pixels) 
 }
 
 /// The content's corners, rounded inside the frame's where the app draws it: what fills the
-/// content, its background and a dialog's scrim, is rounded with them.
+/// content and its background, is rounded with them.
 pub fn rounded<E: Styled + FluentBuilder>(content: E, window: &Window) -> E {
     match window.window_decorations() {
         Decorations::Client { tiling } => round(content, tiling, theme::FRAME_RADIUS - theme::FRAME_BORDER),

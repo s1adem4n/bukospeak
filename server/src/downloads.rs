@@ -1,7 +1,7 @@
 //! Downloads the server offers its members, as NVIDIA's effects for their cards and the call's
 //! sounds. A [`Source`] prepares a download once it is first asked for; the server keeps its
-//! files in a folder of its own, each compressed with zstd, and sends them to whoever has the
-//! room key.
+//! files in a folder of its own, each compressed with zstd, and sends them to whoever is on
+//! the tailnet.
 //!
 //! A download is ready once its folder holds the list of its files, which is written last, and
 //! what it was prepared from is what its source has now: a download prepared in part, as when

@@ -6,7 +6,7 @@
 mod host;
 mod scenes;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
@@ -19,7 +19,6 @@ use image::RgbaImage;
 pub use scenes::{Scene, all as scenes};
 
 use crate::call::Call;
-use crate::known_servers::KnownServers;
 use crate::ui::marks::Marks;
 use crate::ui::{self, Client, Main, theme};
 
@@ -85,15 +84,12 @@ impl Harness {
         let text = Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(theme::SANS));
         let mut cx = HeadlessAppContext::with_platform(text, Arc::new(ui::Assets), gpui_platform::current_headless_renderer);
         let host = Arc::new(host::Staged {
-            room_key: Mutex::new(scene.room_key.map(str::to_owned)),
             inputs: vec![("alsa:headset", "Headset-Mikrofon"), ("alsa:usb", "USB-Mikrofon"), ("alsa:webcam", "Webcam")],
             outputs: vec![("alsa:headset-out", "Headset"), ("alsa:speakers", "Lautsprecher")],
             card: scene.card,
             installing: scene.installing,
         });
-        // A staged call joins nothing, so pins nothing either.
-        let known = KnownServers::at(std::env::temp_dir().join("bukospeak-harness-known-servers"));
-        let (call, happenings) = Call::staged(known, scene.stage.clone())?;
+        let (call, happenings) = Call::staged(scene.stage.clone())?;
         let client = cx.update(|cx| {
             ui::init(cx);
             theme::force(dark, cx);

@@ -1,9 +1,12 @@
 //! The server's self-signed X.509 certificate for an Ed25519 key, written in DER as RFC 5280
-//! lays it out. Clients trust it by its fingerprint, so it carries only what TLS needs to parse
-//! it and check the handshake's signature: the server's name, a validity without end, and the
-//! key.
+//! lays it out, and made anew on each start: QUIC needs one, but the tailnet vouches for the
+//! server, so clients take any. It carries only what TLS needs to parse it and check the
+//! handshake's signature: the server's name, a validity without end, and the key.
 
+use bukospeak_proto::SERVER_NAME;
+use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 const SEQUENCE: u8 = 0x30;
 const SET: u8 = 0x31;
@@ -64,8 +67,20 @@ fn distinguished_name(name: &str) -> Vec<u8> {
     sequence(&[&der(SET, &common_name)])
 }
 
+/// A new key, and its certificate for [`SERVER_NAME`].
+pub fn generate() -> anyhow::Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
+    let random = SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).map_err(|_| anyhow::anyhow!("the system has no randomness for a key"))?;
+    let key =
+        Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|rejected| anyhow::anyhow!("the key just generated is rejected: {rejected}"))?;
+    let mut serial = [0; 16];
+    random.fill(&mut serial).map_err(|_| anyhow::anyhow!("the system has no randomness for a serial number"))?;
+    let certificate = self_signed(&key, SERVER_NAME, serial);
+    Ok((certificate.into(), PrivatePkcs8KeyDer::from(pkcs8.as_ref().to_vec()).into()))
+}
+
 /// The certificate of `key`, signed by it, for the server `name`, with the `serial` number.
-pub fn self_signed(key: &Ed25519KeyPair, name: &str, serial: [u8; 16]) -> Vec<u8> {
+fn self_signed(key: &Ed25519KeyPair, name: &str, serial: [u8; 16]) -> Vec<u8> {
     let to_be_signed = to_be_signed(key, name, serial);
     let signature = key.sign(&to_be_signed);
     sequence(&[&to_be_signed, &algorithm(), &bit_string(signature.as_ref())])
@@ -102,9 +117,8 @@ fn positive(mut serial: [u8; 16]) -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
-    use ring::rand::SystemRandom;
     use ring::signature::UnparsedPublicKey;
-    use rustls::pki_types::{CertificateDer, ServerName};
+    use rustls::pki_types::ServerName;
 
     use super::*;
 

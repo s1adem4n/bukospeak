@@ -37,6 +37,8 @@ glyphs! {
     Back => "chevron-left",
     Warning => "triangle-alert",
     Users => "users",
+    /// One's own avatar before the server named one.
+    You => "user",
     Reconnecting => "wifi-off",
     Edit => "pencil",
     /// A value chosen from a menu.
@@ -46,9 +48,6 @@ glyphs! {
     Loading => "loader-circle",
     /// A menu's item that is chosen.
     Check => "check",
-    /// A secret field's toggle: its text shown, or hidden again.
-    Show => "eye",
-    Hide => "eye-off",
     /// The window's buttons, where the app draws them.
     Minimize => "minus",
     Maximize => "square",

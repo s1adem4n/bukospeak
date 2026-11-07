@@ -10,32 +10,6 @@ nonisolated struct Member: Identifiable, Hashable, Sendable {
     let reconnecting: Bool
 }
 
-/// A server's certificate fingerprint, its SHA-256, pinned on the first join.
-nonisolated struct Fingerprint: Hashable, Sendable, CustomStringConvertible {
-    let bytes: [UInt8]
-
-    /// The way servers log it: hex bytes, colon-separated.
-    var description: String {
-        bytes.map { String(format: "%02x", $0) }.joined(separator: ":")
-    }
-
-    init?(_ text: String) {
-        let bytes = text.split(separator: ":").compactMap { UInt8($0, radix: 16) }
-        guard bytes.count == 32, text.count == 32 * 3 - 1 else { return nil }
-        self.bytes = bytes
-    }
-
-    fileprivate init(_ fingerprint: BukoSpeakFingerprint) {
-        bytes = withUnsafeBytes(of: fingerprint.bytes) { Array($0) }
-    }
-
-    fileprivate var ffi: BukoSpeakFingerprint {
-        var fingerprint = BukoSpeakFingerprint()
-        withUnsafeMutableBytes(of: &fingerprint.bytes) { $0.copyBytes(from: bytes) }
-        return fingerprint
-    }
-}
-
 /// The channel after a change: who is in it and who speaks, kept by the engine.
 nonisolated struct ChannelUpdate: Sendable {
     enum State: Sendable {
@@ -54,22 +28,29 @@ nonisolated struct ChannelUpdate: Sendable {
     let members: [Member]
     /// Who speaks now, this member among them.
     let speaking: Set<UInt16>
-    /// The call ended without a leave: why, after joining again failed too.
-    let lost: String?
+    /// Why the call ended without a leave.
+    let lost: EngineError?
     /// Who is in the channel while the engine watches it from outside.
     let present: [Member]
 }
 
-/// A call just joined.
-nonisolated struct Joined: Sendable {
-    /// The server's, to pin for the next join.
-    let fingerprint: Fingerprint
-}
+/// Why a join failed or a call was lost.
+nonisolated struct EngineError: Error {
+    enum Reason: Sendable {
+        /// Anything else: the server didn't answer, the connection broke, and the like.
+        case other
+        /// The server's tailnet doesn't know this device: it isn't on that tailnet, or
+        /// Tailscale is off.
+        case stranger
+        /// The server couldn't ask its tailnet who this device is.
+        case unidentified
+        /// This device joined the channel again elsewhere, which took the call's place.
+        case replaced
+    }
 
-nonisolated enum JoinError: Error {
-    /// The server presented another certificate than the one pinned.
-    case fingerprintChanged(pinned: Fingerprint, presented: Fingerprint, message: String)
-    case failed(String)
+    let reason: Reason
+    /// What happened, in English, for the log.
+    let message: String
 }
 
 nonisolated struct AudioError: Error {
@@ -123,13 +104,13 @@ nonisolated final class Engine: @unchecked Sendable {
         listener.takeRetainedValue().continuation.finish()
     }
 
-    /// Leaves the call before, if there is one, and joins the channel, trusting the server by
-    /// `pin`, or on first use if it is nil.
-    func join(server: String, name: String, roomKey: String, pin: Fingerprint?) async throws(JoinError) -> Joined {
+    /// Leaves the call before, if there is one, and joins the channel of `server`, as
+    /// `host:port`, as this device, which the server knows from its tailnet.
+    func join(server: String) async throws(EngineError) {
         let result = await withCheckedContinuation { continuation in
-            queue.async { continuation.resume(returning: self.join(server, name, roomKey, pin)) }
+            queue.async { continuation.resume(returning: self.join(server)) }
         }
-        return try result.get()
+        try result.get()
     }
 
     /// Stops the call's audio and leaves the call, once the server knows. Returns the call the
@@ -140,11 +121,10 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
-    /// Watches who is in the channel without joining it, until `unwatch` or a join; the updates
-    /// tell them as present. Only a server pinned by a join before is watched.
-    func watch(server: String, roomKey: String, pin: Fingerprint) {
-        var pin = pin.ffi
-        bukospeak_engine_watch(engine, server, roomKey, &pin)
+    /// Watches who is in the channel of `server` without joining it, until `unwatch` or a join;
+    /// the updates tell them as present.
+    func watch(server: String) {
+        bukospeak_engine_watch(engine, server)
     }
 
     func unwatch() {
@@ -194,40 +174,13 @@ nonisolated final class Engine: @unchecked Sendable {
         queue.async { bukospeak_engine_stop_audio(self.engine) }
     }
 
-    private func join(
-        _ server: String,
-        _ name: String,
-        _ roomKey: String,
-        _ pin: Fingerprint?
-    ) -> Result<Joined, JoinError> {
-        var result = Result<Joined, JoinError>.failure(.failed(""))
-        let done: BukoSpeakJoinDone = { context, joined in
-            let joined = joined!.pointee
-            context!.assumingMemoryBound(to: Result<Joined, JoinError>.self).pointee =
-                switch joined.status {
-                case BUKO_SPEAK_JOIN_STATUS_JOINED:
-                    .success(
-                        Joined(fingerprint: Fingerprint(joined.fingerprint))
-                    )
-                case BUKO_SPEAK_JOIN_STATUS_FINGERPRINT_CHANGED:
-                    .failure(
-                        .fingerprintChanged(
-                            pinned: Fingerprint(joined.pinned),
-                            presented: Fingerprint(joined.fingerprint),
-                            message: String(joined.message)
-                        )
-                    )
-                case BUKO_SPEAK_JOIN_STATUS_FAILED:
-                    .failure(.failed(String(joined.message)))
-                default:
-                    fatalError("a join ends in no other status")
-                }
-        }
+    private func join(_ server: String) -> Result<Void, EngineError> {
+        var result = Result<Void, EngineError>.success(())
         withUnsafeMutablePointer(to: &result) { result in
-            if var pin = pin?.ffi {
-                bukospeak_engine_join(engine, server, name, roomKey, &pin, result, done)
-            } else {
-                bukospeak_engine_join(engine, server, name, roomKey, nil, result, done)
+            bukospeak_engine_join(engine, server, result) { context, error in
+                guard let error else { return }
+                context!.assumingMemoryBound(to: Result<Void, EngineError>.self).pointee =
+                    .failure(EngineError(error.pointee))
             }
         }
         return result
@@ -261,15 +214,28 @@ nonisolated extension ChannelUpdate {
             case BUKO_SPEAK_STATE_RECONNECTING: .reconnecting
             default: fatalError("the engine has no other states")
             }
-        let lost = String(update.lost)
         self.init(
             call: update.call,
             state: state,
             you: update.you == 0 ? nil : update.you,
             members: UnsafeBufferPointer(start: update.members, count: update.members_len).map(Member.init),
             speaking: Set(UnsafeBufferPointer(start: update.speaking, count: update.speaking_len)),
-            lost: lost.isEmpty ? nil : lost,
+            lost: update.lost.map { EngineError($0.pointee) },
             present: UnsafeBufferPointer(start: update.present, count: update.present_len).map(Member.init)
         )
+    }
+}
+
+nonisolated extension EngineError {
+    fileprivate init(_ error: BukoSpeakError) {
+        let reason: Reason =
+            switch error.reason {
+            case BUKO_SPEAK_REASON_OTHER: .other
+            case BUKO_SPEAK_REASON_STRANGER: .stranger
+            case BUKO_SPEAK_REASON_UNIDENTIFIED: .unidentified
+            case BUKO_SPEAK_REASON_REPLACED: .replaced
+            default: fatalError("the engine has no other reasons")
+            }
+        self.init(reason: reason, message: String(error.message))
     }
 }

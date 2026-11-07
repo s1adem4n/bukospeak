@@ -25,8 +25,6 @@ final class Call: NSObject {
     private(set) var isMuted = false
     /// Whether another call holds this one.
     private(set) var isHeld = false
-    /// The server whose certificate changed since it was pinned, for the user to trust anew.
-    private(set) var changedServer: String?
     /// Who is in the channel, watched from the start screen.
     private(set) var present: [Member] = []
     /// When the call came up, joining again within it included; nil out of a call.
@@ -57,7 +55,7 @@ final class Call: NSObject {
     /// The leave of the call before, which a join waits for.
     @ObservationIgnored private var leaving: Task<Void, Never>?
     /// The call's join, under way from the tap while CallKit starts the call.
-    @ObservationIgnored private var joining: Task<Result<Void, JoinError>, Never>?
+    @ObservationIgnored private var joining: Task<Result<Void, EngineError>, Never>?
     /// When the user tapped to join, for the log to tell how long each step of the join took.
     @ObservationIgnored private var tapped = ContinuousClock.now
 
@@ -97,7 +95,6 @@ final class Call: NSObject {
         phase = .joining
         // Who the start screen showed, until the server tells who is in the channel.
         members = present
-        changedServer = nil
         await leaving?.value
         guard await AudioSession.microphoneAllowed() else {
             members = []
@@ -133,12 +130,10 @@ final class Call: NSObject {
         await request(CXSetMutedCallAction(call: id, muted: !isMuted))
     }
 
-    /// Watches who is in the channel while `on`, for the start screen: only out of a call, and
-    /// only a server pinned by a join before.
+    /// Watches who is in the channel while `on`, for the start screen: only out of a call.
     func watch(_ on: Bool) {
-        let server = settings.server.trimmingCharacters(in: .whitespaces)
-        if on, id == nil, settings.isComplete, let pin = settings.pin(for: server) {
-            engine.watch(server: server, roomKey: settings.roomKey, pin: pin)
+        if on, id == nil, settings.isComplete {
+            engine.watch(server: settings.server.trimmingCharacters(in: .whitespaces))
         } else {
             engine.unwatch()
         }
@@ -152,20 +147,6 @@ final class Call: NSObject {
     /// Applies the volume setting to the call.
     func volumeChanged() {
         engine.setVolume(settings.volume)
-    }
-
-    /// Trusts the server's new certificate on the next join, as after it was set up anew.
-    func trustAnew(_ server: String) {
-        settings.forgetPin(for: server)
-        changedServer = nil
-        phase = .idle
-    }
-
-    /// Forgets the failure the user has seen.
-    func dismissFailure() {
-        guard case .failed = phase else { return }
-        changedServer = nil
-        phase = .idle
     }
 
     private static var configuration: CXProviderConfiguration {
@@ -197,25 +178,15 @@ final class Call: NSObject {
         }
     }
 
-    /// Joins the channel with the settings, pinning the server on the first join.
-    private func joinChannel() async -> Result<Void, JoinError> {
-        let server = settings.server.trimmingCharacters(in: .whitespaces)
+    /// Joins the channel with the settings.
+    private func joinChannel() async -> Result<Void, EngineError> {
         engine.setNoiseSuppression(settings.noiseSuppression)
         engine.setMuted(isMuted)
-        do throws(JoinError) {
-            let joined = try await engine.join(
-                server: server,
-                name: settings.name.trimmingCharacters(in: .whitespaces),
-                roomKey: settings.roomKey,
-                pin: settings.pin(for: server)
-            )
-            settings.pin(joined.fingerprint, for: server)
+        do throws(EngineError) {
+            try await engine.join(server: settings.server.trimmingCharacters(in: .whitespaces))
             logStep("the server welcomed the join")
             return .success(())
         } catch {
-            if case .fingerprintChanged = error {
-                changedServer = server
-            }
             return .failure(error)
         }
     }
@@ -245,8 +216,8 @@ final class Call: NSObject {
         if members != update.members { members = update.members }
         if speaking != update.speaking { speaking = update.speaking }
         if let lost = update.lost {
-            Self.log.error("the connection was lost: \(lost)")
-            return fail("Verbindung verloren")
+            Self.log.error("the call was lost: \(lost.message)")
+            return fail(lost.text(otherwise: "Verbindung verloren"))
         }
         // Only on a change: an update of who speaks shouldn't start audio that failed again.
         if changed && phase != .joining {
@@ -397,7 +368,7 @@ extension Call: @MainActor CXProviderDelegate {
             case .failure(let error):
                 action.fail()
                 Self.log.error("the join failed: \(error.message)")
-                end(failure: "Beitritt fehlgeschlagen")
+                end(failure: error.text(otherwise: "Beitritt fehlgeschlagen"))
             }
         }
     }
@@ -445,11 +416,14 @@ extension Call: @MainActor CXCallObserverDelegate {
     }
 }
 
-extension JoinError {
-    /// What went wrong, for the log.
-    var message: String {
-        switch self {
-        case .fingerprintChanged(_, _, let message), .failed(let message): message
+extension EngineError {
+    /// What to tell the user, or `otherwise` for a failure the engine doesn't tell apart.
+    func text(otherwise: String) -> String {
+        switch reason {
+        case .stranger: "Nicht im Tailnet des Servers"
+        case .unidentified: "Server erreicht Tailscale nicht"
+        case .replaced: "Anderswo beigetreten"
+        case .other: otherwise
         }
     }
 }

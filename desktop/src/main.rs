@@ -11,7 +11,6 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 
 use bukospeak_desktop::call::{Call, DesktopPlayer};
-use bukospeak_desktop::known_servers::KnownServers;
 use bukospeak_desktop::settings::Settings;
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -23,7 +22,7 @@ use crate::tray::{Standing, Tray};
 use bukospeak_desktop::autopilot::Autopilot;
 use bukospeak_desktop::autostart::BACKGROUND;
 use bukospeak_desktop::call::Phase;
-use bukospeak_desktop::ui::{self, Client, Desktop, RoomKeyRead, Trouble};
+use bukospeak_desktop::ui::{self, Client, Desktop, Trouble};
 use bukospeak_desktop::update::{self, Updater};
 
 /// What the tray, the hotkey or a later start asks the app to do.
@@ -63,7 +62,7 @@ fn main() {
             (Settings::default(), Some(Trouble::Unreadable))
         }
     };
-    let (call, happenings) = Call::new(KnownServers::at(folder.join("known_servers")), DesktopPlayer).expect("the engine's threads start");
+    let (call, happenings) = Call::new(DesktopPlayer).expect("the engine's threads start");
     // The system starts the app so, with it: into the tray, unless the window is needed.
     let background = std::env::args().any(|argument| argument == BACKGROUND);
 
@@ -86,17 +85,8 @@ fn main() {
         // It lives as long as the app.
         let autopilot = Autopilot::new(client.clone(), cx);
         follow(asked, client.clone(), updater.clone(), hotkey, autopilot, cx);
-        // Without a tray, or with something to set up first, the window is needed; the room key
-        // only tells once the keyring answered.
-        if background && tray && client.read(cx).missing().is_none() {
-            let (asking, updating) = (client.clone(), updater.clone());
-            cx.subscribe(&client, move |_, _: &RoomKeyRead, cx| {
-                if asking.read(cx).missing().is_some() {
-                    open(&asking, &updating, cx);
-                }
-            })
-            .detach();
-        } else {
+        // Without a tray, or without a server to join, the window is needed.
+        if !(background && tray && client.read(cx).settings.is_complete()) {
             ui::start(client, updater, cx);
         }
     });
@@ -141,10 +131,10 @@ fn follow(
                     let read = client.read(cx);
                     if !matches!(read.call.phase(), Phase::Idle | Phase::Failed(_)) {
                         client.update(cx, |client, cx| client.leave(cx));
-                    } else if read.missing().is_none() && !read.room_key().is_empty() {
+                    } else if read.settings.is_complete() {
                         client.update(cx, |client, cx| client.join(cx));
                     } else {
-                        // What joining needs is given in the window.
+                        // The server to join is given in the window.
                         open(&client, &updater, cx);
                     }
                 }

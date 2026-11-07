@@ -2,52 +2,36 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ResumeToken, ServerMessage};
-use bukospeak_proto::{ALPN, Fingerprint, IDLE_TIMEOUT, KEEP_ALIVE, MemberId, PROTOCOL_VERSION, SERVER_NAME, audio};
+use bukospeak_proto::control::{self, ClientMessage, Member, Rejection, ServerMessage};
+use bukospeak_proto::{ALPN, IDLE_TIMEOUT, KEEP_ALIVE, MemberId, PROTOCOL_VERSION, REPLACED, SERVER_NAME, audio};
 use bytes::Bytes;
 use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use quinn::{Connection, ConnectionError, Endpoint, RecvStream, SendStream};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::WebPkiSupportedAlgorithms;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use tokio::sync::mpsc;
-
-use crate::pin::PinVerifier;
 
 /// How long a join may take, from resolving the server to its Welcome.
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Clone)]
-pub struct JoinConfig {
-    /// The server as `host:port`.
-    pub server: String,
-    pub name: String,
-    pub room_key: String,
-    /// The fingerprint pinned on an earlier join, or None to trust the server on first use.
-    pub pin: Option<Fingerprint>,
-}
-
-/// How a join enters the channel beyond its config: muted or not, and in the place of a lost
-/// session, if the server still holds it.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Entry {
-    pub muted: bool,
-    pub resume: Option<ResumeToken>,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0} doesn't resolve to an address")]
     Resolve(String),
-    #[error("the server's certificate changed: pinned {pinned}, presented {presented}")]
-    FingerprintChanged { pinned: Fingerprint, presented: Fingerprint },
     #[error("the server turned the client away")]
     Rejected(#[from] Rejection),
+    #[error("this device joined again elsewhere, which took its place")]
+    Replaced,
     #[error(transparent)]
     Connect(#[from] quinn::ConnectError),
     #[error(transparent)]
-    Connection(#[from] quinn::ConnectionError),
+    Connection(ConnectionError),
     #[error(transparent)]
     Control(#[from] control::Error),
     #[error(transparent)]
-    Read(#[from] quinn::ReadError),
+    Read(quinn::ReadError),
     #[error("the server broke the protocol: {0}")]
     Protocol(&'static str),
     #[error(transparent)]
@@ -56,6 +40,24 @@ pub enum Error {
     TimedOut,
     #[error("{0} came other than the server listed it")]
     Damaged(String),
+}
+
+impl From<ConnectionError> for Error {
+    fn from(error: ConnectionError) -> Self {
+        match error {
+            ConnectionError::ApplicationClosed(close) if close.error_code.into_inner() == u64::from(REPLACED) => Self::Replaced,
+            error => Self::Connection(error),
+        }
+    }
+}
+
+impl From<quinn::ReadError> for Error {
+    fn from(error: quinn::ReadError) -> Self {
+        match error {
+            quinn::ReadError::ConnectionLost(error) => error.into(),
+            error => Self::Read(error),
+        }
+    }
 }
 
 /// What happens in the channel after the join.
@@ -77,27 +79,19 @@ pub struct Session {
     control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
     you: MemberId,
     members: Vec<Member>,
-    resume: ResumeToken,
-    fingerprint: Fingerprint,
 }
 
 impl Session {
-    /// Joins the channel as `entry` says, or fails if the server doesn't welcome this member
-    /// within [`JOIN_TIMEOUT`].
-    pub async fn join(config: JoinConfig, entry: Entry) -> Result<Self, Error> {
-        let hello = ClientMessage::Hello {
-            version: PROTOCOL_VERSION,
-            name: config.name,
-            room_key: config.room_key,
-            muted: entry.muted,
-            resume: entry.resume,
-        };
-        let (opened, answer) = Opened::with(&config.server, config.pin, &hello).await?;
-        let ServerMessage::Welcome { you, members, resume } = answer else {
+    /// Joins the channel of `server`, as `host:port`, muted or not, in the place it still holds
+    /// for this device if it does; fails if the server doesn't welcome this member within
+    /// [`JOIN_TIMEOUT`].
+    pub async fn join(server: &str, muted: bool) -> Result<Self, Error> {
+        let (opened, answer) = Opened::with(server, &ClientMessage::Hello { version: PROTOCOL_VERSION, muted }).await?;
+        let ServerMessage::Welcome { you, members } = answer else {
             return Err(Error::Protocol("the first message isn't a Welcome"));
         };
-        let Opened { endpoint, connection, send, control, fingerprint } = opened;
-        Ok(Self { endpoint, connection, send, control, you, members, resume, fingerprint })
+        let Opened { endpoint, connection, send, control } = opened;
+        Ok(Self { endpoint, connection, send, control, you, members })
     }
 
     pub fn you(&self) -> MemberId {
@@ -107,16 +101,6 @@ impl Session {
     /// Everyone in the channel at the join, this member included; [`Event`]s tell what changes.
     pub fn members(&self) -> &[Member] {
         &self.members
-    }
-
-    /// What takes this session's place once its connection is lost.
-    pub fn resume(&self) -> ResumeToken {
-        self.resume
-    }
-
-    /// The server's fingerprint, to pin for the next join.
-    pub fn fingerprint(&self) -> Fingerprint {
-        self.fingerprint
     }
 
     /// A handle that sends this member's audio, for the thread that encodes it.
@@ -150,7 +134,8 @@ impl Session {
                         | ServerMessage::Preparing { .. }
                         | ServerMessage::Files { .. },
                     )) => return Err(Error::Protocol("a message after the join that only answers a client's first")),
-                    Some(Err(error)) => return Err(error.into()),
+                    // A read that failed as the connection closed fails for the reason it closed.
+                    Some(Err(error)) => return Err(self.connection.close_reason().map_or(error.into(), Error::from)),
                     None => return Err(self.connection.closed().await.into()),
                 },
                 datagram = self.connection.read_datagram() => {
@@ -181,10 +166,9 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Starts watching the server pinned, or fails if it doesn't answer within [`JOIN_TIMEOUT`].
-    pub async fn start(server: &str, room_key: String, pin: Fingerprint) -> Result<Self, Error> {
-        let watch = ClientMessage::Watch { version: PROTOCOL_VERSION, room_key };
-        let (opened, answer) = Opened::with(server, Some(pin), &watch).await?;
+    /// Starts watching `server`, or fails if it doesn't answer within [`JOIN_TIMEOUT`].
+    pub async fn start(server: &str) -> Result<Self, Error> {
+        let (opened, answer) = Opened::with(server, &ClientMessage::Watch { version: PROTOCOL_VERSION }).await?;
         let ServerMessage::Present { members } = answer else {
             return Err(Error::Protocol("the first message isn't a Present"));
         };
@@ -212,39 +196,26 @@ impl Watch {
     }
 }
 
-/// A connection to the server, trusted by its pin, whose first message the server answered.
+/// A connection to the server whose first message the server answered.
 pub(crate) struct Opened {
     pub(crate) endpoint: Endpoint,
     pub(crate) connection: Connection,
     pub(crate) send: SendStream,
     /// The server's messages after its answer.
     pub(crate) control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
-    pub(crate) fingerprint: Fingerprint,
 }
 
 impl Opened {
-    /// Connects to the server, trusting it by `pin`, or on first use if it is None, and sends
-    /// `first`; the server's answer comes along, unless it is a Rejected or doesn't come within
-    /// [`JOIN_TIMEOUT`].
-    pub(crate) async fn with(server: &str, pin: Option<Fingerprint>, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
-        tokio::time::timeout(JOIN_TIMEOUT, Self::unbounded(server, pin, first)).await.unwrap_or(Err(Error::TimedOut))
+    /// Connects to the server and sends `first`; the server's answer comes along, unless it is
+    /// a Rejected or doesn't come within [`JOIN_TIMEOUT`].
+    pub(crate) async fn with(server: &str, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
+        tokio::time::timeout(JOIN_TIMEOUT, Self::unbounded(server, first)).await.unwrap_or(Err(Error::TimedOut))
     }
 
-    async fn unbounded(server: &str, pin: Option<Fingerprint>, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
+    async fn unbounded(server: &str, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
         let address = tokio::net::lookup_host(server).await?.next().ok_or_else(|| Error::Resolve(server.to_owned()))?;
         let endpoint = Endpoint::client(unspecified_like(address))?;
-
-        let (client, presented) = client_config(pin);
-
-        let connection = endpoint.connect_with(client, address, SERVER_NAME)?.await.map_err(|error| {
-            let presented = *presented.lock().expect("the fingerprint lock is never poisoned");
-            match (pin, presented) {
-                (Some(pinned), Some(presented)) if pinned != presented => Error::FingerprintChanged { pinned, presented },
-                _ => error.into(),
-            }
-        })?;
-        let fingerprint =
-            presented.lock().expect("the fingerprint lock is never poisoned").expect("a connected server presented a certificate");
+        let connection = endpoint.connect_with(client_config(), address, SERVER_NAME)?.await?;
 
         let (mut send, mut recv) = connection.open_bi().await?;
         control::write(&mut send, first).await?;
@@ -259,7 +230,7 @@ impl Opened {
 
         let (forward, control) = mpsc::unbounded_channel();
         tokio::spawn(read_control(recv, forward));
-        Ok((Self { endpoint, connection, send, control, fingerprint }, answer))
+        Ok((Self { endpoint, connection, send, control }, answer))
     }
 }
 
@@ -282,11 +253,10 @@ impl AudioSender {
     }
 }
 
-/// TLS 1.3 that trusts the server by the `pin`, and keep-alives that hold the path open; the slot
-/// receives the fingerprint the server presents.
-fn client_config(pin: Option<Fingerprint>) -> (quinn::ClientConfig, Arc<Mutex<Option<Fingerprint>>>) {
+/// TLS 1.3 that takes any certificate, and keep-alives that hold the path open.
+fn client_config() -> quinn::ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let (verifier, presented) = PinVerifier::new(pin, &provider);
+    let verifier = AnyCertificate { algorithms: provider.signature_verification_algorithms };
     let mut tls = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("ring supports TLS 1.3")
@@ -301,7 +271,50 @@ fn client_config(pin: Option<Fingerprint>) -> (quinn::ClientConfig, Arc<Mutex<Op
     let tls = QuicClientConfig::try_from(tls).expect("the config has TLS 1.3 and no early data");
     let mut client = quinn::ClientConfig::new(Arc::new(tls));
     client.transport_config(Arc::new(transport));
-    (client, presented)
+    client
+}
+
+/// Takes the certificate the server presents, whichever it is: the tailnet already vouches that
+/// the server is the one asked for, and TLS has nothing to add. The handshake's signatures are
+/// still checked, as TLS can't go on without.
+#[derive(Debug)]
+struct AnyCertificate {
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
 }
 
 /// Moves the server's control messages into a channel, which `next_event` can wait on beside
