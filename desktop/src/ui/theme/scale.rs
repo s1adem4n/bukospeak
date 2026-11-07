@@ -134,7 +134,9 @@ pub mod window {
     pub const TRAFFIC_LIGHT: Pixels = step(3.5);
     pub const TRAFFIC_LIGHTS: Pixels = step(20.);
     // Windows draws its own caption buttons 46 px wide.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub const CAPTION_BUTTON: Pixels = px(46.);
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub const BUTTON: Pixels = step(5.5);
     pub const FRAME_RADIUS: Pixels = step(2.5);
     pub const FRAME_BORDER: Pixels = HAIRLINE;
