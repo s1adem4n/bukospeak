@@ -25,18 +25,39 @@ nonisolated struct ChannelUpdate: Sendable {
 }
 
 nonisolated struct EngineError: Error {
-    enum Reason: Sendable {
-        case other
-        case stranger
-        case unidentified
-        case replaced
-    }
-
-    let reason: Reason
+    let failure: Failure
     let message: String
 }
 
+nonisolated enum Cue: CaseIterable, Sendable {
+    case joined
+    case left
+    case came
+    case went
+    case muted
+    case unmuted
+
+    var file: String {
+        String(bukospeak_cue_file(raw))
+    }
+
+    fileprivate var raw: BukoSpeakCue {
+        switch self {
+        case .joined: BUKO_SPEAK_CUE_JOINED
+        case .left: BUKO_SPEAK_CUE_LEFT
+        case .came: BUKO_SPEAK_CUE_CAME
+        case .went: BUKO_SPEAK_CUE_WENT
+        case .muted: BUKO_SPEAK_CUE_MUTED
+        case .unmuted: BUKO_SPEAK_CUE_UNMUTED
+        }
+    }
+}
+
 nonisolated struct AudioError: Error {
+    let message: String
+}
+
+nonisolated struct SoundsError: Error {
     let message: String
 }
 
@@ -118,6 +139,27 @@ nonisolated final class Engine: @unchecked Sendable {
 
     static let maxVolume = Double(bukospeak_max_volume())
 
+    // Without samples, the cue's own tone.
+    func setSound(_ cue: Cue, _ samples: [Float]?) {
+        guard let samples else {
+            return bukospeak_engine_set_sound(engine, cue.raw, nil, 0)
+        }
+        samples.withUnsafeBufferPointer { samples in
+            bukospeak_engine_set_sound(engine, cue.raw, samples.baseAddress, samples.count)
+        }
+    }
+
+    // Blocks while it downloads, so it runs off the main thread.
+    static func syncSounds(server: String, into folder: URL) throws(SoundsError) {
+        var message = ""
+        let synced = withUnsafeMutablePointer(to: &message) { message in
+            bukospeak_sync_sounds(server, folder.path(percentEncoded: false), message) { context, text in
+                context!.assumingMemoryBound(to: String.self).pointee = String(text)
+            }
+        }
+        if !synced { throw SoundsError(message: message) }
+    }
+
     // On the queue: creating the voice processing unit takes long enough to freeze the screen.
     func startAudio(started: @escaping @MainActor @Sendable (AudioError?) -> Void) {
         queue.async {
@@ -190,14 +232,21 @@ nonisolated extension ChannelUpdate {
 
 nonisolated extension EngineError {
     fileprivate init(_ error: BukoSpeakError) {
-        let reason: Reason =
+        let failure: Failure =
             switch error.reason {
-            case BUKO_SPEAK_REASON_OTHER: .other
+            case BUKO_SPEAK_REASON_VERSION: .version
             case BUKO_SPEAK_REASON_STRANGER: .stranger
             case BUKO_SPEAK_REASON_UNIDENTIFIED: .unidentified
+            case BUKO_SPEAK_REASON_FULL: .full
+            case BUKO_SPEAK_REASON_UNAVAILABLE: .unavailable
+            case BUKO_SPEAK_REASON_NOT_FOUND: .notFound
+            case BUKO_SPEAK_REASON_NO_ANSWER: .noAnswer
+            case BUKO_SPEAK_REASON_UNREACHABLE: .unreachable
+            case BUKO_SPEAK_REASON_AUDIO: .audio
+            case BUKO_SPEAK_REASON_CONNECTION_LOST: .connectionLost
             case BUKO_SPEAK_REASON_REPLACED: .replaced
             default: fatalError("the engine has no other reasons")
             }
-        self.init(reason: reason, message: String(error.message))
+        self.init(failure: failure, message: String(error.message))
     }
 }

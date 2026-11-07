@@ -8,8 +8,8 @@ use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 use std::{process, slice};
 
+use bukospeak_core::Microphone;
 use bukospeak_core::proto::audio::SAMPLE_RATE;
-use bukospeak_core::{Microphone, Speaker};
 use objc2_audio_toolbox::{
     AURenderCallbackStruct, AUVoiceIOOtherAudioDuckingConfiguration, AUVoiceIOOtherAudioDuckingLevel, AudioComponentDescription,
     AudioComponentFindNext, AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioOutputUnitStart, AudioOutputUnitStop, AudioUnit,
@@ -24,6 +24,8 @@ use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags, kAudio_ParamError,
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
+
+use crate::output::Output;
 
 // iOS's slice while the screen is locked.
 const MAX_FRAMES: u32 = 4096;
@@ -57,14 +59,14 @@ pub enum Error {
 pub struct Failure {
     pub error: Error,
     pub microphone: Microphone,
-    pub speaker: Speaker,
+    pub output: Output,
 }
 
 pub struct VoiceUnit {
     unit: AudioUnit,
     // Raw, not boxed: the unit's callbacks use them on its thread while it runs.
     input: NonNull<Input>,
-    speaker: NonNull<Speaker>,
+    output: NonNull<Output>,
 }
 
 // SAFETY: the halves are Send, and an AudioUnit may be stopped and disposed from any thread.
@@ -77,20 +79,20 @@ struct Input {
 }
 
 impl VoiceUnit {
-    pub fn start(microphone: Microphone, speaker: Speaker) -> Result<Self, Box<Failure>> {
+    pub fn start(microphone: Microphone, output: Output) -> Result<Self, Box<Failure>> {
         let input = Box::new(Input { unit: ptr::null_mut(), samples: Box::new([0.0; MAX_FRAMES as usize]), microphone });
         let mut this =
-            Self { unit: ptr::null_mut(), input: NonNull::from(Box::leak(input)), speaker: NonNull::from(Box::leak(Box::new(speaker))) };
+            Self { unit: ptr::null_mut(), input: NonNull::from(Box::leak(input)), output: NonNull::from(Box::leak(Box::new(output))) };
         match this.set_up() {
             Ok(()) => Ok(this),
             Err(error) => {
-                let (microphone, speaker) = this.stop();
-                Err(Box::new(Failure { error, microphone, speaker }))
+                let (microphone, output) = this.stop();
+                Err(Box::new(Failure { error, microphone, output }))
             }
         }
     }
 
-    pub fn stop(self) -> (Microphone, Speaker) {
+    pub fn stop(self) -> (Microphone, Output) {
         let mut this = ManuallyDrop::new(self);
         // SAFETY: `this` is never used again, nor dropped.
         unsafe { this.release() }
@@ -126,7 +128,7 @@ impl VoiceUnit {
             mReserved: 0,
         };
         let capture = AURenderCallbackStruct { inputProc: Some(capture), inputProcRefCon: self.input.as_ptr().cast() };
-        let render = AURenderCallbackStruct { inputProc: Some(render), inputProcRefCon: self.speaker.as_ptr().cast() };
+        let render = AURenderCallbackStruct { inputProc: Some(render), inputProcRefCon: self.output.as_ptr().cast() };
         let ducking =
             AUVoiceIOOtherAudioDuckingConfiguration { mEnableAdvancedDucking: 0, mDuckingLevel: AUVoiceIOOtherAudioDuckingLevel::Min };
         // SAFETY: each value has the type its property takes. The callbacks' refcons are ours
@@ -172,7 +174,7 @@ impl VoiceUnit {
     /// # Safety
     ///
     /// Called once: the halves are freed, and `self` must not be used or dropped after.
-    unsafe fn release(&mut self) -> (Microphone, Speaker) {
+    unsafe fn release(&mut self) -> (Microphone, Output) {
         if !self.unit.is_null() {
             // SAFETY: the unit was created and isn't used after. Only disposing decides whether
             // it is gone, so failing to stop or uninitialize it doesn't matter.
@@ -189,11 +191,11 @@ impl VoiceUnit {
         }
         // SAFETY: both came from `Box::leak` in `start`, and the unit that used them was
         // disposed above, so it calls neither callback again.
-        let (input, speaker) = unsafe { (Box::from_raw(self.input.as_ptr()), Box::from_raw(self.speaker.as_ptr())) };
-        let (mut microphone, mut speaker) = (input.microphone, *speaker);
+        let (input, output) = unsafe { (Box::from_raw(self.input.as_ptr()), Box::from_raw(self.output.as_ptr())) };
+        let (mut microphone, mut output) = (input.microphone, *output);
         microphone.stopped();
-        speaker.stopped();
-        (microphone, speaker)
+        output.stopped();
+        (microphone, output)
     }
 }
 
@@ -243,10 +245,10 @@ unsafe extern "C-unwind" fn render(
     data: *mut AudioBufferList,
 ) -> i32 {
     abort_on_panic(|| {
-        // SAFETY: the refcon is the unit's speaker, which outlives it, and only this callback
+        // SAFETY: the refcon is the unit's output, which outlives it, and only this callback
         // uses it while the unit runs. The unit hands one buffer in the mono float format set,
         // of `mDataByteSize` bytes.
-        let (speaker, buffer) = unsafe { (refcon.cast::<Speaker>().as_mut(), &mut (*data).mBuffers[0]) };
+        let (output, buffer) = unsafe { (refcon.cast::<Output>().as_mut(), &mut (*data).mBuffers[0]) };
         let Some(start) = NonNull::new(buffer.mData.cast::<f32>()) else {
             return kAudio_ParamError;
         };
@@ -254,7 +256,7 @@ unsafe extern "C-unwind" fn render(
         // SAFETY: the buffer holds at least `len` samples, and the time stamp is valid during
         // the callback.
         let (samples, timestamp) = unsafe { (slice::from_raw_parts_mut(start.as_ptr(), len), timestamp.as_ref()) };
-        speaker.pull(samples, instant(timestamp));
+        output.pull(samples, instant(timestamp));
         0
     })
 }

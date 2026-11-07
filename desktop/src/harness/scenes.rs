@@ -5,9 +5,9 @@ use bukospeak_core::proto::control::{Member, Rejection};
 
 use crate::audio::Direction;
 use crate::call::{Failure, Notice, Phase, Stage};
-use crate::install::Progress;
 use crate::nvidia::Architecture;
 use crate::settings::{Settings, Suppression};
+use bukospeak_core::install::Progress;
 
 pub struct Scene {
     pub name: &'static str,

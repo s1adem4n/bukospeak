@@ -3,10 +3,10 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::audio::{self, Device, Direction};
 use crate::games::{self, Listing};
-use crate::install::{self, Progress};
 use crate::nvidia::{self, Architecture};
 use crate::settings::{self, Settings};
 use crate::{autostart, cues};
+use bukospeak_core::install::{self, Progress};
 
 pub trait Host: Send + Sync + 'static {
     fn save_settings(&self, settings: &Settings) -> Result<(), settings::Error>;
@@ -73,6 +73,6 @@ impl Host for Desktop {
 
     fn sync_sounds(&self, server: &str) -> Result<(), install::Error> {
         let folder = cues::folder().ok_or(install::Error::NoFolder)?;
-        cues::sync(server, &folder)
+        bukospeak_core::cues::sync(server, &folder)
     }
 }

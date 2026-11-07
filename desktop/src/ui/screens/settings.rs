@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use crate::audio::{self, Direction};
 use crate::games::{self, Chosen, Listing, Program};
-use crate::install::Progress;
 use crate::settings::Suppression;
 use bukospeak_core::MAX_VOLUME;
+use bukospeak_core::install::Progress;
 use gpui::{
     AnyElement, App, AppContext, Context, DismissEvent, Entity, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, Window, div,

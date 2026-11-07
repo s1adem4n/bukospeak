@@ -5,42 +5,26 @@ import os
 
 // Through CallKit the system keeps the app and microphone while the screen is locked and
 // gives them back after another call.
-@Observable
 final class Call: NSObject {
-    enum Phase: Equatable {
-        case idle
-        case joining
-        case connected
-        case reconnecting
-        case failed(String)
-    }
+    let channel = Channel()
+    let settings: Settings
 
-    private(set) var phase = Phase.idle
-    private(set) var members: [Member] = []
-    private(set) var speaking: Set<UInt16> = []
-    private(set) var you: UInt16?
-    private(set) var isMuted = false
-    private(set) var isHeld = false
-    private(set) var present: [Member] = []
-    private(set) var since: Date?
-
-    @ObservationIgnored let settings: Settings
-    @ObservationIgnored private let engine: Engine
-    @ObservationIgnored private let controller = CXCallController()
-    @ObservationIgnored private lazy var provider: CXProvider = {
+    private let engine: Engine
+    private let controller = CXCallController()
+    private lazy var provider: CXProvider = {
         let provider = CXProvider(configuration: Self.configuration)
         provider.setDelegate(self, queue: nil)
         return provider
     }()
-    @ObservationIgnored private var id: UUID?
-    @ObservationIgnored private var isSessionActive = false
-    @ObservationIgnored private var isInterrupted = false
-    @ObservationIgnored private var isPlaying = false
-    @ObservationIgnored private var leftCall: UInt64 = 0
-    @ObservationIgnored private var engineState = ChannelUpdate.State.out
-    @ObservationIgnored private var leaving: Task<Void, Never>?
-    @ObservationIgnored private var joining: Task<Result<Void, EngineError>, Never>?
-    @ObservationIgnored private var tapped = ContinuousClock.now
+    private var id: UUID?
+    private var isSessionActive = false
+    private var isInterrupted = false
+    private var isPlaying = false
+    private var leftCall: UInt64 = 0
+    private var engineState = ChannelUpdate.State.out
+    private var leaving: Task<Void, Never>?
+    private var joining: Task<Result<Void, EngineError>, Never>?
+    private var tapped = ContinuousClock.now
 
     private static let log = Logger(subsystem: "digital.buko.BukoSpeak", category: "call")
 
@@ -48,11 +32,21 @@ final class Call: NSObject {
         self.settings = settings
         self.engine = engine
         super.init()
-        engine.setVolume(settings.volume)
         controller.callObserver.setDelegate(self, queue: nil)
+        Task.detached(priority: .utility) { Sounds.load(into: engine) }
         Task { [weak self, updates = engine.updates] in
             for await update in updates {
                 self?.update(update)
+            }
+        }
+        Task { [engine] in
+            for await volume in Observations({ settings.volume }) {
+                engine.setVolume(volume)
+            }
+        }
+        Task { [engine] in
+            for await on in Observations({ settings.noiseSuppression }) {
+                engine.setNoiseSuppression(on)
             }
         }
         Task { [weak self] in
@@ -71,15 +65,26 @@ final class Call: NSObject {
         }
     }
 
+    var actions: CallActions {
+        CallActions(
+            join: { Task { await self.join() } },
+            leave: { Task { await self.leave() } },
+            toggleMute: { Task { await self.toggleMute() } },
+            watch: { self.watch($0) }
+        )
+    }
+
+    private var server: String {
+        settings.server.trimmingCharacters(in: .whitespaces)
+    }
+
     func join() async {
-        guard id == nil, phase != .joining else { return }
+        guard id == nil, channel.phase != .joining else { return }
         tapped = .now
-        phase = .joining
-        members = present
+        channel.phase = .joining
         await leaving?.value
         guard await AudioSession.microphoneAllowed() else {
-            members = []
-            phase = .failed("Mikrofon nicht erlaubt")
+            channel.phase = .failed(.microphoneDenied)
             return
         }
         let id = UUID()
@@ -94,7 +99,7 @@ final class Call: NSObject {
             try await controller.request(CXTransaction(action: start))
         } catch {
             Self.log.error("the call didn't start: \(error)")
-            end(failure: "Anruf nicht gestartet")
+            end(failure: .callNotStarted)
         }
     }
 
@@ -106,23 +111,15 @@ final class Call: NSObject {
 
     func toggleMute() async {
         guard let id else { return }
-        await request(CXSetMutedCallAction(call: id, muted: !isMuted))
+        await request(CXSetMutedCallAction(call: id, muted: !channel.isMuted))
     }
 
     func watch(_ on: Bool) {
         if on, id == nil, settings.isComplete {
-            engine.watch(server: settings.server.trimmingCharacters(in: .whitespaces))
+            engine.watch(server: server)
         } else {
             engine.unwatch()
         }
-    }
-
-    func noiseSuppressionChanged() {
-        engine.setNoiseSuppression(settings.noiseSuppression)
-    }
-
-    func volumeChanged() {
-        engine.setVolume(settings.volume)
     }
 
     private static var configuration: CXProviderConfiguration {
@@ -154,10 +151,9 @@ final class Call: NSObject {
     }
 
     private func joinChannel() async -> Result<Void, EngineError> {
-        engine.setNoiseSuppression(settings.noiseSuppression)
-        engine.setMuted(isMuted)
+        engine.setMuted(channel.isMuted)
         do throws(EngineError) {
-            try await engine.join(server: settings.server.trimmingCharacters(in: .whitespaces))
+            try await engine.join(server: server)
             logStep("the server welcomed the join")
             return .success(())
         } catch {
@@ -171,35 +167,37 @@ final class Call: NSObject {
     }
 
     private func connected() {
-        phase = engineState == .reconnecting ? .reconnecting : .connected
-        if since == nil { since = .now }
+        channel.phase = engineState == .reconnecting ? .reconnecting : .connected
+        if channel.since == nil {
+            channel.since = .now
+            Task.detached(priority: .utility) { [engine, server] in Sounds.sync(from: server, into: engine) }
+        }
         updateAudio()
     }
 
     private func update(_ update: ChannelUpdate) {
-        if present != update.present { present = update.present }
+        if channel.present != update.present { channel.present = update.present }
         // Updates of a call already left can still arrive.
         guard id != nil, update.call > leftCall else { return }
         let changed = update.state != engineState
         engineState = update.state
         // Set only when changed: each set redraws the screen, and a redraw during a tap loses it.
-        if you != update.you { you = update.you }
-        if members != update.members { members = update.members }
-        if speaking != update.speaking { speaking = update.speaking }
+        if channel.you != update.you { channel.you = update.you }
+        if channel.members != update.members { channel.members = update.members }
+        if channel.speaking != update.speaking { channel.speaking = update.speaking }
         if let lost = update.lost {
             Self.log.error("the call was lost: \(lost.message)")
-            return fail(lost.text(otherwise: "Verbindung verloren"))
+            return fail(lost.failure)
         }
         // Only on a change: an update of who speaks shouldn't start audio that failed again.
-        if changed && phase != .joining {
+        if changed && channel.phase != .joining {
             connected()
         }
     }
 
     // CallKit may activate the session before the join is done.
     private func updateAudio() {
-        let isUp = phase == .connected || phase == .reconnecting
-        let plays = isUp && !isHeld && isSessionActive && !isInterrupted
+        let plays = channel.isInCall && !channel.isHeld && isSessionActive && !isInterrupted
         guard plays != isPlaying else { return }
         if plays {
             let call = id
@@ -217,34 +215,33 @@ final class Call: NSObject {
         guard id == call else { return }
         if let failure {
             Self.log.error("the microphone and speaker didn't start: \(failure.message)")
-            return fail("Audio nicht gestartet")
+            return fail(.audio)
         }
         logStep("the call's audio plays")
     }
 
-    private func fail(_ reason: String) {
+    private func fail(_ failure: Failure) {
         guard let id else { return }
         provider.reportCall(with: id, endedAt: nil, reason: .failed)
-        end(failure: reason)
+        end(failure: failure)
     }
 
-    private func end(failure: String?) {
+    private func end(failure: Failure?) {
         // First, so a join under way sees the call is over.
         id = nil
         // Not cancelled: the leave below waits for it, then leaves the call it joined.
         joining = nil
-        // The leave stops the audio off the main thread: disposing the voice unit freezes
-        // the screen.
+        // The leave stops the audio off the main thread, once the farewell has played:
+        // disposing the voice unit freezes the screen.
         isPlaying = false
         engineState = .out
-        members = []
-        speaking = []
-        you = nil
-        isMuted = false
-        engine.setMuted(false)
-        isHeld = false
-        since = nil
-        phase = failure.map(Phase.failed) ?? .idle
+        channel.members = []
+        channel.speaking = []
+        channel.you = nil
+        channel.isMuted = false
+        channel.isHeld = false
+        channel.since = nil
+        channel.phase = failure.map(Channel.Phase.failed) ?? .idle
         leaving = Task { [weak self, engine] in
             let left = await engine.leave()
             self?.leftCall = left
@@ -282,7 +279,7 @@ final class Call: NSObject {
             try AudioSession.configure()
         } catch {
             Self.log.error("the audio couldn't be set up again after media services were reset: \(error)")
-            return fail("Audio nicht gestartet")
+            return fail(.audio)
         }
         if isSessionActive {
             reactivateSession()
@@ -315,7 +312,7 @@ extension Call: @MainActor CXProviderDelegate {
         } catch {
             action.fail()
             Self.log.error("the audio couldn't be set up: \(error)")
-            return end(failure: "Audio nicht gestartet")
+            return end(failure: .audio)
         }
         provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: nil)
         Task {
@@ -330,7 +327,7 @@ extension Call: @MainActor CXProviderDelegate {
             case .failure(let error):
                 action.fail()
                 Self.log.error("the join failed: \(error.message)")
-                end(failure: error.text(otherwise: "Beitritt fehlgeschlagen"))
+                end(failure: error.failure)
             }
         }
     }
@@ -340,17 +337,21 @@ extension Call: @MainActor CXProviderDelegate {
         if id == action.callUUID {
             end(failure: nil)
         }
-        action.fulfill()
+        // Fulfilled once left: CallKit then takes the audio session, and the farewell with it.
+        Task {
+            await leaving?.value
+            action.fulfill()
+        }
     }
 
     func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
-        isHeld = action.isOnHold
+        channel.isHeld = action.isOnHold
         updateAudio()
         action.fulfill()
     }
 
     func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
-        isMuted = action.isMuted
+        channel.isMuted = action.isMuted
         engine.setMuted(action.isMuted)
         action.fulfill()
     }
@@ -373,18 +374,7 @@ extension Call: @MainActor CXCallObserverDelegate {
     func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {
         // When the call that held this one ends, iOS resumes this one only if the user hung up;
         // if the other side did, it stays held until asked.
-        guard let id, call.uuid != id, call.hasEnded, isHeld else { return }
+        guard let id, call.uuid != id, call.hasEnded, channel.isHeld else { return }
         Task { await request(CXSetHeldCallAction(call: id, onHold: false)) }
-    }
-}
-
-extension EngineError {
-    func text(otherwise: String) -> String {
-        switch reason {
-        case .stranger: "Nicht im Tailnet des Servers"
-        case .unidentified: "Server erreicht Tailscale nicht"
-        case .replaced: "Anderswo beigetreten"
-        case .other: otherwise
-        }
     }
 }

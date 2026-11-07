@@ -2,10 +2,10 @@ use std::io::IsTerminal;
 use std::sync::{Arc, mpsc};
 
 use anyhow::Context;
+use bukospeak_core::install::Progress;
 use bukospeak_core::proto::MemberId;
 use bukospeak_core::{Channel, Conditioning, Engine, Joined, Listener, Update};
 use bukospeak_desktop::audio::{self, Audio, DeviceId, Direction};
-use bukospeak_desktop::install::Progress;
 use bukospeak_desktop::nvidia::{self, Effects};
 use bukospeak_desktop::settings::Suppression;
 use clap::{Parser, Subcommand};

@@ -33,4 +33,16 @@ final class Settings {
     var isComplete: Bool {
         !server.trimmingCharacters(in: .whitespaces).isEmpty
     }
+
+    // As the desktop app names it: the host, without the port.
+    var host: String {
+        let server = server.trimmingCharacters(in: .whitespaces)
+        guard let colon = server.lastIndex(of: ":") else { return server }
+        let (host, port) = (server[..<colon], server[server.index(after: colon)...])
+        // An IPv6 address alone has colons too, but no port after a bracket.
+        guard !port.isEmpty, port.allSatisfy({ $0.isASCII && $0.isNumber }), !host.hasSuffix(":") else {
+            return server
+        }
+        return host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    }
 }

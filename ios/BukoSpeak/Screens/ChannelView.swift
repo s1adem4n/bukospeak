@@ -1,69 +1,35 @@
 import SwiftUI
 
 struct ChannelView: View {
-    @Environment(Call.self) private var call
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var showsSettings = false
-    @State private var isOnboarding = false
-    @Namespace private var stage
+    @Environment(Channel.self) private var channel
+    @Environment(Settings.self) private var settings
+    @Binding var showsSettings: Bool
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if isInCall {
-                    CallView(stage: stage)
-                } else {
-                    LobbyView(stage: stage, join: join)
-                }
+        VStack(spacing: 0) {
+            HStack(spacing: Space.gap) {
+                Text(settings.host)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Button("Einstellungen", systemImage: "gearshape") { showsSettings = true }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.large)
             }
-            // Inline throughout, so the bar keeps its height: a large title coming or going
-            // changes it after the logo has landed, and the start screen jumps.
-            .toolbarTitleDisplayMode(.inline)
-            .toolbar {
-                if isInCall {
-                    ToolbarItem(placement: .principal) {
-                        CallStatus()
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Einstellungen", systemImage: "gearshape") { showsSettings = true }
-                }
-            }
+            .padding(.horizontal, Space.gutter)
+            StageView()
+            ControlBar()
+                .padding(.horizontal, Space.gutter)
+                .padding(.bottom, Space.inline)
         }
-        .animation(Motion.spring, value: call.phase)
-        .animation(Motion.spring, value: call.isHeld)
-        .animation(Motion.spring, value: call.members)
-        .animation(Motion.spring, value: call.present)
-        .onChange(of: watched, initial: true) { _, watched in call.watch(watched != nil) }
-        .sensoryFeedback(.impact(weight: .medium), trigger: call.isMuted)
-        .sensoryFeedback(.success, trigger: call.phase) { _, phase in phase == .connected }
+        .background(Color(.systemGroupedBackground))
+        .animation(Motion.spring, value: channel.phase)
+        .animation(Motion.spring, value: channel.isHeld)
         .sheet(isPresented: $showsSettings) {
             SettingsView()
-        }
-        .sheet(isPresented: $isOnboarding) {
-            OnboardingView()
-                .interactiveDismissDisabled()
-        }
-        .onAppear { isOnboarding = !call.settings.isComplete }
-    }
-
-    private var isInCall: Bool {
-        switch call.phase {
-        case .joining, .connected, .reconnecting: true
-        case .idle, .failed: false
-        }
-    }
-
-    private var watched: String? {
-        guard scenePhase == .active, !isInCall else { return nil }
-        return call.settings.server
-    }
-
-    private func join() {
-        if call.settings.isComplete {
-            Task { await call.join() }
-        } else {
-            showsSettings = true
         }
     }
 }

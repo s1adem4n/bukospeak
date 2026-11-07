@@ -13,6 +13,7 @@ crate-type = ["lib", "staticlib"]
 
 [dependencies]
 bukospeak-core.workspace = true
+rtrb.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-audio-toolbox.workspace = true

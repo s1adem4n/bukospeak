@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use crate::audio::Direction;
 use crate::call::{Call, Happening, Phase};
-use crate::install::{self, Progress};
 use crate::nvidia::{Architecture, Effects};
 use crate::settings::{Settings, Suppression};
 use crate::ui::host::Host;
 use bukospeak_core::Error;
+use bukospeak_core::install::{self, Progress};
 use bukospeak_core::proto::control::Rejection;
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};

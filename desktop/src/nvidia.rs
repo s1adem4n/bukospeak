@@ -6,7 +6,7 @@ use bukospeak_core::{MakeSuppressor, Suppression, Suppressor};
 pub use bukospeak_maxine::{Architecture, Kind};
 use bukospeak_maxine::{Effect, Runtime};
 
-use crate::install::{self, Progress};
+use bukospeak_core::install::{self, Progress};
 
 pub fn card() -> Option<Architecture> {
     bukospeak_maxine::detect().unwrap_or_else(|error| {

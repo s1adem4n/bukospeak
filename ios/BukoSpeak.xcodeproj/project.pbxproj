@@ -179,6 +179,8 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../target/aarch64-apple-ios/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*][arch=arm64]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*][arch=x86_64]" = "$(SRCROOT)/../target/x86_64-apple-ios/release";
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = "-lbukospeak_ffi";
 				PRODUCT_BUNDLE_IDENTIFIER = digital.buko.BukoSpeak;
@@ -207,6 +209,8 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../target/aarch64-apple-ios/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*][arch=arm64]" = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*][arch=x86_64]" = "$(SRCROOT)/../target/x86_64-apple-ios/release";
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = "-lbukospeak_ffi";
 				PRODUCT_BUNDLE_IDENTIFIER = digital.buko.BukoSpeak;

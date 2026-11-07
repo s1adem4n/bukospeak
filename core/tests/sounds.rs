@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bukospeak_desktop::cues;
+use bukospeak_core::cues;
 use bukospeak_server::{Device, Downloads, Room, Sounds};
 use tokio::runtime::Runtime;
 

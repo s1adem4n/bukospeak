@@ -14,11 +14,27 @@ typedef enum BukoSpeakState {
 } BukoSpeakState;
 
 typedef enum BukoSpeakReason {
-  BUKO_SPEAK_REASON_OTHER,
+  BUKO_SPEAK_REASON_VERSION,
   BUKO_SPEAK_REASON_STRANGER,
   BUKO_SPEAK_REASON_UNIDENTIFIED,
+  BUKO_SPEAK_REASON_FULL,
+  BUKO_SPEAK_REASON_UNAVAILABLE,
+  BUKO_SPEAK_REASON_NOT_FOUND,
+  BUKO_SPEAK_REASON_NO_ANSWER,
+  BUKO_SPEAK_REASON_UNREACHABLE,
+  BUKO_SPEAK_REASON_AUDIO,
+  BUKO_SPEAK_REASON_CONNECTION_LOST,
   BUKO_SPEAK_REASON_REPLACED,
 } BukoSpeakReason;
+
+typedef enum BukoSpeakCue {
+  BUKO_SPEAK_CUE_JOINED,
+  BUKO_SPEAK_CUE_LEFT,
+  BUKO_SPEAK_CUE_CAME,
+  BUKO_SPEAK_CUE_WENT,
+  BUKO_SPEAK_CUE_MUTED,
+  BUKO_SPEAK_CUE_UNMUTED,
+} BukoSpeakCue;
 
 typedef struct BukoSpeakEngine BukoSpeakEngine;
 
@@ -85,6 +101,28 @@ void bukospeak_engine_watch(const struct BukoSpeakEngine *engine, const char *se
 void bukospeak_engine_unwatch(const struct BukoSpeakEngine *engine);
 
 void bukospeak_engine_set_muted(const struct BukoSpeakEngine *engine, bool muted);
+
+/**
+ * # Safety
+ *
+ * `samples` is null, for the cue's own tone, or points to `len` samples at 48 kHz, mono.
+ */
+void bukospeak_engine_set_sound(const struct BukoSpeakEngine *engine,
+                                enum BukoSpeakCue cue,
+                                const float *samples,
+                                size_t len);
+
+struct BukoSpeakStr bukospeak_cue_file(enum BukoSpeakCue cue);
+
+/**
+ * # Safety
+ *
+ * `server` and `folder` aren't null and are NUL-terminated.
+ */
+bool bukospeak_sync_sounds(const char *server,
+                           const char *folder,
+                           void *context,
+                           BukoSpeakFailed failed);
 
 void bukospeak_engine_set_noise_suppression(const struct BukoSpeakEngine *engine, bool on);
 

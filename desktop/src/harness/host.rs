@@ -4,10 +4,10 @@ use std::thread;
 use crate::audio::{self, Device, DeviceId, Direction};
 use crate::autostart;
 use crate::games::{self, Listing, Program};
-use crate::install::{self, Progress};
 use crate::nvidia::Architecture;
 use crate::settings::{self, Settings};
 use crate::ui::Host;
+use bukospeak_core::install::{self, Progress};
 
 pub struct Staged {
     pub inputs: Vec<(&'static str, &'static str)>,

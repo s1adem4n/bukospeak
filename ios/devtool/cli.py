@@ -5,6 +5,7 @@ import sys
 import config
 import mac
 import ota
+import stage
 import xcode
 
 HELP = """usage: ios/dev <command>
@@ -14,6 +15,9 @@ HELP = """usage: ios/dev <command>
   format                rewrite BukoSpeak/ with swift format (ios/.swift-format)
   ota [--release]       build an IPA and print the tailnet-only page that installs it on the iPhone;
                           a Debug build by default, quick to rebuild; --release is optimized
+  snap [scene…] [--dark|--light]
+                        build for the Mac's simulator and screenshot the staged scenes
+                          (BukoSpeak/Harness/Staged.swift), all and in both appearances by default
   clean                 remove this checkout's folder on the Mac
   mac 'script'          run bash on the Mac with $dir, the checkout's folder there
 
@@ -41,6 +45,10 @@ def main() -> None:
             xcode.format_files(target)
         case "ota", [] | ["--release"]:
             ota.ota(target, "Release" if args else "Debug")
+        case "snap", _:
+            appearances = tuple(appearance for appearance in stage.APPEARANCES if f"--{appearance}" in args)
+            scenes = [arg for arg in args if not arg.startswith("--")]
+            stage.snap(target, scenes, appearances or stage.APPEARANCES)
         case "clean", []:
             clean(target)
         case "mac", [script]:

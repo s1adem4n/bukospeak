@@ -6,7 +6,6 @@ pub mod cues;
 pub mod games;
 #[cfg(feature = "harness")]
 pub mod harness;
-pub mod install;
 pub mod nvidia;
 pub mod settings;
 pub mod ui;

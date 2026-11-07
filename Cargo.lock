@@ -858,10 +858,12 @@ dependencies = [
  "quinn",
  "rtrb",
  "rustls",
+ "serde_json",
  "sonora",
  "sonora-agc2",
  "thiserror 2.0.21",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -913,6 +915,7 @@ dependencies = [
  "bukospeak-server",
  "objc2-audio-toolbox",
  "objc2-core-audio-types",
+ "rtrb",
  "thiserror 2.0.21",
  "tokio",
 ]

@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use bukospeak_core::download::Download;
+use crate::download::Download;
 
 const INSTALLED_LIST: &str = "installed.json";
 
@@ -22,7 +22,7 @@ pub enum Error {
     #[error("this system has no folder for programs' data")]
     NoFolder,
     #[error(transparent)]
-    Download(#[from] bukospeak_core::Error),
+    Download(#[from] crate::Error),
     #[error("the server lists a file outside the download: {0}")]
     Path(String),
     #[error("installing: {0}")]

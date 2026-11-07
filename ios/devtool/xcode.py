@@ -46,19 +46,20 @@ def _streamed(target: Target, name: str, script: str) -> tuple[int, list[str]]:
     return process.wait(), lines
 
 
-def rust(target: Target) -> None:
-    """Lints and builds the C interface's static library for the iPhone, always optimized:
-    noise suppression and Opus unoptimized are too slow for the realtime callbacks. Its iOS
-    code only builds on the Mac, whose SDK the C dependencies need."""
-    flags = f"--target {RUST_TARGET} --release --locked"
+def rust(target: Target, triple: str = RUST_TARGET, *, lint: bool = True) -> None:
+    """Lints and builds the C interface's static library for the iPhone, or with another
+    triple for the simulator, always optimized: noise suppression and Opus unoptimized are too
+    slow for the realtime callbacks. Its iOS code only builds on the Mac, whose SDK the C
+    dependencies need."""
+    flags = f"--target {triple} --release --locked"
+    clippy = f"mise exec -- cargo clippy -p bukospeak-ffi {flags} -- -D warnings\n" if lint else ""
     status, lines = _streamed(
         target,
         "rust",
         f"""cd "$dir"
 mise install --quiet rust
 export IPHONEOS_DEPLOYMENT_TARGET=26.0
-mise exec -- cargo clippy -p bukospeak-ffi {flags} -- -D warnings
-mise exec -- cargo build -p bukospeak-ffi {flags}
+{clippy}mise exec -- cargo build -p bukospeak-ffi {flags}
 """,
     )
     if status:
@@ -89,11 +90,17 @@ def build(target: Target, configuration: str = "Debug") -> None:
     mac.upload(target)
     rust(target)
     lint(target)
+    app(target, configuration, "generic/platform=iOS", "build", "-allowProvisioningUpdates")
+
+
+def app(target: Target, configuration: str, destination: str, derived: str, *flags: str) -> None:
+    """Builds the app with xcodebuild into `derived`; prints errors and warnings."""
+    name = "build" if (configuration, derived) == ("Debug", "build") else f"build-{derived}-{configuration.lower()}"
     status, lines = _streamed(
         target,
-        "build" if configuration == "Debug" else f"build-{configuration.lower()}",
+        name,
         f'cd "$dir/ios" && xcodebuild -project BukoSpeak.xcodeproj -scheme BukoSpeak -configuration {configuration}'
-        " -destination generic/platform=iOS -derivedDataPath build -allowProvisioningUpdates build",
+        f' -destination "{destination}" -derivedDataPath {derived} {" ".join(flags)} build',
     )
     issues = {_relative(target, line) for line in lines if re.search(r"error:|warning:", line) and "appintents" not in line}
     for issue in sorted(issues):

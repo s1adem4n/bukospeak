@@ -5,11 +5,10 @@ use std::thread;
 use std::time::Instant;
 
 use crate::audio::{self, Audio, DeviceId, Direction};
+pub use bukospeak_core::Failure;
 use bukospeak_core::proto::MemberId;
-use bukospeak_core::proto::control::{Member, Rejection};
-use bukospeak_core::{
-    Channel, Conditioning, Engine, Error, Joined, Listener, Lost, Meter, Microphone, Speaker, State, Suppression, Update,
-};
+use bukospeak_core::proto::control::Member;
+use bukospeak_core::{Channel, Conditioning, Engine, Joined, Listener, Meter, Microphone, Speaker, State, Suppression, Update};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,17 +18,6 @@ pub enum Phase {
     Connected,
     Reconnecting,
     Failed(Failure),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Failure {
-    Rejected(Rejection),
-    NotFound,
-    NoAnswer,
-    Unreachable,
-    Audio,
-    ConnectionLost,
-    Replaced,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -389,11 +377,7 @@ impl Call {
         }
         if let Some(lost) = lost {
             tracing::warn!("the call ended: {lost}");
-            let failure = match lost {
-                Lost::Unrecovered { .. } => Failure::ConnectionLost,
-                Lost::Replaced => Failure::Replaced,
-            };
-            return self.end(Some(failure));
+            return self.end(Some(Failure::from(&lost)));
         }
         self.channel = channel;
         self.follow();
@@ -468,22 +452,6 @@ fn notice(error: &audio::Error) -> Notice {
     match *error {
         Error::Missing(direction, _) | Error::NoDevice(direction) => Notice::DeviceMissing(direction),
         Error::NoFormat(direction) | Error::Format(direction, _) | Error::Device(direction, _) => Notice::DeviceFailed(direction),
-    }
-}
-
-fn failure(error: Error) -> Failure {
-    match error {
-        Error::Rejected(rejection) => Failure::Rejected(rejection),
-        Error::Replaced => Failure::Replaced,
-        Error::Resolve(_) => Failure::NotFound,
-        Error::TimedOut => Failure::NoAnswer,
-        Error::Connect(_)
-        | Error::Connection(_)
-        | Error::Control(_)
-        | Error::Read(_)
-        | Error::Protocol(_)
-        | Error::Io(_)
-        | Error::Damaged(_) => Failure::Unreachable,
     }
 }
 
@@ -572,7 +540,7 @@ impl Worker {
             }
             Err(error) => {
                 tracing::warn!("joining {server}: {error}");
-                return self.joined(number, Err(failure(error)));
+                return self.joined(number, Err(Failure::from(&error)));
             }
         };
         if self.call_to_play.load(Ordering::Relaxed) != number {

@@ -1,17 +1,20 @@
 use std::time::{Duration, Instant};
 
-use bukospeak_core::proto::MemberId;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{App, AppContext, Context, Entity, Subscription, Task};
 
 use crate::audio::Direction;
 use crate::call::{Call, Phase};
-use crate::cues::{self, Cue, Cues};
+use crate::cues::{Cues, folder as sounds};
 use crate::games::Watcher;
 use crate::ui::Client;
+use bukospeak_core::cues;
 
 const ALONE: Duration = Duration::from_secs(5 * 60);
+
+// Long enough for a game that crashed or a launcher handing over to start it again.
+const GAME_GONE: Duration = Duration::from_secs(30);
 
 const TICK: Duration = Duration::from_secs(15);
 
@@ -33,6 +36,8 @@ struct Seen {
 struct Rules {
     game_ran: bool,
     join_asked: bool,
+    game_joined: bool,
+    game_gone_since: Option<Instant>,
     alone_since: Option<Instant>,
 }
 
@@ -40,10 +45,28 @@ impl Rules {
     fn step(&mut self, now: Instant, seen: Seen) -> Option<Do> {
         self.join_asked = seen.game_runs && (self.join_asked || !self.game_ran) && seen.out_of_call;
         self.game_ran = seen.game_runs;
+        self.game_joined &= !seen.out_of_call;
         if self.join_asked && seen.can_join {
             self.join_asked = false;
+            self.game_joined = true;
             return Some(Do::Join);
         }
+        self.leave_after_game(now, seen).or_else(|| self.leave_alone(now, seen))
+    }
+
+    fn leave_after_game(&mut self, now: Instant, seen: Seen) -> Option<Do> {
+        if !self.game_joined || seen.game_runs {
+            self.game_gone_since = None;
+            return None;
+        }
+        let since = *self.game_gone_since.get_or_insert(now);
+        (now - since >= GAME_GONE).then(|| {
+            (self.game_joined, self.game_gone_since) = (false, None);
+            Do::Leave
+        })
+    }
+
+    fn leave_alone(&mut self, now: Instant, seen: Seen) -> Option<Do> {
         if !seen.alone || seen.game_runs {
             self.alone_since = None;
             return None;
@@ -59,10 +82,7 @@ impl Rules {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Snapshot {
     active: bool,
-    in_call: bool,
-    connected: bool,
-    others: Vec<MemberId>,
-    muted: bool,
+    seen: cues::Seen,
 }
 
 impl Snapshot {
@@ -70,36 +90,14 @@ impl Snapshot {
         let you = call.you();
         Self {
             active: matches!(call.phase(), Phase::Joining | Phase::Connected | Phase::Reconnecting),
-            in_call: call.is_in_call(),
-            connected: *call.phase() == Phase::Connected,
-            others: call.members().iter().map(|member| member.id).filter(|id| Some(*id) != you).collect(),
-            muted: call.is_muted(),
+            seen: cues::Seen {
+                in_call: call.is_in_call(),
+                connected: *call.phase() == Phase::Connected,
+                others: call.members().iter().map(|member| member.id).filter(|id| Some(*id) != you).collect(),
+                muted: call.is_muted(),
+            },
         }
     }
-}
-
-fn changes(before: &Snapshot, after: &Snapshot) -> Vec<Cue> {
-    let mut cues = Vec::new();
-    match (before.in_call, after.in_call) {
-        (false, true) => cues.push(Cue::Joined),
-        (true, false) => cues.push(Cue::Left),
-        // Who is in the call is known only while connected; joining again, it is empty.
-        _ if before.connected && after.connected => {
-            if after.others.iter().any(|id| !before.others.contains(id)) {
-                cues.push(Cue::Came);
-            }
-            if before.others.iter().any(|id| !after.others.contains(id)) {
-                cues.push(Cue::Went);
-            }
-        }
-        _ => {}
-    }
-    match (before.muted, after.muted) {
-        (false, true) => cues.push(Cue::Muted),
-        (true, false) => cues.push(Cue::Unmuted),
-        _ => {}
-    }
-    cues
 }
 
 pub struct Autopilot {
@@ -126,7 +124,7 @@ impl Autopilot {
             })
             .inspect_err(|error| tracing::warn!("no games watched: {error}"))
             .ok();
-            let cues = Cues::new(cues::folder()).inspect_err(|error| tracing::warn!("no sounds: {error}")).ok();
+            let cues = Cues::new(sounds()).inspect_err(|error| tracing::warn!("no sounds: {error}")).ok();
             let following = cx.spawn(async move |this, cx| {
                 while let Some(runs) = told.next().await {
                     let applied = this.update(cx, |autopilot: &mut Self, cx| {
@@ -170,7 +168,7 @@ impl Autopilot {
             if now.active && !self.seen.active {
                 cues.open(output.clone());
             }
-            let changed = changes(&self.seen, &now);
+            let changed = cues::changes(&self.seen.seen, &now.seen);
             if !changed.is_empty() {
                 cues.play(changed, output.clone());
             }
@@ -240,6 +238,49 @@ mod tests {
     }
 
     #[test]
+    fn a_game_closing_leaves_the_call_it_joined_in_company_too() {
+        let (mut rules, start) = (Rules::default(), Instant::now());
+        assert_eq!(rules.step(start, PLAYING), Some(Do::Join));
+        assert_eq!(rules.step(start, IN_A_GAME_CALL), None);
+        let closed = Seen { game_runs: false, ..IN_A_GAME_CALL };
+        assert_eq!(rules.step(start, closed), None);
+        assert_eq!(rules.step(start + GAME_GONE - Duration::from_secs(1), closed), None);
+        assert_eq!(rules.step(start + GAME_GONE, closed), Some(Do::Leave));
+        assert_eq!(rules.step(start + GAME_GONE * 2, closed), None);
+    }
+
+    #[test]
+    fn a_game_back_in_time_keeps_the_call() {
+        let (mut rules, start) = (Rules::default(), Instant::now());
+        assert_eq!(rules.step(start, PLAYING), Some(Do::Join));
+        let closed = Seen { game_runs: false, ..IN_A_GAME_CALL };
+        assert_eq!(rules.step(start, closed), None);
+        assert_eq!(rules.step(start + GAME_GONE / 2, IN_A_GAME_CALL), None);
+        assert_eq!(rules.step(start + GAME_GONE, closed), None);
+        assert_eq!(rules.step(start + GAME_GONE * 2 - Duration::from_secs(1), closed), None);
+        assert_eq!(rules.step(start + GAME_GONE * 2, closed), Some(Do::Leave));
+    }
+
+    #[test]
+    fn a_game_closing_keeps_a_call_joined_by_hand() {
+        let (mut rules, start) = (Rules::default(), Instant::now());
+        assert_eq!(rules.step(start, Seen { game_runs: false, ..IN_A_GAME_CALL }), None);
+        assert_eq!(rules.step(start, IN_A_GAME_CALL), None);
+        assert_eq!(rules.step(start + GAME_GONE * 2, Seen { game_runs: false, ..IN_A_GAME_CALL }), None);
+    }
+
+    #[test]
+    fn leaving_by_hand_forgets_the_game_joined() {
+        let (mut rules, start) = (Rules::default(), Instant::now());
+        assert_eq!(rules.step(start, PLAYING), Some(Do::Join));
+        assert_eq!(rules.step(start, Seen { out_of_call: true, ..IN_A_GAME_CALL }), None);
+        assert_eq!(rules.step(start, IN_A_GAME_CALL), None);
+        let closed = Seen { game_runs: false, ..IN_A_GAME_CALL };
+        assert_eq!(rules.step(start, closed), None);
+        assert_eq!(rules.step(start + GAME_GONE * 2, closed), None);
+    }
+
+    #[test]
     fn alone_without_a_game_leaves_after_a_while() {
         let (mut rules, start) = (Rules::default(), Instant::now());
         let alone = Seen { game_runs: false, out_of_call: false, alone: true, can_join: true };
@@ -258,29 +299,5 @@ mod tests {
         assert_eq!(rules.step(start + ALONE * 2, Seen { game_runs: true, ..alone }), None);
         assert_eq!(rules.step(start + ALONE * 3, alone), None);
         assert_eq!(rules.step(start + ALONE * 4, alone), Some(Do::Leave));
-    }
-
-    fn snapshot(in_call: bool, others: &[u16], muted: bool) -> Snapshot {
-        Snapshot { active: in_call, in_call, connected: in_call, others: others.iter().map(|&id| MemberId(id)).collect(), muted }
-    }
-
-    #[test]
-    fn the_cues_tell_what_changed() {
-        let out = snapshot(false, &[], false);
-        let with_one = snapshot(true, &[2], false);
-        assert_eq!(changes(&out, &with_one), [Cue::Joined]);
-        assert_eq!(changes(&with_one, &out), [Cue::Left]);
-        assert_eq!(changes(&snapshot(true, &[], false), &with_one), [Cue::Came]);
-        assert_eq!(changes(&with_one, &snapshot(true, &[], false)), [Cue::Went]);
-        assert_eq!(changes(&with_one, &snapshot(true, &[2], true)), [Cue::Muted]);
-        assert_eq!(changes(&with_one, &with_one), []);
-    }
-
-    #[test]
-    fn joining_again_tells_no_one_coming_or_going() {
-        let connected = snapshot(true, &[2], false);
-        let reconnecting = Snapshot { connected: false, others: Vec::new(), ..connected.clone() };
-        assert_eq!(changes(&connected, &reconnecting), []);
-        assert_eq!(changes(&reconnecting, &connected), []);
     }
 }

@@ -66,13 +66,39 @@ def upload(target: Target) -> None:
             "--delete",
             "-e",
             shlex.join(_SSH),
-            "--filter=:- .gitignore",
+            *(f"--exclude={pattern}" for pattern in _ignored()),
             "--exclude=.git",
             f"{REPO}/",
             f"{target.host}:{target.dir}/",
         ],
         check=True,
     )
+
+
+def _ignored() -> list[str]:
+    """The .gitignore files' patterns as rsync's, rooted at the repository.
+
+    Given on the command line, not as a per-directory merge: the Mac's openrsync applies those
+    only while sending, so the folders they ignore there would be deleted.
+    """
+    listed = subprocess.check_output(["git", "-C", str(REPO), "ls-files", "--", ".gitignore", "**/.gitignore"], text=True)
+    patterns = []
+    for ignore in listed.split():
+        folder = Path(ignore).parent.as_posix()
+        for line in (REPO / ignore).read_text().splitlines():
+            pattern = line.strip()
+            if not pattern or pattern.startswith("#"):
+                continue
+            if pattern.startswith("!"):
+                fail(f"{ignore}: rsync can't take back an exclusion: {pattern}")
+            within = "" if folder == "." else f"/{folder}"
+            if "/" in pattern.rstrip("/"):
+                patterns.append(f"{within}/{pattern.lstrip('/')}")
+            elif within:
+                patterns += [f"{within}/{pattern}", f"{within}/**/{pattern}"]
+            else:
+                patterns.append(pattern)
+    return patterns
 
 
 def copy(source: str, destination: str) -> None:
