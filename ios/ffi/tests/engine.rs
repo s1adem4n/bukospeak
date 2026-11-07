@@ -1,5 +1,3 @@
-//! The C interface against a real server, called as an app calls it.
-
 use std::ffi::{CString, c_void};
 use std::net::SocketAddr;
 use std::ptr;
@@ -13,11 +11,8 @@ use bukospeak_ffi::{
 };
 use bukospeak_server::{Device, Downloads, Room, Tailnet};
 use tokio::runtime::Runtime;
-
-/// An update as the test keeps it, past the callback.
 #[derive(Debug, PartialEq)]
 struct Heard {
-    /// The state's name.
     state: &'static str,
     you: u16,
     members: Vec<(u16, String)>,
@@ -25,8 +20,6 @@ struct Heard {
     announcement: String,
     lost: Option<Failed>,
 }
-
-/// Why a join failed or a call was lost, as the test keeps it.
 #[derive(Debug, PartialEq)]
 struct Failed {
     reason: BukoSpeakReason,
@@ -67,7 +60,6 @@ extern "C" fn heard(context: *mut c_void, update: &BukoSpeakUpdate) {
         // SAFETY: lent for the callback, if not null.
         lost: unsafe { update.lost.as_ref() }.map(Failed::of),
     };
-    // The test may have stopped listening.
     let _ = updates.send(heard);
 }
 
@@ -76,16 +68,12 @@ extern "C" fn joined(context: *mut c_void, error: Option<&BukoSpeakError>) {
     let slot = unsafe { &mut *context.cast::<Option<Result<(), Failed>>>() };
     *slot = Some(error.map_or(Ok(()), |error| Err(Failed::of(error))));
 }
-
-/// A tailnet in which each connection is a device of its own.
-fn own(peer: SocketAddr) -> Option<Device> {
+fn device_per_connection(peer: SocketAddr) -> Option<Device> {
     Some(Device { id: peer.to_string(), name: format!("member {}", peer.port()) })
 }
+struct TailscaledDown;
 
-/// A tailnet whose tailscaled doesn't answer.
-struct Down;
-
-impl Tailnet for Down {
+impl Tailnet for TailscaledDown {
     fn whois(&self, _: SocketAddr) -> anyhow::Result<Option<Device>> {
         anyhow::bail!("tailscaled isn't running")
     }
@@ -95,8 +83,6 @@ struct Server {
     _runtime: Runtime,
     address: String,
 }
-
-/// A room on localhost that knows who connects from `tailnet`.
 fn serve(tailnet: impl Tailnet) -> Server {
     let runtime = Runtime::new().unwrap();
     let endpoint = runtime.block_on(async { bukospeak_server::endpoint("127.0.0.1:0".parse().unwrap()) }).unwrap();
@@ -104,8 +90,6 @@ fn serve(tailnet: impl Tailnet) -> Server {
     runtime.spawn(Room::new(tailnet, Downloads::none()).serve(endpoint));
     Server { _runtime: runtime, address }
 }
-
-/// An engine whose updates go to the receiver; the sender must outlive it.
 fn engine(updates: &mpsc::Sender<Heard>) -> Box<BukoSpeakEngine> {
     bukospeak_engine_new(ptr::from_ref(updates).cast_mut().cast(), heard).unwrap()
 }
@@ -124,7 +108,7 @@ fn next(updates: &mpsc::Receiver<Heard>) -> Heard {
 
 #[test]
 fn members_join_see_each_other_and_leave() {
-    let server = serve(own);
+    let server = serve(device_per_connection);
     let (first_updates, first_heard) = mpsc::channel();
     let (second_updates, second_heard) = mpsc::channel();
     let (first, second) = (engine(&first_updates), engine(&second_updates));
@@ -173,7 +157,7 @@ fn a_device_the_tailnet_doesnt_know_is_told_it_is_a_stranger() {
 
 #[test]
 fn a_server_that_cant_ask_its_tailnet_leaves_the_device_unidentified() {
-    let server = serve(Down);
+    let server = serve(TailscaledDown);
     let (updates, _heard) = mpsc::channel();
     let engine = engine(&updates);
     assert_eq!(join(&engine, &server.address).expect_err("an unidentified device joined").reason, BukoSpeakReason::Unidentified);

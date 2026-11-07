@@ -1,17 +1,3 @@
-//! NVIDIA Maxine's audio effects, which NVIDIA's runtime runs on the GPUs of RTX cards. The
-//! runtime and the effects are loaded while running, from a download laid out as NVIDIA's SDK
-//! lays them out:
-//!
-//! ```text
-//! bin/NVAudioEffects.dll
-//! bin/external/{cuda,nvtrt,openssl}/bin/*.dll
-//! features/nvafx<effect>/bin/nvafx<effect>.dll
-//! features/nvafx<effect>/models/<architecture>/*.trtpkg
-//! license/*.pdf
-//! ```
-//!
-//! Only Windows has them; elsewhere [`Runtime::load`] fails and [`detect`] finds no card.
-
 mod detect;
 mod runtime;
 
@@ -20,14 +6,11 @@ use std::str::FromStr;
 pub use detect::detect;
 pub use runtime::{Effect, Runtime, Severity, Status};
 
-/// The sample rate the effects run at.
 pub const SAMPLE_RATE: u32 = 48_000;
 
-/// The samples of a frame, in and out: 10 ms.
 pub const FRAME: usize = 480;
 
-/// NVIDIA's runtime in a download, each file after those it uses. The SDK's NVRTC is left out:
-/// nothing loads it.
+// Each file after those it uses; the SDK's NVRTC is left out, as nothing loads it.
 pub const RUNTIME: [&str; 6] = [
     "bin/external/cuda/bin/cublasLt64_12.dll",
     "bin/external/cuda/bin/cublas64_12.dll",
@@ -37,13 +20,10 @@ pub const RUNTIME: [&str; 6] = [
     "bin/NVAudioEffects.dll",
 ];
 
-/// The folder of NVIDIA's licences in a download.
 pub const LICENSES: &str = "license";
 
-/// What the names of the downloads begin with, before an architecture's.
-const DOWNLOAD: &str = "maxine-";
+const DOWNLOAD_PREFIX: &str = "maxine-";
 
-/// A generation of RTX cards, for each of which NVIDIA builds the models anew.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Architecture {
     Turing,
@@ -55,7 +35,6 @@ pub enum Architecture {
 impl Architecture {
     pub const ALL: [Self; 4] = [Self::Turing, Self::Ampere, Self::Ada, Self::Blackwell];
 
-    /// Its name, as NVIDIA's folders of models go by it: `ampere`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Turing => "turing",
@@ -65,18 +44,15 @@ impl Architecture {
         }
     }
 
-    /// The name of the download a server offers for it: `maxine-ampere`.
     pub fn download(self) -> String {
-        format!("{DOWNLOAD}{}", self.name())
+        format!("{DOWNLOAD_PREFIX}{}", self.name())
     }
 
-    /// The architecture whose download is called `name`.
     pub fn of_download(name: &str) -> Option<Self> {
-        name.strip_prefix(DOWNLOAD)?.parse().ok()
+        name.strip_prefix(DOWNLOAD_PREFIX)?.parse().ok()
     }
 
-    /// The generation of a card of CUDA compute capability `major.minor`, if it is one the
-    /// effects run on: of the GeForce and workstation cards, with Tensor Cores.
+    // GeForce and workstation cards with Tensor Cores only: not Pascal, Jetson's Ampere or Hopper.
     pub fn of_compute_capability(major: i32, minor: i32) -> Option<Self> {
         match (major, minor) {
             (7, 5) => Some(Self::Turing),
@@ -91,25 +67,21 @@ impl Architecture {
 impl FromStr for Architecture {
     type Err = Error;
 
-    /// The architecture by its name, as `ampere`.
     fn from_str(name: &str) -> Result<Self, Error> {
         Self::ALL.into_iter().find(|architecture| architecture.name() == name).ok_or_else(|| Error::Architecture(name.to_owned()))
     }
 }
 
-/// An effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
-    /// Room echo and noise removed.
     DereverbDenoiser,
-    /// The voice as if from a studio's microphone, with room echo and noise removed.
     StudioVoiceLowLatency,
 }
 
 impl Kind {
     pub const ALL: [Self; 2] = [Self::DereverbDenoiser, Self::StudioVoiceLowLatency];
 
-    /// Its name, as NVIDIA's SDK selects it and NGC lists it: `dereverb_denoiser`.
+    // NVIDIA's selector for the effect.
     pub fn name(self) -> &'static str {
         match self {
             Self::DereverbDenoiser => "dereverb_denoiser",
@@ -117,7 +89,6 @@ impl Kind {
         }
     }
 
-    /// Its folder under `features/` in a download.
     pub fn feature(self) -> &'static str {
         match self {
             Self::DereverbDenoiser => "nvafxdereverbdenoiser",
@@ -125,8 +96,8 @@ impl Kind {
         }
     }
 
-    /// How many frames later the voice comes out than it went in: the runtime takes a frame at
-    /// a time, but runs the model on eight, as measured on an RTX 3060.
+    // In frames, measured on an RTX 3060: the runtime takes one frame at a time but runs the
+    // model on eight.
     pub fn delay(self) -> usize {
         match self {
             Self::DereverbDenoiser => 8,
@@ -145,7 +116,6 @@ impl Kind {
 impl FromStr for Kind {
     type Err = Error;
 
-    /// The effect by its name, as `dereverb_denoiser`.
     fn from_str(name: &str) -> Result<Self, Error> {
         Self::ALL.into_iter().find(|kind| kind.name() == name).ok_or_else(|| Error::Kind(name.to_owned()))
     }
@@ -203,7 +173,6 @@ mod tests {
         assert_eq!(Architecture::of_compute_capability(8, 6), Some(Architecture::Ampere));
         assert_eq!(Architecture::of_compute_capability(8, 9), Some(Architecture::Ada));
         assert_eq!(Architecture::of_compute_capability(12, 0), Some(Architecture::Blackwell));
-        // Pascal, and Jetson's Ampere and Hopper, which aren't in PCs.
         for (major, minor) in [(6, 1), (8, 7), (9, 0)] {
             assert_eq!(Architecture::of_compute_capability(major, minor), None);
         }

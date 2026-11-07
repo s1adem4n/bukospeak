@@ -1,6 +1,3 @@
-//! The call's audio on iOS: its halves, idle while the audio session is inactive, playing on
-//! the voice processing unit while it is active.
-
 use std::mem;
 
 use crate::voice_unit::{Error, Failure, VoiceUnit};
@@ -8,14 +5,12 @@ use bukospeak_core::{Microphone, Speaker};
 
 #[expect(clippy::large_enum_variant, reason = "an engine holds one, so its size doesn't matter")]
 pub enum Audio {
-    /// No call.
     None,
     Idle(Microphone, Speaker),
     Playing(VoiceUnit),
 }
 
 impl Audio {
-    /// Plays the idle halves; playing already, or without a call, there is nothing to do.
     pub fn start(&mut self) -> Result<(), Error> {
         match mem::replace(self, Self::None) {
             Self::Idle(microphone, speaker) => match VoiceUnit::start(microphone, speaker) {

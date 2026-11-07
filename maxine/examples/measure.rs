@@ -1,12 +1,3 @@
-//! Measures an effect on this machine's card: `measure ROOT IN.wav OUT.wav [--effect NAME]
-//! [--architecture NAME] [--log]`, 48 kHz mono in, the effect's output out; Studio Voice unless
-//! `--effect` names the other, on the card found unless `--architecture` names one.
-//!
-//! It runs the recording through the effect twice, frames back to back and then each at the
-//! time it would arrive from a microphone, as the GPU clocks down between them in a call. It
-//! prints how long loading took, how long the frames took against their budget, and how much
-//! later the voice comes out.
-
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,10 +6,9 @@ use std::time::{Duration, Instant};
 use bukospeak_maxine::{Architecture, Effect, FRAME, Kind, Runtime, SAMPLE_RATE, Severity};
 
 const USAGE: &str = "usage: measure ROOT IN.wav OUT.wav [--effect NAME] [--architecture NAME] [--log]";
-/// Silence after the recording, so what the effect delays comes out too.
-const TAIL: Duration = Duration::from_millis(500);
-/// The longest delay looked for.
-const MOST_DELAY: Duration = Duration::from_millis(300);
+// So that what the effect delays comes out too.
+const TRAILING_SILENCE: Duration = Duration::from_millis(500);
+const LONGEST_DELAY_SOUGHT: Duration = Duration::from_millis(300);
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -57,6 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (times, _) = run(&mut effect, &recording, None)?;
     report("back to back", &times, period);
     effect.reset()?;
+    // Paced as from a microphone too, as the GPU clocks down between frames in a call.
     let (times, processed) = run(&mut effect, &recording, Some(period))?;
     report("paced", &times, period);
 
@@ -84,10 +75,8 @@ fn read(path: &str) -> Result<Vec<f32>, Box<dyn Error>> {
     })
 }
 
-/// Runs the recording and the tail after it through the effect, each frame at its time from
-/// the start if paced by `period`, and returns how long each frame took and what came out.
 fn run(effect: &mut Effect, recording: &[f32], period: Option<Duration>) -> Result<(Vec<Duration>, Vec<f32>), Box<dyn Error>> {
-    let tail = (TAIL.as_secs_f64() * f64::from(SAMPLE_RATE)) as usize;
+    let tail = (TRAILING_SILENCE.as_secs_f64() * f64::from(SAMPLE_RATE)) as usize;
     let mut signal = recording.to_vec();
     signal.resize((recording.len() + tail).next_multiple_of(FRAME), 0.0);
     let mut times = Vec::new();
@@ -107,8 +96,8 @@ fn run(effect: &mut Effect, recording: &[f32], period: Option<Duration>) -> Resu
     Ok((times, processed))
 }
 
-/// Prints the first frame's time apart, as the GPU warms up on it, then the others'.
 fn report(name: &str, times: &[Duration], period: Duration) {
+    // The first frame stands apart: the GPU warms up on it.
     let [first, rest @ ..] = times else { return };
     let mut rest = rest.to_vec();
     rest.sort();
@@ -125,18 +114,16 @@ fn report(name: &str, times: &[Duration], period: Duration) {
     );
 }
 
-/// How much later `processed` carries the voice of `recording`: the lag at which their
-/// loudness correlates best. Studio Voice makes the voice anew, so its waveform needn't follow
-/// the recording's, but its loudness does.
+// By loudness, not waveform: Studio Voice makes the voice anew, but its loudness follows.
 fn delay(recording: &[f32], processed: &[f32]) -> Duration {
-    // Loudness at 2 kHz, smoothed over a millisecond: lags in half milliseconds.
-    const STEP: usize = 24;
+    const STEP: usize = SAMPLE_RATE as usize / 2_000;
+    let smoothing = f64::from(SAMPLE_RATE) / 1_000.0;
     let loudness = |signal: &[f32]| -> Vec<f64> {
         let mut level = 0.0;
         let smoothed: Vec<f64> = signal
             .iter()
             .map(|sample| {
-                level += (f64::from(sample.abs()) - level) / 48.0;
+                level += (f64::from(sample.abs()) - level) / smoothing;
                 level
             })
             .step_by(STEP)
@@ -145,7 +132,7 @@ fn delay(recording: &[f32], processed: &[f32]) -> Duration {
         smoothed.into_iter().map(|level| level - mean).collect()
     };
     let (recording, processed) = (loudness(recording), loudness(processed));
-    let most = (MOST_DELAY.as_secs_f64() * f64::from(SAMPLE_RATE)) as usize / STEP;
+    let most = (LONGEST_DELAY_SOUGHT.as_secs_f64() * f64::from(SAMPLE_RATE)) as usize / STEP;
     let correlation = |lag: usize| -> f64 { recording.iter().zip(processed.iter().skip(lag)).map(|(a, b)| a * b).sum() };
     let lag = (0..=most).max_by(|a, b| correlation(*a).total_cmp(&correlation(*b))).unwrap_or(0);
     Duration::from_secs_f64((lag * STEP) as f64 / f64::from(SAMPLE_RATE))

@@ -1,6 +1,3 @@
-//! NVIDIA's runtime, loaded, and the effects it runs, through the C interface
-//! `nvAudioEffects.h` declares.
-
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -11,7 +8,6 @@ use libloading::Library;
 
 use crate::{Architecture, Error, FRAME, Kind, SAMPLE_RATE};
 
-/// How much the runtime tells on standard error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
     Fatal = 0,
@@ -20,7 +16,6 @@ pub enum Severity {
     Info = 3,
 }
 
-/// What a call into the runtime returned, if not success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status(i32);
 
@@ -54,7 +49,6 @@ impl fmt::Display for Status {
 
 type Handle = *mut c_void;
 
-/// The runtime's functions the crate calls, as `nvAudioEffects.h` declares them.
 #[derive(Clone, Copy)]
 struct Api {
     create_effect: unsafe extern "C" fn(*const c_char, *mut Handle) -> i32,
@@ -76,15 +70,14 @@ fn check(call: &'static str, status: i32) -> Result<(), Error> {
     }
 }
 
-/// NVIDIA's runtime, loaded.
 pub struct Runtime {
     api: Api,
     root: PathBuf,
-    // The runtime and the libraries it uses, unloaded in the reverse of the order loaded.
     libraries: Vec<Library>,
 }
 
 impl Drop for Runtime {
+    // A Vec drops front to back, but the runtime must unload before the libraries it uses.
     fn drop(&mut self) {
         while let Some(library) = self.libraries.pop() {
             drop(library);
@@ -93,7 +86,6 @@ impl Drop for Runtime {
 }
 
 impl Runtime {
-    /// Loads the runtime from the download at `root`.
     #[cfg(windows)]
     pub fn load(root: &Path) -> Result<Self, Error> {
         use libloading::os::windows::{LOAD_WITH_ALTERED_SEARCH_PATH, Library as WindowsLibrary};
@@ -102,18 +94,16 @@ impl Runtime {
             .iter()
             .map(|file| {
                 let path = root.join(file);
-                // SAFETY: NVIDIA's libraries do nothing on loading that could break the process's
-                // invariants. Each is loaded by its full path with the altered search path, which
-                // finds what it uses beside it first, and after those it uses, so those the
-                // runtime and the effects load by name later are found loaded already.
+                // SAFETY: NVIDIA's libraries do nothing unsound on loading. Loaded by full path and
+                // after what they use, so what the runtime and effects later load by name is loaded.
                 unsafe { WindowsLibrary::load_with_flags(&path, LOAD_WITH_ALTERED_SEARCH_PATH) }
                     .map(Library::from)
                     .map_err(|source| Error::Library { path, source })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let runtime = libraries.last().expect("the runtime is a library");
-        // SAFETY: each type is the function's as `nvAudioEffects.h` declares it. The pointers
-        // stay valid while the runtime is loaded, which `Runtime` keeps it while it holds them.
+        // SAFETY: each type is as `nvAudioEffects.h` declares it, and `Runtime` keeps the
+        // library loaded while it holds the pointers.
         let api = unsafe {
             Api {
                 create_effect: function(runtime, c"NvAFX_CreateEffect")?,
@@ -131,13 +121,11 @@ impl Runtime {
         Ok(Self { api, root: root.to_owned(), libraries })
     }
 
-    /// Loads the runtime, which only Windows has.
     #[cfg(not(windows))]
     pub fn load(_root: &Path) -> Result<Self, Error> {
         Err(Error::Unsupported)
     }
 
-    /// Has the runtime tell on standard error what is as severe as `severity` or more.
     pub fn log(&self, severity: Severity) -> Result<(), Error> {
         const STANDARD_ERROR: i32 = 0;
         // SAFETY: with standard error as the target, the runtime reads neither the file's name
@@ -148,8 +136,6 @@ impl Runtime {
     }
 }
 
-/// The function `name` of `library`.
-///
 /// # Safety
 ///
 /// `T` is the function's type, and the pointer is called only while `library` is loaded.
@@ -159,27 +145,22 @@ unsafe fn function<T: Copy>(library: &Library, name: &'static CStr) -> Result<T,
     unsafe { library.get::<T>(name) }.map(|symbol| *symbol).map_err(|source| Error::Symbol { name, source })
 }
 
-/// An effect, loaded on the GPU, taking and giving frames of [`FRAME`] samples at
-/// [`SAMPLE_RATE`].
 pub struct Effect {
     runtime: Arc<Runtime>,
     handle: Handle,
 }
 
-// SAFETY: the runtime ties an effect to no thread: it makes the effect's CUDA context current
-// for each call and pops it after, so the effect may be loaded on one thread and run on another,
-// as measured. `&mut self` keeps its calls one at a time.
+// SAFETY: the runtime makes the effect's CUDA context current for each call and pops it after,
+// so an effect isn't tied to a thread (as measured); `&mut self` keeps calls one at a time.
 unsafe impl Send for Effect {}
 
 impl Effect {
-    /// Loads the effect `kind` with the models for `architecture`. Building the model on the
-    /// GPU takes up to seconds.
     pub fn new(runtime: &Arc<Runtime>, kind: Kind, architecture: Architecture) -> Result<Self, Error> {
         let mut handle = ptr::null_mut();
         let selector = CString::new(kind.name()).expect("an effect's name holds no nul");
         // SAFETY: the selector is a C string, and the runtime writes the handle where it points.
         check("NvAFX_CreateEffect", unsafe { (runtime.api.create_effect)(selector.as_ptr(), &mut handle) })?;
-        // Destroyed when an error returns from here on.
+        // Built now so that its drop destroys the handle on an error from here on.
         let mut effect = Self { runtime: Arc::clone(runtime), handle };
         let model = runtime.root.join("features").join(kind.feature()).join("models").join(architecture.name()).join(kind.model());
         effect.set_u32(c"input_sample_rate", SAMPLE_RATE)?;
@@ -200,7 +181,6 @@ impl Effect {
         Ok(effect)
     }
 
-    /// Runs the effect on the next frame, in −1.0..=1.0, into `output`.
     pub fn run(&mut self, input: &[f32; FRAME], output: &mut [f32; FRAME]) -> Result<(), Error> {
         let (input, output) = (input.as_ptr(), output.as_mut_ptr());
         // SAFETY: one channel each way, of the frame the effect was loaded to take and give,
@@ -208,7 +188,6 @@ impl Effect {
         check("NvAFX_Run", unsafe { (self.runtime.api.run)(self.handle, &input, &output, FRAME as u32, 1) })
     }
 
-    /// Starts anew, as after the input stopped: nothing from before comes out after.
     pub fn reset(&mut self) -> Result<(), Error> {
         // SAFETY: the handle is the effect's, valid until it drops.
         check("NvAFX_Reset", unsafe { (self.runtime.api.reset)(self.handle) })
@@ -248,7 +227,7 @@ impl Drop for Effect {
     fn drop(&mut self) {
         // SAFETY: the handle is the effect's, and isn't used after.
         let status = unsafe { (self.runtime.api.destroy_effect)(self.handle) };
-        // The effect is gone either way; a failure to free it leaves nothing to do.
+        // The effect is gone either way; a failed free leaves nothing to do.
         debug_assert_eq!(status, 0, "NvAFX_DestroyEffect: {}", Status(status));
     }
 }

@@ -1,29 +1,23 @@
-//! Which RTX card the system has, as NVIDIA's driver tells through CUDA.
-
 use crate::{Architecture, Error};
 
-/// The architecture of the system's first CUDA device, the one the runtime runs the effects on,
-/// if it is an RTX card they run on; None without one, or without NVIDIA's driver.
 #[cfg(windows)]
 pub fn detect() -> Result<Option<Architecture>, Error> {
     use std::ffi::{CStr, c_char};
 
     use libloading::os::windows::{LOAD_LIBRARY_SEARCH_SYSTEM32, Library};
 
-    /// CUDA's error for a system without a device.
-    const NO_DEVICE: i32 = 100;
+    const CUDA_ERROR_NO_DEVICE: i32 = 100;
     const COMPUTE_CAPABILITY_MAJOR: i32 = 75;
     const COMPUTE_CAPABILITY_MINOR: i32 = 76;
 
-    // SAFETY: the driver's CUDA library does nothing on loading that could break the process's
-    // invariants; it is loaded from the system's folder only, where the driver puts it.
+    // SAFETY: the driver's CUDA library does nothing unsound on loading; it is loaded only from
+    // the system folder, where the driver puts it.
     let Ok(cuda) = (unsafe { Library::load_with_flags("nvcuda.dll", LOAD_LIBRARY_SEARCH_SYSTEM32) }) else {
         // NVIDIA's driver isn't installed.
         return Ok(None);
     };
     let check = |call: &'static str, code: i32| if code == 0 { Ok(()) } else { Err(Error::Cuda { call, code }) };
-    // SAFETY: each type is the function's as `cuda.h` declares it, and the library stays loaded
-    // until the end of the function, past the last call.
+    // SAFETY: each type is as `cuda.h` declares it, and the library stays loaded past the last call.
     let (init, device_get, attribute, name) = unsafe {
         (
             *cuda.get::<unsafe extern "C" fn(u32) -> i32>(c"cuInit").map_err(|source| Error::Symbol { name: c"cuInit", source })?,
@@ -40,7 +34,7 @@ pub fn detect() -> Result<Option<Architecture>, Error> {
     };
     // SAFETY: no flags, as CUDA asks.
     match unsafe { init(0) } {
-        NO_DEVICE => return Ok(None),
+        CUDA_ERROR_NO_DEVICE => return Ok(None),
         code => check("cuInit", code)?,
     }
     let mut device = 0;
@@ -56,11 +50,10 @@ pub fn detect() -> Result<Option<Architecture>, Error> {
     check("cuDeviceGetName", unsafe { name(buffer.as_mut_ptr(), buffer.len() as i32, device) })?;
     // SAFETY: CUDA terminated the name within the buffer.
     let name = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy();
-    // GeForce GTX 16 cards are Turing too, but without the Tensor Cores the effects run on.
+    // GeForce GTX 16 cards are Turing too, but lack the Tensor Cores the effects need.
     Ok(Architecture::of_compute_capability(major, minor).filter(|_| name.contains("RTX")))
 }
 
-/// The system's RTX card, which only Windows runs the effects on.
 #[cfg(not(windows))]
 pub fn detect() -> Result<Option<Architecture>, Error> {
     Ok(None)

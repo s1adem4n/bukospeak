@@ -1,9 +1,5 @@
-//! A call on the iPhone's microphone and speaker, through the VoiceProcessingIO unit, which
-//! cancels the speaker's echo in what the microphone hears and evens out its level.
-//!
-//! The app's audio session picks the route; the unit converts between it and the call's 48 kHz
-//! mono, so a route change, to Bluetooth say, needs nothing here. A [`VoiceUnit`] plays while
-//! the session is active and is stopped when it isn't.
+// The unit converts between the session's route and the call's 48 kHz mono, so a route change
+// needs nothing here.
 
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
@@ -29,24 +25,22 @@ use objc2_core_audio_types::{
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 
-/// The most frames the unit asks for at once: iOS's slice while the screen is locked.
+// iOS's slice while the screen is locked.
 const MAX_FRAMES: u32 = 4096;
 
-/// The unit's element that plays to the speaker, and the one that records the microphone.
 const OUTPUT_BUS: u32 = 0;
 const INPUT_BUS: u32 = 1;
 
 const SAMPLE_BYTES: u32 = size_of::<f32>() as u32;
 
-/// How many nanoseconds `numer / denom` host time ticks are.
 #[repr(C)]
 struct Timebase {
     numer: u32,
     denom: u32,
 }
 
-// SAFETY: libSystem's host time, as declared in <mach/mach_time.h>; the host time in an
-// `AudioTimeStamp` counts the same ticks. Reading it has no preconditions.
+// SAFETY: as <mach/mach_time.h> declares them; reading the host time has no preconditions.
+// An `AudioTimeStamp`'s host time counts the same ticks.
 unsafe extern "C" {
     safe fn mach_absolute_time() -> u64;
     fn mach_timebase_info(timebase: *mut Timebase) -> i32;
@@ -60,19 +54,15 @@ pub enum Error {
     Failed { step: &'static str, status: i32 },
 }
 
-/// A unit that didn't start, and the halves it was to play.
 pub struct Failure {
     pub error: Error,
     pub microphone: Microphone,
     pub speaker: Speaker,
 }
 
-/// A call's halves playing on the VoiceProcessingIO unit, until it is stopped or dropped.
 pub struct VoiceUnit {
-    /// Null until the unit is created.
     unit: AudioUnit,
-    // Owned through raw pointers, from `Box::into_raw`: the unit's callbacks use them while it
-    // runs, on its thread.
+    // Raw, not boxed: the unit's callbacks use them on its thread while it runs.
     input: NonNull<Input>,
     speaker: NonNull<Speaker>,
 }
@@ -80,8 +70,6 @@ pub struct VoiceUnit {
 // SAFETY: the halves are Send, and an AudioUnit may be stopped and disposed from any thread.
 unsafe impl Send for VoiceUnit {}
 
-/// What the input callback needs: the unit to fetch the microphone's samples from, room for
-/// them, and the half they go to.
 struct Input {
     unit: AudioUnit,
     samples: Box<[f32; MAX_FRAMES as usize]>,
@@ -89,7 +77,6 @@ struct Input {
 }
 
 impl VoiceUnit {
-    /// Creates the unit and starts it playing the halves, which come back if it can't.
     pub fn start(microphone: Microphone, speaker: Speaker) -> Result<Self, Box<Failure>> {
         let input = Box::new(Input { unit: ptr::null_mut(), samples: Box::new([0.0; MAX_FRAMES as usize]), microphone });
         let mut this =
@@ -103,7 +90,6 @@ impl VoiceUnit {
         }
     }
 
-    /// Stops and disposes the unit and hands the halves back, told they stopped.
     pub fn stop(self) -> (Microphone, Speaker) {
         let mut this = ManuallyDrop::new(self);
         // SAFETY: `this` is never used again, nor dropped.
@@ -150,7 +136,6 @@ impl VoiceUnit {
             self.set("setting the microphone's format", kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, INPUT_BUS, &format)?;
             self.set("setting the speaker's format", kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, OUTPUT_BUS, &format)?;
             self.set("setting the largest slice", kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &MAX_FRAMES)?;
-            // The input callback renders the microphone into room of its own.
             self.set(
                 "leaving the microphone's buffer to us",
                 kAudioUnitProperty_ShouldAllocateBuffer,
@@ -167,8 +152,6 @@ impl VoiceUnit {
         }
     }
 
-    /// Sets one of the unit's properties.
-    ///
     /// # Safety
     ///
     /// `T` is the type the property takes, and pointers in it stay valid as the property needs.
@@ -186,24 +169,19 @@ impl VoiceUnit {
         })
     }
 
-    /// Disposes the unit, so its callbacks are done, and hands the halves back, told they
-    /// stopped.
-    ///
     /// # Safety
     ///
     /// Called once: the halves are freed, and `self` must not be used or dropped after.
     unsafe fn release(&mut self) -> (Microphone, Speaker) {
         if !self.unit.is_null() {
-            // SAFETY: the unit was created and isn't used after. Stopping and uninitializing
-            // are steps toward disposing, which alone decides whether the unit is gone; their
-            // failure leaves it to dispose.
+            // SAFETY: the unit was created and isn't used after. Only disposing decides whether
+            // it is gone, so failing to stop or uninitialize it doesn't matter.
             let disposed = unsafe {
                 let _ = AudioOutputUnitStop(self.unit);
                 let _ = AudioUnitUninitialize(self.unit);
                 AudioComponentInstanceDispose(self.unit)
             };
-            // A unit that is still there may still call back into the halves, so freeing them
-            // would leave it to use freed memory.
+            // A unit that is still there may call back into the halves, so they can't be freed.
             if disposed != 0 {
                 eprintln!("the voice unit couldn't be disposed: {disposed}");
                 process::abort();
@@ -226,7 +204,6 @@ impl Drop for VoiceUnit {
     }
 }
 
-/// The input callback: renders what the microphone heard and pushes it to the call.
 unsafe extern "C-unwind" fn capture(
     refcon: NonNull<c_void>,
     flags: NonNull<AudioUnitRenderActionFlags>,
@@ -257,7 +234,6 @@ unsafe extern "C-unwind" fn capture(
     })
 }
 
-/// The render callback: fills the speaker's buffer with the call's mix.
 unsafe extern "C-unwind" fn render(
     refcon: NonNull<c_void>,
     _: NonNull<AudioUnitRenderActionFlags>,
@@ -283,10 +259,9 @@ unsafe extern "C-unwind" fn render(
     })
 }
 
-/// When a callback's first sample was captured or plays, by its time stamp's host time.
 fn instant(timestamp: &AudioTimeStamp) -> Instant {
     let now = Instant::now();
-    // The unit tells host times; were one missing, the callback runs close to its samples.
+    // Without a host time, the callback runs close enough to its samples.
     if !timestamp.mFlags.contains(AudioTimeStampFlags::HostTimeValid) {
         return now;
     }
@@ -302,7 +277,7 @@ fn instant(timestamp: &AudioTimeStamp) -> Instant {
     }
 }
 
-/// Runs a callback's body; a panic must not unwind into AudioToolbox, so it aborts.
+// A panic must not unwind into AudioToolbox.
 fn abort_on_panic(body: impl FnOnce() -> i32) -> i32 {
     panic::catch_unwind(AssertUnwindSafe(body)).unwrap_or_else(|_| process::abort())
 }

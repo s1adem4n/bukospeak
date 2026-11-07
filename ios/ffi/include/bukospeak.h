@@ -7,49 +7,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/**
- * Whether this member is in the channel.
- */
 typedef enum BukoSpeakState {
   BUKO_SPEAK_STATE_OUT,
   BUKO_SPEAK_STATE_CONNECTED,
-  /**
-   * Nothing comes from the server, or the connection was lost and the engine joins again.
-   */
   BUKO_SPEAK_STATE_RECONNECTING,
 } BukoSpeakState;
 
-/**
- * Why a join failed or a call was lost, as far as the app tells it apart.
- */
 typedef enum BukoSpeakReason {
-  /**
-   * Anything else: the server didn't answer, the connection broke, and the like.
-   */
   BUKO_SPEAK_REASON_OTHER,
-  /**
-   * The server's tailnet doesn't know this device: it isn't on that tailnet, or Tailscale is
-   * off.
-   */
   BUKO_SPEAK_REASON_STRANGER,
-  /**
-   * The server couldn't ask its tailnet who this device is.
-   */
   BUKO_SPEAK_REASON_UNIDENTIFIED,
-  /**
-   * This device joined the channel again elsewhere, which took the call's place.
-   */
   BUKO_SPEAK_REASON_REPLACED,
 } BukoSpeakReason;
 
-/**
- * The engine: joins and leaves the channel, one call at a time.
- */
 typedef struct BukoSpeakEngine BukoSpeakEngine;
 
-/**
- * UTF-8 text Rust lends for the duration of a callback; not NUL-terminated.
- */
 typedef struct BukoSpeakStr {
   const uint8_t *ptr;
   size_t len;
@@ -59,96 +31,39 @@ typedef struct BukoSpeakMember {
   uint16_t id;
   struct BukoSpeakStr name;
   bool muted;
-  /**
-   * The member's connection was lost, and the server holds its place for it to come back.
-   */
   bool reconnecting;
 } BukoSpeakMember;
 
-/**
- * Why a join failed or a call was lost.
- */
 typedef struct BukoSpeakError {
   enum BukoSpeakReason reason;
-  /**
-   * What happened, in English, for the log.
-   */
   struct BukoSpeakStr message;
 } BukoSpeakError;
 
-/**
- * The channel after a change, and what changed.
- */
 typedef struct BukoSpeakUpdate {
-  /**
-   * Which of the engine's joins the call is, counting from 1; 0 before the first. It stays
-   * once the call is over, so that its last updates tell it too.
-   */
   uint64_t call;
   enum BukoSpeakState state;
-  /**
-   * This member's id; 0, which the server never hands out, while out of the channel.
-   */
   uint16_t you;
-  /**
-   * Everyone in the channel, this member included, in the order they came; kept while
-   * joining again, empty when out.
-   */
   const struct BukoSpeakMember *members;
   size_t members_len;
-  /**
-   * Who speaks now, in id order, this member among them.
-   */
   const uint16_t *speaking;
   size_t speaking_len;
-  /**
-   * What to tell the user aloud about the change, in German; empty if nothing.
-   */
   struct BukoSpeakStr announcement;
-  /**
-   * Why the call ended without a leave; null otherwise.
-   */
   const struct BukoSpeakError *lost;
-  /**
-   * Who is in the channel while the engine watches it from outside, in the order they came.
-   */
   const struct BukoSpeakMember *present;
   size_t present_len;
 } BukoSpeakUpdate;
 
-/**
- * Hears the channel after each change, in order, on a thread of the engine's.
- */
 typedef void (*BukoSpeakListener)(void *context, const struct BukoSpeakUpdate *update);
 
-/**
- * Hears how a join went: null if it joined, otherwise why not.
- */
 typedef void (*BukoSpeakJoinDone)(void *context, const struct BukoSpeakError *error);
 
-/**
- * Hears why something failed, for the user.
- */
 typedef void (*BukoSpeakFailed)(void *context, struct BukoSpeakStr message);
 
-/**
- * A new engine, or null if its threads couldn't start. The listener hears its updates with
- * `context` until `bukospeak_engine_free` returns, never after.
- */
 struct BukoSpeakEngine *bukospeak_engine_new(void *context, BukoSpeakListener listener);
 
-/**
- * Stops the call's audio, leaves the call, and returns once the listener had its last update;
- * so not from the listener.
- */
 void bukospeak_engine_free(struct BukoSpeakEngine *engine);
 
 /**
- * Leaves the call before, if there is one, and joins the channel of `server`, as `host:port`,
- * as this device, which the server knows from its tailnet. Blocks until the server welcomes
- * this member or turns it away, 5 s at most, and hands `done` the result before it returns. Who
- * is in the call comes as the next update.
- *
  * # Safety
  *
  * `server` isn't null and is NUL-terminated.
@@ -158,66 +73,32 @@ void bukospeak_engine_join(const struct BukoSpeakEngine *engine,
                            void *context,
                            BukoSpeakJoinDone done);
 
-/**
- * Stops the call's audio and leaves the call, once the server knows; without one, nothing.
- * Returns the `call` the engine joined last: updates of it or of a call before that are still
- * on their way to the listener are of a call over now.
- */
 uint64_t bukospeak_engine_leave(const struct BukoSpeakEngine *engine);
 
 /**
- * Watches who is in the channel of `server` without joining it, until `bukospeak_engine_unwatch`
- * or a join; the updates tell them as present. Returns at once; a watch that fails shows nobody
- * and starts again after a while.
- *
  * # Safety
  *
  * `server` isn't null and is NUL-terminated.
  */
 void bukospeak_engine_watch(const struct BukoSpeakEngine *engine, const char *server);
 
-/**
- * Stops watching who is in the channel, if the engine does.
- */
 void bukospeak_engine_unwatch(const struct BukoSpeakEngine *engine);
 
-/**
- * Whether this member is muted: the microphone sends silence, so a talkspurt ends as in a
- * pause, and the others see it muted. It holds across calls until set again.
- */
 void bukospeak_engine_set_muted(const struct BukoSpeakEngine *engine, bool muted);
 
-/**
- * Whether the microphone's noise is suppressed (the default), or sent as captured.
- */
 void bukospeak_engine_set_noise_suppression(const struct BukoSpeakEngine *engine, bool on);
 
-/**
- * How loud the others play: 1.0 as they come, up to [`bukospeak_max_volume`]; the limiter
- * bends the peaks a louder mix would clip. It holds across calls until set again.
- */
 void bukospeak_engine_set_volume(const struct BukoSpeakEngine *engine, float volume);
 
-/**
- * The loudest volume the others play at: 2.0, 6 dB above their level.
- */
 float bukospeak_max_volume(void);
 
 #if defined(__APPLE__)
-/**
- * Plays the call on the voice processing unit, once the app's audio session is active. True
- * if it plays, or there is no call; false if the unit didn't start, after `failed` heard why.
- */
 bool bukospeak_engine_start_audio(const struct BukoSpeakEngine *engine,
                                   void *context,
                                   BukoSpeakFailed failed);
 #endif
 
 #if defined(__APPLE__)
-/**
- * Stops playing the call, for an audio session that is no longer active: a talkspurt ends,
- * and nobody shows as speaking until it plays again.
- */
 void bukospeak_engine_stop_audio(const struct BukoSpeakEngine *engine);
 #endif
 
