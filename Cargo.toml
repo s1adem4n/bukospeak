@@ -5,7 +5,7 @@ members = ["proto", "core", "ios/ffi", "maxine", "server", "desktop"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 rust-version = "1.98"
 repository = "https://github.com/s1adem4n/bukospeak"
