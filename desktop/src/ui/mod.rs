@@ -41,7 +41,7 @@ pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut 
     let Some(updater) = updater else {
         return open(client, None, cx);
     };
-    let options = WindowOptions { is_minimizable: false, ..chrome::options(size(theme::UPDATE_WINDOW.0, theme::UPDATE_WINDOW.1), cx) };
+    let options = WindowOptions { is_minimizable: false, ..chrome::options(size(theme::window::UPDATE.0, theme::window::UPDATE.1), cx) };
     cx.open_window(options, |window, cx| {
         theme::follow(window, cx);
         cx.new(|cx| Update::new(client, updater, window, cx))
@@ -51,7 +51,7 @@ pub fn start(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut 
 }
 
 pub fn open(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut App) {
-    let (width, height) = theme::WINDOW;
+    let (width, height) = theme::window::MAIN;
     cx.open_window(chrome::options(size(width, height), cx), |window, cx| {
         theme::follow(window, cx);
         cx.new(|cx| Main::new(client, updater, window, cx))

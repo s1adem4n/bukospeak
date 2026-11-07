@@ -87,7 +87,7 @@ impl Render for Update {
                     .child(div().typeset(theme::TEXT_MD).font_weight(FontWeight::MEDIUM).child(headline))
                     .child(div().font_family(theme::MONO).typeset(theme::TEXT_SM).text_color(tokens.text_faint).child(versions)),
             )
-            .child(v_flex().w(theme::UPDATE).h(theme::ICON).items_center().justify_center().child(progress));
+            .child(v_flex().w(theme::update::WIDTH).h(theme::ICON).items_center().justify_center().child(progress));
         chrome::frame(chrome::rounded(content, window), window, cx)
     }
 }

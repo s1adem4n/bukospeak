@@ -35,16 +35,16 @@ impl InputLevel {
 }
 
 fn lit(level: f32) -> usize {
-    (level.clamp(0., 1.) * theme::LEVEL_STEPS as f32).round() as usize
+    (level.clamp(0., 1.) * theme::level::STEPS as f32).round() as usize
 }
 
 impl Render for InputLevel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = cx.tokens();
-        let filled = self.lit as f32 / theme::LEVEL_STEPS as f32;
+        let filled = self.lit as f32 / theme::level::STEPS as f32;
         div()
             .flex_1()
-            .h(theme::LEVEL)
+            .h(theme::level::HEIGHT)
             .rounded_full()
             .bg(tokens.hover)
             .child(div().h_full().w(relative(filled)).rounded_full().bg(tokens.speaking))
@@ -58,8 +58,8 @@ mod tests {
     #[test]
     fn silence_lights_none_and_full_scale_all() {
         assert_eq!(lit(0.0), 0);
-        assert_eq!(lit(0.5), theme::LEVEL_STEPS / 2);
-        assert_eq!(lit(1.0), theme::LEVEL_STEPS);
-        assert_eq!(lit(2.0), theme::LEVEL_STEPS);
+        assert_eq!(lit(0.5), theme::level::STEPS / 2);
+        assert_eq!(lit(1.0), theme::level::STEPS);
+        assert_eq!(lit(2.0), theme::level::STEPS);
     }
 }

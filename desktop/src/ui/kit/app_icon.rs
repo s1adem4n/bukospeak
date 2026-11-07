@@ -11,18 +11,18 @@ use crate::ui::theme::{self, ActiveTokens, Typeset};
 pub struct AppIcon {
     name: SharedString,
     image: Option<Arc<RenderImage>>,
-    size: theme::AppIconSize,
+    size: theme::app_icon::Size,
 }
 
 impl AppIcon {
-    pub fn new(name: impl Into<SharedString>, image: Option<Arc<RenderImage>>, size: theme::AppIconSize) -> Self {
+    pub fn new(name: impl Into<SharedString>, image: Option<Arc<RenderImage>>, size: theme::app_icon::Size) -> Self {
         Self { name: name.into(), image, size }
     }
 }
 
 impl RenderOnce for AppIcon {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme::AppIconSize { size, radius, initial } = self.size;
+        let theme::app_icon::Size { size, radius, initial } = self.size;
         if let Some(image) = self.image {
             return img(image).flex_none().size(size).object_fit(ObjectFit::Contain).into_any_element();
         }

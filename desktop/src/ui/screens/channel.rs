@@ -14,7 +14,7 @@ use crate::ui::glyph::Glyph;
 use crate::ui::kit::{self, Avatar, Button, Icon, Size, Variant, h_flex, v_flex};
 use crate::ui::marks::Mark;
 use crate::ui::text;
-use crate::ui::theme::{self, ActiveTokens, Seats, Tokens, Typeset};
+use crate::ui::theme::{self, ActiveTokens, Tokens, Typeset};
 use crate::update::{State, Updater};
 
 const PULSE: Duration = Duration::from_millis(1400);
@@ -126,9 +126,9 @@ impl Channel {
     fn render_stage(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let seats = self.seats(cx);
         let layout = match seats.len() {
-            0..=2 => theme::SEATS_TWO,
-            3..=4 => theme::SEATS_FOUR,
-            _ => theme::SEATS_MANY,
+            0..=2 => theme::seats::TWO,
+            3..=4 => theme::seats::FOUR,
+            _ => theme::seats::MANY,
         };
         let centered = seats.len() <= 4;
         let full_rows = seats.len() > layout.columns;
@@ -289,7 +289,7 @@ struct Member {
 }
 
 impl Seat {
-    fn render(&self, layout: Seats, cx: &App) -> AnyElement {
+    fn render(&self, layout: theme::seats::Layout, cx: &App) -> AnyElement {
         let tokens = *cx.tokens();
         let place = div().relative().flex_1().min_w_0().max_w(layout.width).h(layout.height);
         let outline = move || {
@@ -331,7 +331,7 @@ impl Seat {
 }
 
 impl Member {
-    fn render(&self, place: gpui::Div, layout: Seats, tokens: Tokens) -> AnyElement {
+    fn render(&self, place: gpui::Div, layout: theme::seats::Layout, tokens: Tokens) -> AnyElement {
         let Self { id, name, speaks, muted, reconnecting, arrives } = self.clone();
         let badge = match (reconnecting, muted) {
             (true, _) => Some((Glyph::Reconnecting, tokens.text_muted)),
@@ -345,12 +345,13 @@ impl Member {
         };
         // Over the tile's hairline, so the thicker edge doesn't move what is inside.
         let spring = SpringAnimation::new(if speaks { theme::SPEAK_ON } else { theme::SPEAK_OFF }).to(speaks);
-        let ring =
-            div().absolute().inset_0().rounded(layout.radius).border(theme::SPEAKING_EDGE).border_color(tokens.speaking).with_spring(
-                ("speaking", u64::from(id)),
-                spring,
-                |ring, lit| ring.opacity(lit.clamp(0. ..=1.).0),
-            );
+        let ring = div()
+            .absolute()
+            .inset_0()
+            .rounded(layout.radius)
+            .border(theme::seats::SPEAKING_EDGE)
+            .border_color(tokens.speaking)
+            .with_spring(("speaking", u64::from(id)), spring, |ring, lit| ring.opacity(lit.clamp(0. ..=1.).0));
         let tile = v_flex()
             .relative()
             .size_full()
@@ -380,8 +381,8 @@ impl Member {
     }
 }
 
-fn name_line(name: SharedString, layout: Seats, color: gpui::Hsla) -> impl IntoElement {
-    div().max_w_full().px(theme::TILE_INSET).truncate().typeset(layout.name).font_weight(FontWeight::MEDIUM).text_color(color).child(name)
+fn name_line(name: SharedString, layout: theme::seats::Layout, color: gpui::Hsla) -> impl IntoElement {
+    div().max_w_full().px(theme::seats::INSET).truncate().typeset(layout.name).font_weight(FontWeight::MEDIUM).text_color(color).child(name)
 }
 
 fn dimmed(dim: f32) -> f32 {

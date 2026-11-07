@@ -71,22 +71,24 @@ pub fn list(rows: impl IntoIterator<Item = AnyElement>, cx: &App) -> Div {
     panel(cx).px(theme::PANEL_PAD).flex().flex_col().children(rows)
 }
 
-pub fn list_reach() -> Pixels {
+fn list_reach() -> Pixels {
     theme::PANEL_PAD + theme::HAIRLINE
 }
 
-pub fn panel_inset() -> Pixels {
+fn panel_inset() -> Pixels {
     theme::PANEL_INSET - theme::HAIRLINE
 }
 
+fn row_inset() -> Pixels {
+    panel_inset() - theme::PANEL_PAD
+}
+
+pub fn row_frame() -> Div {
+    h_flex().h(theme::ROW).px(row_inset())
+}
+
 pub fn row(label: &'static str, cx: &App) -> Div {
-    h_flex()
-        .h(theme::ROW)
-        .px(panel_inset() - theme::PANEL_PAD)
-        .gap(theme::GAP)
-        .justify_between()
-        .text_color(cx.tokens().text)
-        .child(div().flex_none().child(label))
+    row_frame().gap(theme::GAP).justify_between().text_color(cx.tokens().text).child(div().flex_none().child(label))
 }
 
 /// A row of a list that is a button as a whole.
@@ -98,7 +100,7 @@ pub fn row_button(id: &'static str) -> Button {
         .my(theme::PANEL_PAD)
         .h(theme::ROW - theme::PANEL_PAD * 2.)
         // The button's own edge lies inside the panel's.
-        .px(panel_inset() - theme::PANEL_PAD - theme::HAIRLINE)
+        .px(row_inset() - theme::HAIRLINE)
         .justify_start()
         .font_weight(FontWeight::NORMAL)
 }
@@ -144,20 +146,20 @@ pub fn dot(color: Hsla) -> impl IntoElement {
     // A circle of its own: a shadow spread around a circle comes out a rounded square.
     div()
         .flex_none()
-        .size(theme::DOT + theme::DOT_HALO * 2.)
+        .size(theme::dot::SIZE + theme::dot::HALO * 2.)
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
         .bg(color.opacity(0.16))
-        .child(div().size(theme::DOT).rounded_full().bg(color))
+        .child(div().size(theme::dot::SIZE).rounded_full().bg(color))
 }
 
 pub fn progress(done: f32, cx: &App) -> impl IntoElement {
     let tokens = cx.tokens();
     div()
         .w_full()
-        .h(theme::PROGRESS)
+        .h(theme::progress::HEIGHT)
         .rounded_full()
         .bg(tokens.inset)
         .border_1()

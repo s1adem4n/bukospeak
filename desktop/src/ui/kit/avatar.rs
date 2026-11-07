@@ -2,21 +2,21 @@ use gpui::{App, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce, Shared
 
 use crate::ui::glyph::Glyph;
 use crate::ui::kit::Icon;
-use crate::ui::theme::{self, ActiveTokens, AvatarSize, Typeset};
+use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 #[derive(IntoElement)]
 pub struct Avatar {
     name: Option<SharedString>,
-    size: AvatarSize,
+    size: theme::avatar::Size,
     badge: Option<(Glyph, Hsla, Hsla)>,
 }
 
 impl Avatar {
-    pub fn new(name: impl Into<SharedString>, size: AvatarSize) -> Self {
+    pub fn new(name: impl Into<SharedString>, size: theme::avatar::Size) -> Self {
         Self { name: Some(name.into()), size, badge: None }
     }
 
-    pub fn unnamed(size: AvatarSize) -> Self {
+    pub fn unnamed(size: theme::avatar::Size) -> Self {
         Self { name: None, size, badge: None }
     }
 
@@ -29,7 +29,7 @@ impl Avatar {
 impl RenderOnce for Avatar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let tokens = cx.tokens();
-        let AvatarSize { size, initial: kind, badge: badge_size } = self.size;
+        let theme::avatar::Size { size, initial: kind, badge: badge_size } = self.size;
         let face = match &self.name {
             Some(name) => {
                 let (background, color) = theme::avatar(name, tokens.dark);
@@ -46,15 +46,15 @@ impl RenderOnce for Avatar {
         let badge = self.badge.map(|(glyph, color, on)| {
             div()
                 .absolute()
-                .right(-theme::BADGE_EDGE)
-                .bottom(-theme::BADGE_EDGE)
+                .right(-theme::avatar::BADGE_EDGE)
+                .bottom(-theme::avatar::BADGE_EDGE)
                 .size(badge_size)
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_full()
                 .bg(on.blend(color.opacity(0.16)))
-                .border(theme::BADGE_EDGE)
+                .border(theme::avatar::BADGE_EDGE)
                 .border_color(on)
                 .child(Icon::new(glyph).size(theme::ICON_SM).color(color))
         });

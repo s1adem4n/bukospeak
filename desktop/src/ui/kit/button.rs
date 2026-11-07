@@ -288,13 +288,13 @@ fn hovered(button: Stateful<gpui::Div>, variant: Variant, selected: bool, tokens
 
 fn keycap(keys: &'static str, color: Hsla) -> impl IntoElement {
     div()
-        .px(theme::KEYCAP_INSET)
+        .px(theme::keycap::INSET)
         .rounded(theme::RADIUS_XS)
         .border_1()
         .border_color(color.opacity(0.2))
         .font_family(theme::MONO)
         .typeset(theme::TEXT_XS)
-        .line_height(theme::KEYCAP)
+        .line_height(theme::keycap::HEIGHT)
         .text_color(color.opacity(0.65))
         .child(keys)
 }

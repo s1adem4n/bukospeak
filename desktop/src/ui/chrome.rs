@@ -10,7 +10,7 @@ use crate::ui::kit::{Icon, h_flex};
 use crate::ui::theme::{self, ActiveTokens};
 
 pub fn options(size: Size<Pixels>, cx: &App) -> WindowOptions {
-    let light = (theme::TITLE_BAR - theme::TRAFFIC_LIGHT) / 2.;
+    let light = (theme::window::TITLE_BAR - theme::window::TRAFFIC_LIGHT) / 2.;
     WindowOptions {
         window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         titlebar: Some(TitlebarOptions {
@@ -34,26 +34,26 @@ pub fn frame(content: impl IntoElement, window: &mut Window, cx: &App) -> Statef
         window.set_client_inset(Pixels::ZERO);
         return div().id("frame").size_full().child(content);
     };
-    window.set_client_inset(theme::FRAME_SHADOW);
+    window.set_client_inset(theme::window::FRAME_SHADOW);
     let tokens = cx.tokens();
     div()
         .id("frame")
         .relative()
         .size_full()
         .bg(transparent_black())
-        .when(!tiling.top, |frame| frame.pt(theme::FRAME_SHADOW))
-        .when(!tiling.bottom, |frame| frame.pb(theme::FRAME_SHADOW))
-        .when(!tiling.left, |frame| frame.pl(theme::FRAME_SHADOW))
-        .when(!tiling.right, |frame| frame.pr(theme::FRAME_SHADOW))
+        .when(!tiling.top, |frame| frame.pt(theme::window::FRAME_SHADOW))
+        .when(!tiling.bottom, |frame| frame.pb(theme::window::FRAME_SHADOW))
+        .when(!tiling.left, |frame| frame.pl(theme::window::FRAME_SHADOW))
+        .when(!tiling.right, |frame| frame.pr(theme::window::FRAME_SHADOW))
         .child(
             div()
                 .size_full()
-                .map(|edge| round(edge, tiling, theme::FRAME_RADIUS))
+                .map(|edge| round(edge, tiling, theme::window::FRAME_RADIUS))
                 .border_color(tokens.edge)
-                .when(!tiling.top, |edge| edge.border_t(theme::FRAME_BORDER))
-                .when(!tiling.bottom, |edge| edge.border_b(theme::FRAME_BORDER))
-                .when(!tiling.left, |edge| edge.border_l(theme::FRAME_BORDER))
-                .when(!tiling.right, |edge| edge.border_r(theme::FRAME_BORDER))
+                .when(!tiling.top, |edge| edge.border_t(theme::window::FRAME_BORDER))
+                .when(!tiling.bottom, |edge| edge.border_b(theme::window::FRAME_BORDER))
+                .when(!tiling.left, |edge| edge.border_l(theme::window::FRAME_BORDER))
+                .when(!tiling.right, |edge| edge.border_r(theme::window::FRAME_BORDER))
                 .when(!tiling.is_tiled(), |edge| {
                     let shadow = tokens.shadow.opacity(if window.is_window_active() { 1. } else { 0.6 });
                     edge.shadow(theme::depth::frame(shadow))
@@ -72,7 +72,7 @@ fn round<E: Styled + FluentBuilder>(element: E, tiling: Tiling, radius: Pixels) 
 
 pub fn rounded<E: Styled + FluentBuilder>(content: E, window: &Window) -> E {
     match window.window_decorations() {
-        Decorations::Client { tiling } => round(content, tiling, theme::FRAME_RADIUS - theme::FRAME_BORDER),
+        Decorations::Client { tiling } => round(content, tiling, theme::window::FRAME_RADIUS - theme::window::FRAME_BORDER),
         Decorations::Server => content,
     }
 }
@@ -97,13 +97,14 @@ impl RenderOnce for TitleBar {
         let client = matches!(window.window_decorations(), Decorations::Client { .. });
         let controls = window.window_controls();
         let [left, right] = window_buttons(window, cx);
-        let start = if cfg!(target_os = "macos") && !window.is_fullscreen() { theme::TRAFFIC_LIGHTS } else { theme::TITLE_INSET };
+        let start =
+            if cfg!(target_os = "macos") && !window.is_fullscreen() { theme::window::TRAFFIC_LIGHTS } else { theme::window::TITLE_INSET };
 
         h_flex()
             .id("title-bar")
             .flex_none()
             .w_full()
-            .h(theme::TITLE_BAR)
+            .h(theme::window::TITLE_BAR)
             .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(MouseButton::Left, window.listener_for(&pressed, |pressed, _, _, _| pressed.0 = true))
             .on_mouse_up(MouseButton::Left, window.listener_for(&pressed, |pressed, _, _, _| pressed.0 = false))
@@ -126,7 +127,7 @@ impl RenderOnce for TitleBar {
                 bar.on_mouse_down(MouseButton::Right, |event, window, _| window.show_window_menu(event.position))
             })
             .children((!left.is_empty()).then(|| buttons(left, cx)))
-            .child(h_flex().flex_1().min_w_0().h_full().pl(start).pr(theme::TITLE_INSET).children(self.content))
+            .child(h_flex().flex_1().min_w_0().h_full().pl(start).pr(theme::window::TITLE_INSET).children(self.content))
             .children((!right.is_empty()).then(|| buttons(right, cx)))
     }
 }
@@ -188,47 +189,49 @@ fn window_buttons(_: &Window, _: &App) -> [Vec<Caption>; 2] {
 fn buttons(buttons: Vec<Caption>, cx: &App) -> impl IntoElement {
     let tokens = cx.tokens();
     let windows = cfg!(target_os = "windows");
-    h_flex().h_full().when(!windows, |side| side.gap(theme::INLINE).px(theme::TITLE_INSET)).children(buttons.into_iter().map(|button| {
-        let close = button == Caption::Close;
-        div()
-            .id(button.id())
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(tokens.text_muted)
-            .occlude()
-            .map(|control| {
-                if windows {
-                    let area = match button {
-                        Caption::Minimize => WindowControlArea::Min,
-                        Caption::Close => WindowControlArea::Close,
-                    };
-                    control
-                        .w(theme::CAPTION_BUTTON)
-                        .h_full()
-                        .window_control_area(area)
-                        .when(close, |control| control.hover(|style| style.bg(tokens.danger).text_color(tokens.on_primary)))
-                        .when(!close, |control| control.hover(|style| style.bg(tokens.inset).text_color(tokens.text)))
-                } else {
-                    control
-                        .size(theme::WINDOW_BUTTON)
-                        .rounded_full()
-                        .bg(tokens.inset)
-                        .hover(|style| style.bg(tokens.hover).text_color(tokens.text))
-                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                            // Pressed on a button, the title bar doesn't take it for a move.
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        })
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            match button {
-                                Caption::Minimize => window.minimize_window(),
-                                Caption::Close => window.remove_window(),
-                            }
-                        })
-                }
-            })
-            .child(Icon::new(button.glyph()).size(theme::ICON_SM))
-    }))
+    h_flex().h_full().when(!windows, |side| side.gap(theme::INLINE).px(theme::window::TITLE_INSET)).children(buttons.into_iter().map(
+        |button| {
+            let close = button == Caption::Close;
+            div()
+                .id(button.id())
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(tokens.text_muted)
+                .occlude()
+                .map(|control| {
+                    if windows {
+                        let area = match button {
+                            Caption::Minimize => WindowControlArea::Min,
+                            Caption::Close => WindowControlArea::Close,
+                        };
+                        control
+                            .w(theme::window::CAPTION_BUTTON)
+                            .h_full()
+                            .window_control_area(area)
+                            .when(close, |control| control.hover(|style| style.bg(tokens.danger).text_color(tokens.on_primary)))
+                            .when(!close, |control| control.hover(|style| style.bg(tokens.inset).text_color(tokens.text)))
+                    } else {
+                        control
+                            .size(theme::window::BUTTON)
+                            .rounded_full()
+                            .bg(tokens.inset)
+                            .hover(|style| style.bg(tokens.hover).text_color(tokens.text))
+                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                // Pressed on a button, the title bar doesn't take it for a move.
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                match button {
+                                    Caption::Minimize => window.minimize_window(),
+                                    Caption::Close => window.remove_window(),
+                                }
+                            })
+                    }
+                })
+                .child(Icon::new(button.glyph()).size(theme::ICON_SM))
+        },
+    ))
 }

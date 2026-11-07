@@ -295,12 +295,10 @@ impl Settings {
             .justify_end()
             .children(chosen.runs.then(|| div().group_hover(row.clone(), |style| style.opacity(0.)).child(kit::dot(tokens.speaking))))
             .child(div().absolute().inset_0().opacity(0.).group_hover(row.clone(), |style| style.opacity(1.)).child(remove));
-        h_flex()
+        kit::row_frame()
             .group(row)
-            .h(theme::ROW)
-            .px(kit::panel_inset() - theme::PANEL_PAD)
             .gap(theme::INLINE)
-            .child(AppIcon::new(title.clone(), icon.clone(), theme::APP_ICON))
+            .child(AppIcon::new(title.clone(), icon.clone(), theme::app_icon::MD))
             .child(div().flex_1().min_w_0().truncate().text_color(tokens.text).child(title.clone()))
             .child(end)
             .into_any_element()
@@ -311,11 +309,11 @@ impl Settings {
         let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::AddGame).map(|(_, menu, _)| menu);
         let mark = div()
             .flex_none()
-            .size(theme::APP_ICON.size)
+            .size(theme::app_icon::MD.size)
             .flex()
             .items_center()
             .justify_center()
-            .rounded(theme::APP_ICON.radius)
+            .rounded(theme::app_icon::MD.radius)
             .border_1()
             .border_dashed()
             .border_color(tokens.seat)
@@ -343,7 +341,7 @@ impl Settings {
             Item::new(program.title.clone(), move |_, cx| {
                 let _ = settings.update(cx, |settings, cx| settings.set_game(&game, true, cx));
             })
-            .icon(AppIcon::new(program.title.clone(), program.icon.clone(), theme::APP_ICON_SM))
+            .icon(AppIcon::new(program.title.clone(), program.icon.clone(), theme::app_icon::SM))
         };
         let (in_library, others): (Vec<&Program>, Vec<&Program>) = self.programs.others.iter().partition(|program| program.in_library);
         let entries = in_library.into_iter().fold(Entries::default().heading("Spiele"), |entries, program| entries.item(item(program)));
@@ -361,10 +359,10 @@ impl Settings {
         let percent = self.client.read(cx).settings.volume;
         kit::row("Lautstärke", cx)
             // The rail, not the knob's room around it, starts a gap after the label.
-            .child(div().flex_1().ml(-theme::SLIDER_KNOB / 2.).child(self.volume.clone()))
+            .child(div().flex_1().ml(-theme::slider::KNOB / 2.).child(self.volume.clone()))
             .child(
                 div()
-                    .w(theme::VOLUME_VALUE)
+                    .w(theme::slider::VALUE)
                     .text_right()
                     .font_family(theme::MONO)
                     .typeset(theme::TEXT_SM)

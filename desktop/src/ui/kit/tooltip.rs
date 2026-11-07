@@ -17,10 +17,10 @@ impl Render for Tooltip {
         let tokens = cx.tokens();
         // Off the pointer, which would otherwise cover its start; drawn above the window's
         // content, it takes nothing of the content's text style.
-        div().pl(theme::TOOLTIP_OFFSET.width).pt(theme::TOOLTIP_OFFSET.height).child(
+        div().pl(theme::tooltip::OFFSET.width).pt(theme::tooltip::OFFSET.height).child(
             div()
-                .px(theme::TOOLTIP_INSET.width)
-                .py(theme::TOOLTIP_INSET.height)
+                .px(theme::tooltip::INSET.width)
+                .py(theme::tooltip::INSET.height)
                 .rounded(theme::RADIUS_CONTROL_SM)
                 .bg(tokens.floating)
                 .border_1()

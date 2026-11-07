@@ -103,8 +103,8 @@ enum Entry {
 impl Entry {
     fn height(&self) -> Pixels {
         match self {
-            Self::Item(_) | Self::Heading(_) => theme::MENU_ITEM,
-            Self::Separator => theme::HAIRLINE + theme::MENU_SEPARATOR * 2.,
+            Self::Item(_) | Self::Heading(_) => theme::menu::ITEM,
+            Self::Separator => theme::HAIRLINE + theme::menu::SEPARATOR * 2.,
         }
     }
 }
@@ -136,16 +136,16 @@ fn anchor(entries: &[Entry]) -> Pixels {
     let anchor = chosen(entries).unwrap_or(0);
     let above: Pixels = entries[..anchor].iter().map(Entry::height).sum();
     let anchor = entries.get(anchor).map_or(Pixels::ZERO, Entry::height);
-    theme::HAIRLINE + theme::MENU_PAD + above + anchor / 2.
+    theme::HAIRLINE + theme::menu::PAD + above + anchor / 2.
 }
 
 fn item_inset() -> Pixels {
-    panel_inset() - theme::MENU_PAD
+    panel_inset() - theme::menu::PAD
 }
 
 /// Where the labels of items with a program's icon start, and what is typed into the search.
 fn label_inset() -> Pixels {
-    item_inset() + theme::APP_ICON_SM.size + theme::INLINE
+    item_inset() + theme::app_icon::SM.size + theme::INLINE
 }
 
 pub struct Menu {
@@ -312,7 +312,7 @@ impl Render for Menu {
         let shown = shown(&self.entries, &query);
         // A search that finds nothing says so, where what is typed and the items' labels start.
         let nothing = (shown.is_empty() && !query.trim().is_empty())
-            .then(|| h_flex().h(theme::MENU_ITEM).pl(label_inset()).text_color(tokens.text_faint).child("Nichts gefunden"));
+            .then(|| h_flex().h(theme::menu::ITEM).pl(label_inset()).text_color(tokens.text_faint).child("Nichts gefunden"));
         let entries = shown.into_iter().map(|index| {
             let entry = &self.entries[index];
             match entry {
@@ -368,12 +368,12 @@ impl Render for Menu {
         });
         // The magnifier over the items' icons, and what is typed where their labels start.
         let search = self.search.as_ref().map(|(field, _)| {
-            let icons = theme::APP_ICON_SM.size;
+            let icons = theme::app_icon::SM.size;
             h_flex()
                 .flex_none()
                 .relative()
-                .mb(theme::MENU_PAD)
-                .child(Field::new(field, FieldSize::Small).pl(label_inset() - theme::FIELD_INSET))
+                .mb(theme::menu::PAD)
+                .child(Field::new(field, FieldSize::Small).pl(label_inset() - theme::field::INSET))
                 .child(
                     h_flex()
                         .absolute()
@@ -395,10 +395,10 @@ impl Render for Menu {
             .on_action(cx.listener(Self::choose))
             .on_action(cx.listener(Self::close_action))
             .relative()
-            .min_w(theme::MENU)
+            .min_w(theme::menu::WIDTH)
             .max_h_full()
-            .p(theme::MENU_PAD)
-            .rounded(theme::RADIUS_MENU)
+            .p(theme::menu::PAD)
+            .rounded(theme::menu::RADIUS)
             .bg(tokens.floating)
             .border_1()
             .border_color(tokens.edge)
@@ -410,7 +410,7 @@ impl Render for Menu {
                 v_flex()
                     .id("entries")
                     .min_h_0()
-                    .max_h(theme::MENU_LIST)
+                    .max_h(theme::menu::LIST)
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .children(entries)
@@ -423,7 +423,7 @@ impl Render for Menu {
                     Side::Above => 1.,
                     Side::Over => 0.,
                 };
-                move |menu, delta| menu.opacity(delta).top(theme::MENU_RISE * toward * (1. - delta))
+                move |menu, delta| menu.opacity(delta).top(theme::menu::RISE * toward * (1. - delta))
             })
     }
 }
@@ -516,7 +516,7 @@ fn position(place: Place, anchor: Pixels, opener: Bounds<Pixels>, size: Size<Pix
     };
     let (x, y, side) = match place {
         Place::OverValue => (opener.right() + list_reach() - size.width, opener.center().y - anchor, Side::Over),
-        Place::Under => hang(opener.left(), opener.bottom() + theme::MENU_PAD, opener.top() - theme::MENU_PAD),
+        Place::Under => hang(opener.left(), opener.bottom() + theme::menu::PAD, opener.top() - theme::menu::PAD),
         Place::At(at) => hang(at.x, at.y, at.y),
     };
     let y = y.min(bottom - size.height).max(top);
@@ -627,9 +627,9 @@ mod tests {
     fn under_a_row_it_spans_the_row_s_panel_below_or_where_only_there_it_fits_above() {
         let panel = |top| Bounds { origin: point(px(30.) - list_reach(), px(top)), size: size(px(340.) + list_reach() * 2., px(44.)) };
         let (at, side) = position(Place::Under, Pixels::ZERO, panel(100.), MENU, WINDOW);
-        assert_eq!((at, side), (point(panel(100.).left(), px(144.) + theme::MENU_PAD), Side::Below));
+        assert_eq!((at, side), (point(panel(100.).left(), px(144.) + theme::menu::PAD), Side::Below));
         let (at, side) = position(Place::Under, Pixels::ZERO, panel(500.), MENU, WINDOW);
-        assert_eq!((at, side), (point(panel(500.).left(), px(500.) - theme::MENU_PAD - MENU.height), Side::Above));
+        assert_eq!((at, side), (point(panel(500.).left(), px(500.) - theme::menu::PAD - MENU.height), Side::Above));
     }
 
     #[test]
@@ -657,10 +657,10 @@ mod tests {
                 Entry::Item(Item::new("chosen", |_, _| {}).checked(checked)),
             ]
         };
-        let top = theme::HAIRLINE + theme::MENU_PAD;
-        let above = theme::MENU_ITEM + (theme::HAIRLINE + theme::MENU_SEPARATOR * 2.) + theme::MENU_ITEM;
-        assert_eq!(anchor(&entries(true)), top + above + theme::MENU_ITEM / 2.);
-        assert_eq!(anchor(&entries(false)), top + theme::MENU_ITEM / 2.);
+        let top = theme::HAIRLINE + theme::menu::PAD;
+        let above = theme::menu::ITEM + (theme::HAIRLINE + theme::menu::SEPARATOR * 2.) + theme::menu::ITEM;
+        assert_eq!(anchor(&entries(true)), top + above + theme::menu::ITEM / 2.);
+        assert_eq!(anchor(&entries(false)), top + theme::menu::ITEM / 2.);
     }
 
     #[test]

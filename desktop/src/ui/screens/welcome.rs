@@ -45,10 +45,10 @@ impl Welcome {
 impl Render for Welcome {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.value(cx).is_empty();
-        v_flex().flex_1().min_h_0().items_center().px(theme::GUTTER).child(div().flex_1().max_h(theme::WELCOME_TOP)).child(
+        v_flex().flex_1().min_h_0().items_center().px(theme::GUTTER).child(div().flex_1().max_h(theme::welcome::TOP)).child(
             v_flex()
                 .w_full()
-                .max_w(theme::WELCOME)
+                .max_w(theme::welcome::WIDTH)
                 .items_center()
                 .child(kit::mark(theme::MARK))
                 .child(

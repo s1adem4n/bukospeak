@@ -34,7 +34,7 @@ impl RenderOnce for Switch {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let tokens = cx.tokens();
         let on = self.on;
-        let inset = (theme::SWITCH_HEIGHT - theme::SWITCH_KNOB) / 2.;
+        let inset = (theme::switch::HEIGHT - theme::switch::KNOB) / 2.;
         let mark = self.id.to_string();
         div()
             .id(self.id)
@@ -47,8 +47,8 @@ impl RenderOnce for Switch {
             .flex()
             .items_center()
             .when(on, |track| track.justify_end())
-            .w(theme::SWITCH_WIDTH)
-            .h(theme::SWITCH_HEIGHT)
+            .w(theme::switch::WIDTH)
+            .h(theme::switch::HEIGHT)
             .px(inset - theme::HAIRLINE)
             .rounded_full()
             .border_1()
@@ -57,6 +57,6 @@ impl RenderOnce for Switch {
             .cursor_pointer()
             .focus_visible(|style| style.border_color(tokens.focus))
             .when_some(self.on_change, |track, on_change| track.on_click(move |_, window, cx| on_change(!on, window, cx)))
-            .child(div().size(theme::SWITCH_KNOB).rounded_full().bg(tokens.raised).shadow(theme::depth::control(tokens.highlight, tokens)))
+            .child(div().size(theme::switch::KNOB).rounded_full().bg(tokens.raised).shadow(theme::depth::control(tokens.highlight, tokens)))
     }
 }

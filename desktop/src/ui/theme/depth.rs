@@ -2,7 +2,7 @@
 
 use gpui::{BoxShadow, Hsla, Pixels, px};
 
-use crate::ui::theme::{FRAME_SHADOW, HAIRLINE, Tokens, step};
+use crate::ui::theme::{HAIRLINE, Tokens, step, window};
 
 fn shadow(y: Pixels, blur: Pixels, color: Hsla) -> BoxShadow {
     BoxShadow::new(px(0.), y, color).blur_radius(blur)
@@ -33,7 +33,7 @@ pub fn floating(tokens: &Tokens) -> Vec<BoxShadow> {
 }
 
 pub fn frame(color: Hsla) -> Vec<BoxShadow> {
-    vec![shadow(step(0.5), FRAME_SHADOW / 2., color)]
+    vec![shadow(step(0.5), window::FRAME_SHADOW / 2., color)]
 }
 
 pub fn inner_edge(color: Hsla) -> Vec<BoxShadow> {

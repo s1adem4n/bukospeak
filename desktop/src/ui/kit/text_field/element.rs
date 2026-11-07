@@ -73,7 +73,7 @@ impl Element for TextElement {
         let tokens = cx.tokens();
         let style = window.text_style();
         let line_height = window.line_height();
-        let inset = theme::FIELD_INSET - theme::HAIRLINE;
+        let inset = theme::field::INSET - theme::HAIRLINE;
         let content = field.text.content();
 
         let (shown, color): (SharedString, _) =
@@ -103,8 +103,8 @@ impl Element for TextElement {
         );
         let selection = field.text.selection();
         let cursor_x = if content.is_empty() { Pixels::ZERO } else { line.x_for_index(field.text.cursor()) };
-        let most = (line.width + theme::CURSOR - text.size.width).max(Pixels::ZERO);
-        let scroll = field.scroll.min(most).max(cursor_x + theme::CURSOR - text.size.width).min(cursor_x).max(Pixels::ZERO);
+        let most = (line.width + theme::field::CURSOR - text.size.width).max(Pixels::ZERO);
+        let scroll = field.scroll.min(most).max(cursor_x + theme::field::CURSOR - text.size.width).min(cursor_x).max(Pixels::ZERO);
         let origin = point(text.left() - scroll, text.top());
 
         let focused = field.focus.is_focused(window);
@@ -113,7 +113,7 @@ impl Element for TextElement {
             Bounds::from_corners(point(origin.x + start, text.top()), point(origin.x + end, text.bottom()))
         });
         let cursor = (focused && field.cursor_shown && selection.is_empty())
-            .then(|| Bounds::new(point(origin.x + cursor_x, text.top()), size(theme::CURSOR, line_height)));
+            .then(|| Bounds::new(point(origin.x + cursor_x, text.top()), size(theme::field::CURSOR, line_height)));
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         Prepaint { line, origin, scroll, line_height, text, selection: selection_bounds, cursor, hitbox }
     }

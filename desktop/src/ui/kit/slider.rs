@@ -89,7 +89,7 @@ impl Render for Slider {
             .on_action(cx.listener(Self::decrease))
             .on_action(cx.listener(Self::increase))
             .w_full()
-            .h(theme::SLIDER)
+            .h(theme::slider::HEIGHT)
             .rounded_full()
             .border_1()
             .border_color(tokens.base.opacity(0.))
@@ -156,14 +156,14 @@ impl Element for Rail {
         cx: &mut App,
     ) {
         let tokens = cx.tokens();
-        let knob = theme::SLIDER_KNOB;
+        let knob = theme::slider::KNOB;
         // The knob's middle stays a half-width in from the ends, so it never reaches past them.
         let rail = Bounds::new(
-            point(bounds.left() + knob / 2., bounds.center().y - theme::SLIDER_RAIL / 2.),
-            size(bounds.size.width - knob, theme::SLIDER_RAIL),
+            point(bounds.left() + knob / 2., bounds.center().y - theme::slider::RAIL / 2.),
+            size(bounds.size.width - knob, theme::slider::RAIL),
         );
         let x = rail.left() + rail.size.width * self.slider.read(cx).fraction();
-        let round = Corners::all(theme::SLIDER_RAIL / 2.);
+        let round = Corners::all(theme::slider::RAIL / 2.);
         window.paint_quad(fill(rail, tokens.hover).corner_radii(round));
         window.paint_quad(fill(Bounds::from_corners(rail.origin, point(x, rail.bottom())), tokens.text).corner_radii(round));
         let knob_bounds = Bounds::new(point(x - knob / 2., bounds.center().y - knob / 2.), size(knob, knob));
