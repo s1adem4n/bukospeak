@@ -1,13 +1,9 @@
-//! DeepFilterNet3, which suppresses noise far better than RNNoise, at costs RNNoise doesn't
-//! have: the voice comes out 30 ms later, and each frame takes its networks about a third of a
-//! millisecond, so the uplink thread runs it, not the capture callback.
-
 use bukospeak_proto::audio::FRAME_SAMPLES;
 use df::{DEEPFILTERNET3, DeepFilterNet, RuntimeParams};
 
 use crate::suppression::Suppressor;
 
-/// The voice comes out three frames later.
+// 30 ms later, and a third of a millisecond per frame, so the uplink thread runs it.
 const DELAY: usize = 3;
 
 pub(crate) struct DeepFilter {
@@ -15,7 +11,6 @@ pub(crate) struct DeepFilter {
 }
 
 impl DeepFilter {
-    /// Builds the model from its built-in weights.
     pub fn new() -> Result<Self, df::Error> {
         let model = DeepFilterNet::new(DEEPFILTERNET3, &RuntimeParams::default())?;
         assert_eq!(model.hop_size(), FRAME_SAMPLES, "the model takes a frame at a time");
@@ -30,8 +25,7 @@ impl Suppressor for DeepFilter {
     }
 
     fn process(&mut self, frame: &[f32; FRAME_SAMPLES], enhanced: &mut [f32; FRAME_SAMPLES]) {
-        // The local SNR it estimates matters only to the model, which chose by it what the frame
-        // got of its stages.
+        // The local SNR matters only to the model itself.
         let _ = self.model.process(frame, enhanced);
     }
 
@@ -47,7 +41,6 @@ mod tests {
     #[test]
     fn the_voice_comes_out_three_frames_later() {
         let mut deep_filter = DeepFilter::new().unwrap();
-        // A click in the first frame, after which the output is silent until it comes out.
         let mut click = [0.0; FRAME_SAMPLES];
         click[100] = 0.5;
         let mut enhanced = [0.0; FRAME_SAMPLES];
@@ -65,7 +58,6 @@ mod tests {
     fn frames_are_enhanced_without_allocating() {
         let mut deep_filter = DeepFilter::new().unwrap();
         let mut enhanced = [0.0; FRAME_SAMPLES];
-        // Noise rising from silence.
         let mut state: u32 = 0x1234_5678;
         let frames: Vec<[f32; FRAME_SAMPLES]> = (0..100)
             .map(|frame| {

@@ -1,6 +1,3 @@
-//! A recording through the capture the apps send with and the mix a listener plays it with, for
-//! measuring and hearing what the processing does, outside a call.
-
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,23 +13,17 @@ use crate::microphone::{Microphone, Settings};
 use crate::playout::Mixer;
 use crate::suppression::{Stage, Suppression};
 
-/// Frames played after the recording ended, so the listener's buffer drains.
 const TAIL_FRAMES: usize = 10;
 
-/// How the capture processes the recording.
 #[derive(Clone, Debug)]
 pub struct Options {
     pub conditioning: Conditioning,
     pub suppression: Suppression,
 }
 
-/// Plays `recording`, 48 kHz mono, as a listener without loss and jitter hears it: what the
-/// gate held back is silence, and the playout delay comes first.
 pub fn play(recording: &[f32], options: Options) -> Result<Vec<f32>, opus::Error> {
     let settings = Arc::new(Settings::default());
-    // A frame and the slot kept for a stop.
     let (frames, mut captured) = RingBuffer::new(2);
-    // Nothing plays, which AEC3 hears as silence.
     let (mut microphone, _tap) = Microphone::new(options.conditioning, frames, thread::current(), settings);
     let mut capture = Capture::new(options.conditioning, Stage::new(&options.suppression))?;
     let mut mixer = Mixer::new()?;
@@ -58,9 +49,6 @@ pub fn play(recording: &[f32], options: Options) -> Result<Vec<f32>, opus::Error
     Ok(played)
 }
 
-/// How much later `played` carries `recording` than it was captured: the lag that correlates
-/// them best, up to `most`. It takes time in the product of their lengths, so it suits excerpts
-/// of seconds.
 pub fn delay(recording: &[f32], played: &[f32], most: Duration) -> Duration {
     let most = (most.as_secs_f64() * f64::from(SAMPLE_RATE)) as usize;
     let correlation = |lag: usize| -> f64 {
@@ -84,7 +72,6 @@ mod tests {
         let options = Options { conditioning: Conditioning::Platform, suppression: Suppression::Off };
         let played = play(&recording, options).unwrap();
         assert_eq!(played.len(), recording.len() + TAIL_FRAMES * FRAME_SAMPLES);
-        // Once the listener's buffer dropped the pre-roll's frames it held beyond its target.
         let delay = delay(&recording[5 * second / 2..], &played[5 * second / 2..], Duration::from_millis(100));
         assert!((Duration::from_millis(20)..Duration::from_millis(50)).contains(&delay), "delay {delay:?}");
     }

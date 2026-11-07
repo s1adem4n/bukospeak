@@ -1,11 +1,3 @@
-//! The engine the apps drive: joins and leaves the channel, runs the network side of a call,
-//! joins again once when its connection is lost, watches who is in the channel while out of it,
-//! and tells a [`Listener`] the channel after each change.
-//!
-//! A join hands the caller the call's two realtime ends, a [`Microphone`] and a [`Speaker`],
-//! for the platform's audio to drive until the call is over; they exist only for a call, and
-//! last through joining again.
-
 use std::collections::{BTreeSet, VecDeque};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,69 +24,50 @@ use crate::speaking::Speaking;
 use crate::suppression::{Stage, Suppression};
 use crate::uplink::{self, Made};
 
-/// The loudest [`Engine::set_volume`] plays the others: 6 dB above their level.
 pub const MAX_VOLUME: f32 = 2.0;
 
-/// Frames the uplink may fall behind the microphone: 1 s.
 const UPLINK_FRAMES: usize = 100;
 
-/// Frames and leaves the speaker may fall behind the network: 0.5 s of every voice.
 const DOWNLINK_FRAMES: usize = 50 * crate::playout::VOICES;
 
-/// How often the engine looks who speaks and whether the server went silent: quick enough for
-/// an indicator to feel live.
 const LOOK_EVERY: Duration = Duration::from_millis(50);
 
-/// How long a watch that failed or broke waits before it starts again.
 const WATCH_AGAIN_AFTER: Duration = Duration::from_secs(5);
 
-/// How long a join again that failed waits before it tries anew.
 const REJOIN_AGAIN_AFTER: Duration = Duration::from_millis(250);
 
-/// Receives the channel after each change, in order, on a thread of its own, so it may call
-/// the engine; but not drop it, since dropping waits for that thread.
+// Called on a thread of its own: it may call the engine, but not drop it, which waits for that
+// thread.
 pub trait Listener: Send + Sync {
     fn update(&self, update: Update);
 }
 
-/// A change in the channel, and the channel after it.
 #[derive(Debug)]
 pub struct Update {
     pub channel: Channel,
-    /// What to tell the user aloud about the change, if anything.
     pub announcement: Option<Announcement>,
-    /// The call ended without a leave: why.
     pub lost: Option<Lost>,
 }
 
-/// A call just joined; who is in it comes as the next [`Update`].
 pub struct Joined {
     pub microphone: Microphone,
     pub speaker: Speaker,
 }
 
-/// Joins and leaves the channel, one call at a time. Dropping it leaves the call and returns
-/// once the listener has had its last update.
 pub struct Engine {
     runtime: Runtime,
     conditioning: Conditioning,
     settings: Arc<Settings>,
-    /// Whether this member is muted, for the call to tell the server; the microphone goes by
-    /// the settings.
     muted: watch::Sender<bool>,
     calls: Mutex<Calls>,
     watch: Mutex<Option<Running>>,
     suppressing: Mutex<Suppressing>,
-    /// How many times a suppression was chosen: the stages made for an earlier choice are
-    /// dropped.
     chosen: Arc<AtomicU64>,
-    // Fields drop in order: the last sender of events goes before the listener's thread, which
-    // ends with it, is waited for.
+    // Fields drop in order: the listener's thread ends with the last sender, so it goes first.
     events: mpsc::Sender<Event>,
     _listening: Listening,
 }
 
-/// The listener's thread, waited for when dropped.
 struct Listening(Option<thread::JoinHandle<()>>);
 
 impl Drop for Listening {
@@ -105,45 +78,39 @@ impl Drop for Listening {
     }
 }
 
-/// The engine's calls: how many it joined, and the one running, if any.
 #[derive(Default)]
 struct Calls {
     joined: u64,
     running: Option<Running>,
 }
 
-/// The suppression chosen, and the call's uplink, which takes the stages made for it.
 struct Suppressing {
     suppression: Suppression,
     uplink: Option<mpsc::Sender<Made>>,
 }
 
 impl Suppressing {
-    /// Makes the stage of the `choice`-th suppression for the call's uplink, if there is a call,
-    /// on a thread of its own: loading a plugged-in suppressor may take seconds.
     fn make(&self, choice: u64) -> io::Result<()> {
         let Some(uplink) = self.uplink.clone() else { return Ok(()) };
         let suppression = self.suppression.clone();
+        // Loading a plugged-in suppressor may take seconds.
         thread::Builder::new().name("bukospeak-suppression".into()).spawn(move || {
             let stage = Stage::new(&suppression);
-            // The call may be over by now, and its uplink gone with it.
+            // The call may be over by now.
             let _ = uplink.send(Made { choice, stage });
         })?;
         Ok(())
     }
 }
 
-/// A call or a watch, on the runtime until it is stopped.
 struct Running {
     stop: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
 
 impl Engine {
-    /// An engine whose calls condition the microphone's signal as `conditioning` says.
     pub fn new(conditioning: Conditioning, listener: Arc<dyn Listener>) -> io::Result<Self> {
-        // One worker runs the network side; a current-thread runtime would run it only while
-        // a call into the engine blocks on it.
+        // A current-thread runtime would run only while a call into the engine blocks on it.
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("bukospeak-network").enable_all().build()?;
         let (events, inbox) = mpsc::channel();
@@ -172,11 +139,8 @@ impl Engine {
         })
     }
 
-    /// Joins the channel of `server`, as `host:port`, after leaving the call before if there is
-    /// one, and stops watching it.
     pub fn join(&self, server: &str) -> Result<Joined, Error> {
-        // Held until the call is in place, so a leave meanwhile, say from the listener's
-        // thread, waits for the join and then ends its call instead of missing it.
+        // Held until the call is in place, so a leave meanwhile waits for the join and ends its call.
         let mut calls = self.calls.lock().expect("the calls lock is never poisoned");
         self.end(calls.running.take());
         self.unwatch();
@@ -188,7 +152,6 @@ impl Engine {
         };
         // Built while the session joins, which hides the time a plugged-in suppressor takes to load.
         let capture = thread::Builder::new().name("bukospeak-capture".into()).spawn(move || capture(conditioning, &suppression))?;
-        // libopus creates codecs without fail for the fixed formats asked for.
         let mixer = Mixer::new().expect("the decoders can be created");
 
         let mut muted = self.muted.subscribe();
@@ -203,17 +166,15 @@ impl Engine {
         {
             let mut suppressing = self.suppressing();
             suppressing.uplink = Some(made);
-            // Chosen anew while the call joined.
-            let latest = self.chosen.load(Ordering::Relaxed);
-            if latest != choice {
-                suppressing.make(latest)?;
+            let chosen_while_joining = self.chosen.load(Ordering::Relaxed);
+            if chosen_while_joining != choice {
+                suppressing.make(chosen_while_joining)?;
             }
         }
         let (microphone, tap) = Microphone::new(self.conditioning, frames, uplink, Arc::clone(&self.settings));
         let (downlink, speaker_downlink) = RingBuffer::new(DOWNLINK_FRAMES);
 
-        // Sent before the call's own events, so they apply to the channel it enters. A failed
-        // send means the engine is gone, and with it the listener.
+        // Before the call's own events, so they apply to the channel it enters.
         let _ = self.events.send(Event::Entered { call: calls.joined, you: session.you(), members: session.members().to_vec() });
         let (stop, stopped) = oneshot::channel();
         let link = Link { call: calls.joined, server: server.to_owned(), session, sender, muted };
@@ -222,9 +183,6 @@ impl Engine {
         Ok(Joined { microphone, speaker: Speaker::new(mixer, speaker_downlink, speaking, Arc::clone(&self.settings), tap) })
     }
 
-    /// Leaves the call, if there is one, once the server knows. Returns the
-    /// [`call`](Channel::call) the engine joined last: updates of it or of a call before that are
-    /// still on their way to the listener are of a call over now.
     pub fn leave(&self) -> u64 {
         let mut calls = self.calls.lock().expect("the calls lock is never poisoned");
         self.end(calls.running.take());
@@ -232,8 +190,6 @@ impl Engine {
         calls.joined
     }
 
-    /// Watches who is in the channel without joining it, until [`unwatch`](Self::unwatch) or a
-    /// join; the listener sees them as the channel's [`present`](Channel::present).
     pub fn watch(&self, server: String) {
         let mut watch = self.watch.lock().expect("the watch lock is never poisoned");
         self.end(watch.take());
@@ -242,15 +198,11 @@ impl Engine {
         *watch = Some(Running { stop, task });
     }
 
-    /// Stops watching who is in the channel, if the engine does.
     pub fn unwatch(&self) {
         let mut watch = self.watch.lock().expect("the watch lock is never poisoned");
         self.end(watch.take());
     }
 
-    /// How the microphone's noise is suppressed: by the best suppression built in unless set
-    /// otherwise. In a call, the suppression before goes on until the new one is ready; a
-    /// plugged-in suppressor takes what it takes to load.
     pub fn set_suppression(&self, suppression: Suppression) -> io::Result<()> {
         let mut suppressing = self.suppressing();
         suppressing.suppression = suppression;
@@ -262,23 +214,16 @@ impl Engine {
         self.suppressing.lock().expect("the suppressing lock is never poisoned")
     }
 
-    /// Whether the speaker's echo is cancelled in what the microphone hears (the default), where
-    /// the engine conditions the signal. A headset doesn't echo, and AEC3 then leaves the voice
-    /// as it is within seconds; off, it doesn't touch it at all.
     pub fn set_echo_cancellation(&self, on: bool) {
         self.settings.echo_cancellation.store(on, Ordering::Relaxed);
     }
 
-    /// How loud the others play: 1.0 as they come, up to [`MAX_VOLUME`]; the limiter bends the
-    /// peaks a louder mix would clip. It holds across calls until set again.
     pub fn set_volume(&self, volume: f32) {
         // A NaN would silence the mix for good.
         let volume = if volume.is_nan() { 1.0 } else { volume.clamp(0.0, MAX_VOLUME) };
         self.settings.volume.store(volume.to_bits(), Ordering::Relaxed);
     }
 
-    /// Whether this member is muted: the microphone sends silence, so a talkspurt ends as in a
-    /// pause, and the others see it muted. It holds across calls until set again.
     pub fn set_muted(&self, muted: bool) {
         self.settings.muted.store(muted, Ordering::Relaxed);
         self.muted.send_replace(muted);
@@ -286,7 +231,7 @@ impl Engine {
 
     fn end(&self, running: Option<Running>) {
         let Some(running) = running else { return };
-        // A call that ended by itself, or a watch, may no longer listen.
+        // A call or watch that ended by itself no longer listens.
         let _ = running.stop.send(());
         self.runtime.block_on(running.task).expect("a call or watch task doesn't panic");
     }
@@ -299,22 +244,14 @@ impl Drop for Engine {
     }
 }
 
-/// A call's way to the channel: its session, and what joins it again.
 struct Link {
-    /// Which of the engine's joins the call is.
     call: u64,
-    /// The server, as `host:port`.
     server: String,
     session: Session,
-    /// The uplink's, which follows the session joined again.
     sender: AudioSender,
-    /// Whether this member is muted, to tell the server.
     muted: watch::Receiver<bool>,
 }
 
-/// The network side of a call: moves the members' frames to the speaker and tells the
-/// listener who comes, goes and speaks, until it is stopped, the connection is lost and
-/// joining again fails, or this device joined again elsewhere.
 async fn run(
     mut link: Link,
     mut deliveries: Deliveries,
@@ -328,10 +265,9 @@ async fn run(
     let mut look = tokio::time::interval(LOOK_EVERY);
     look.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let start = Instant::now();
-    // When something last came from the server, by the count of what came then.
-    let (mut received, mut heard) = (link.session.received(), Instant::now());
+    let (mut received, mut heard_at) = (link.session.received(), Instant::now());
     let mut silent = false;
-    // A failed send means the engine is gone, and with it the listener; the call ends soon.
+    // Fails only once the engine is gone, which stops the call.
     let tell = |event| _ = events.send(event);
 
     loop {
@@ -348,17 +284,16 @@ async fn run(
                 deliveries.retry();
                 let count = link.session.received();
                 if count != received {
-                    (received, heard) = (count, Instant::now());
+                    (received, heard_at) = (count, Instant::now());
                 }
-                if silent != (heard.elapsed() >= SILENT_AFTER) {
+                if silent != (heard_at.elapsed() >= SILENT_AFTER) {
                     silent = !silent;
                     speakers.clear();
                     tell(if silent { Event::Reconnecting } else { Event::Heard });
                 }
                 let mut now = speaking.members(you);
-                // Voices of members that left, or were in the lost session, may still play out.
+                // Voices of members that left, or of the lost session, may still play out.
                 now.retain(|id| *id == you || members.contains(id));
-                // Cut off from the others, nobody shows speaking.
                 if !silent && now != speakers {
                     speakers.clone_from(&now);
                     tell(Event::Speaking(now));
@@ -394,28 +329,25 @@ async fn run(
             },
         };
 
-        // Joining again would take the place back from the join that took it, which would
-        // take it back in turn.
+        // Joining again would take the place back, and the other join would take it back in turn.
         if matches!(lost, Error::Replaced) {
             return tell(Event::Lost(Lost::Replaced));
         }
         tell(Event::Reconnecting);
         let rejoined = tokio::select! {
             _ = &mut stop => return tell(Event::Ended),
-            // In its own place, which the server holds for the device a while: the others see
-            // it come back, not leave and join.
             rejoined = rejoin(&link.server, *link.muted.borrow_and_update()) => rejoined,
         };
         match rejoined {
             Ok(session) => {
-                // The voices of the lost session broke off; ones that go on start anew.
+                // The lost session's voices broke off; those that go on start anew.
                 members.iter().for_each(|&id| deliveries.left(id));
                 link.sender.follow(&session);
                 link.session = session;
                 you = link.session.you();
                 members = others(&link.session);
                 speakers.clear();
-                (received, heard, silent) = (link.session.received(), Instant::now(), false);
+                (received, heard_at, silent) = (link.session.received(), Instant::now(), false);
                 tell(Event::Entered { call: link.call, you, members: link.session.members().to_vec() });
             }
             Err(rejoin) => return tell(Event::Lost(Lost::Unrecovered { connection: lost, rejoin })),
@@ -425,31 +357,25 @@ async fn run(
     tell(Event::Ended);
 }
 
-/// Joins again after the connection was lost, trying anew for up to [`session::JOIN_TIMEOUT`]
-/// while the server can't take the join yet: one that stops closes its connections, and turns
-/// joins away until it is gone and up again.
 async fn rejoin(server: &str, muted: bool) -> Result<Session, Error> {
     let deadline = Instant::now() + session::JOIN_TIMEOUT;
     loop {
         match tokio::time::timeout_at(deadline, Session::join(server, muted)).await {
             Ok(Ok(session)) => return Ok(session),
-            // An answer that trying again won't change.
             Ok(Err(error @ Error::Rejected(_))) => return Err(error),
             Ok(Err(error)) if Instant::now() + REJOIN_AGAIN_AFTER >= deadline => return Err(error),
+            // A server that stops turns joins away until it is up again.
             Ok(Err(_)) => tokio::time::sleep(REJOIN_AGAIN_AFTER).await,
             Err(_) => return Err(Error::TimedOut),
         }
     }
 }
 
-/// Tells the listener who is in the channel, watched from outside, until it is stopped; a watch
-/// that fails or breaks shows nobody and starts again after a while.
 async fn watch_present(server: String, events: mpsc::Sender<Event>, mut stop: oneshot::Receiver<()>) {
-    // A failed send means the engine is gone, and with it the listener; the watch ends soon.
+    // Fails only once the engine is gone, which stops the watch.
     let tell = |event| _ = events.send(event);
     let watched = async || {
-        // Who is in the channel is a glance before joining: a watch that fails shows nobody,
-        // and why matters only once a join fails too.
+        // Why a watch failed matters only once a join fails too.
         let Ok(mut watch) = Watch::start(&server).await else { return };
         tell(Event::Present(watch.members().to_vec()));
         while watch.changed().await.is_ok() {
@@ -470,22 +396,17 @@ async fn watch_present(server: String, events: mpsc::Sender<Event>, mut stop: on
     tell(Event::Present(Vec::new()));
 }
 
-/// A call's capture, suppressing noise as `suppression` says.
 fn capture(conditioning: Conditioning, suppression: &Suppression) -> Capture {
-    // libopus creates codecs without fail for the fixed formats asked for.
     Capture::new(conditioning, Stage::new(suppression)).expect("the encoder can be created")
 }
 
-/// Everyone in the session's channel but this member.
 fn others(session: &Session) -> BTreeSet<MemberId> {
     session.members().iter().map(|member| member.id).filter(|&id| id != session.you()).collect()
 }
 
-/// The network task's end of the ring to the speaker.
 struct Deliveries {
     ring: Producer<Downlink>,
-    /// Leaves the full ring didn't take yet: unlike a frame, a leave can't be lost, or its
-    /// member's voice stays taken.
+    // Unlike a frame, a leave can't be lost, or its member's voice stays taken.
     lefts: VecDeque<MemberId>,
 }
 
@@ -496,7 +417,7 @@ impl Deliveries {
 
     fn frame(&mut self, from: MemberId, packet: Packet) {
         self.retry();
-        // A full ring means the speaker stopped playing: the frame would be too late anyway.
+        // Full once the speaker stopped playing: the frame would be too late anyway.
         let _ = self.ring.push(Downlink::Frame(from, packet));
     }
 
@@ -538,7 +459,6 @@ mod tests {
 
     impl Listener for Updates {
         fn update(&self, update: Update) {
-            // The test may have stopped listening.
             let _ = self.0.send(update);
         }
     }
@@ -548,7 +468,6 @@ mod tests {
         (Engine::new(Conditioning::Engine, Arc::new(Updates(updates))).unwrap(), received)
     }
 
-    /// Waits for the first update that `wanted` picks.
     fn wait_for<T>(updates: &mpsc::Receiver<Update>, mut wanted: impl FnMut(Update) -> Option<T>) -> T {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -563,7 +482,6 @@ mod tests {
         wait_for(updates, |update| (update.announcement.as_ref() == Some(&announcement)).then_some(update.channel))
     }
 
-    /// Who is in the channel the engine entered, as `(you, members)`.
     fn entered(updates: &mpsc::Receiver<Update>) -> (MemberId, Vec<Member>) {
         wait_for(updates, |update| update.channel.you().map(|you| (you, update.channel.members().to_vec())))
     }
@@ -572,17 +490,14 @@ mod tests {
         members.iter().map(|member| member.id).collect()
     }
 
-    /// A tailnet in which each connection is a device of its own.
     fn own(peer: SocketAddr) -> Option<Device> {
         Some(Device { id: peer.to_string(), name: format!("member {}", peer.port()) })
     }
 
-    /// A room on a new endpoint on localhost, in which each connection is a device of its own.
     fn serve(runtime: &Runtime) -> quinn::Endpoint {
         serve_on(runtime, own)
     }
 
-    /// A room on a new endpoint on localhost whose members `tailnet` tells.
     fn serve_on(runtime: &Runtime, tailnet: impl Tailnet) -> quinn::Endpoint {
         let endpoint = runtime.block_on(async { bukospeak_server::endpoint("127.0.0.1:0".parse().unwrap()) }).unwrap();
         runtime.spawn(Room::new(tailnet, Downloads::none()).serve(endpoint.clone()));
@@ -593,9 +508,6 @@ mod tests {
         endpoint.local_addr().unwrap().to_string()
     }
 
-    /// A UDP relay in front of a server that can turn to another, as a server's address does
-    /// when the server restarts elsewhere, or be cut both ways, as a phone's path is when it
-    /// loses the network.
     struct Relay {
         address: SocketAddr,
         upstream: Arc<Mutex<SocketAddr>>,
@@ -610,7 +522,6 @@ mod tests {
             let upstream = Arc::new(Mutex::new(upstream));
             let cut = Arc::new(AtomicBool::new(false));
             let client = Arc::new(Mutex::new(None));
-            // Datagrams the relay can't pass on are lost, as on any path.
             runtime.spawn({
                 let (front, back, upstream, cut, client) =
                     (Arc::clone(&front), Arc::clone(&back), Arc::clone(&upstream), Arc::clone(&cut), Arc::clone(&client));
@@ -651,8 +562,6 @@ mod tests {
         }
     }
 
-    /// Joins through a relay, then closes the server and turns the relay to `next`; returns
-    /// once the engine announced that it joins again.
     fn lose_connection(server: &Runtime, next: SocketAddr) -> (Engine, mpsc::Receiver<Update>, Joined) {
         let old = serve(server);
         let relay = Relay::new(server, old.local_addr().unwrap());
@@ -678,12 +587,9 @@ mod tests {
         let mut hearing = second.join(&address).unwrap();
         let (hearing_id, members) = entered(&second_updates);
         assert_eq!(ids(&members), [talking_id, hearing_id]);
-        // The first call's updates come after its entry.
         let channel = announced(&first_updates, Announcement::Joined(members[1].name.clone()));
         assert_eq!(channel.members().last().unwrap().id, hearing_id);
 
-        // Two seconds of speech and one of silence, captured and played in real time, in
-        // buffers that don't line up with frames.
         let signal = [voice(2 * SAMPLE_RATE as usize, 0.3), vec![0.0; SAMPLE_RATE as usize]].concat();
         let mut heard = Vec::new();
         let mut next = Instant::now();
@@ -725,7 +631,6 @@ mod tests {
         let _first = engine.join(&address).unwrap();
         assert_eq!(calls(&updates, State::Connected), 1);
         assert_eq!(engine.leave(), 1);
-        // The call's last update, after the leave.
         assert_eq!(calls(&updates, State::Out), 1);
         let _second = engine.join(&address).unwrap();
         assert_eq!(calls(&updates, State::Connected), 2);
@@ -741,9 +646,7 @@ mod tests {
         assert_eq!(back.state(), State::Connected);
         let you = back.you().unwrap();
 
-        // The microphone of the first join sends over the second.
         let mut listener = server.block_on(Session::join(&new.to_string(), false)).unwrap();
-        // Paced as a device captures it: a second at once would be too late to be heard.
         let start = Instant::now();
         for (frame, samples) in voice(SAMPLE_RATE as usize, 0.3).as_chunks::<FRAME_SAMPLES>().0.iter().enumerate() {
             joined.microphone.push(samples, Instant::now());
@@ -778,8 +681,6 @@ mod tests {
         assert_eq!((back.state(), back.you()), (State::Connected, Some(you)));
     }
 
-    /// Makes suppressors that pass the voice through, and counts how many it made and how many
-    /// frames they processed.
     #[derive(Default)]
     struct Counting {
         made: AtomicUsize,
@@ -813,7 +714,6 @@ mod tests {
         }
     }
 
-    /// Pushes a frame of voice into the microphone each frame's time until `done`, for at most 5 s.
     fn speak_until(microphone: &mut Microphone, done: impl Fn() -> bool) {
         let frame = voice(FRAME_SAMPLES, 0.3);
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -840,7 +740,6 @@ mod tests {
 
         engine.set_suppression(Suppression::Plugged(second.clone())).unwrap();
         speak_until(&mut joined.microphone, || second.processed.load(Ordering::Relaxed) > 0);
-        // The first is dropped with the frame the second took over on.
         let before = first.processed.load(Ordering::Relaxed);
         speak_until(&mut joined.microphone, || second.processed.load(Ordering::Relaxed) > 10);
         assert_eq!(first.processed.load(Ordering::Relaxed), before);
@@ -855,7 +754,6 @@ mod tests {
         let (engine, updates) = engine();
         let _joined = engine.join(&relay.address.to_string()).unwrap();
         entered(&updates);
-        // It stops as the server does, and turns away joins while it closes.
         old.close(0u32.into(), b"server stopped");
         announced(&updates, Announcement::Reconnecting);
         thread::sleep(Duration::from_millis(500));
@@ -867,7 +765,6 @@ mod tests {
     #[test]
     fn a_lost_connection_that_cant_join_again_ends_the_call() {
         let server = Runtime::new().unwrap();
-        // A socket nobody answers on.
         let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let (_engine, updates, _joined) = lose_connection(&server, silent.local_addr().unwrap());
 
@@ -903,7 +800,6 @@ mod tests {
         let (channel, lost) = wait_for(&first_updates, |update| update.lost.map(|lost| (update.channel, lost)));
         assert_eq!(channel.state(), State::Out);
         assert!(matches!(lost, Lost::Replaced), "{lost}");
-        // The place stays with the second.
         thread::sleep(Duration::from_millis(500));
         assert!(second_updates.try_iter().all(|update| update.channel.state() == State::Connected));
     }
@@ -950,14 +846,12 @@ mod tests {
         first.leave();
         present(&updates, &[hearing]);
 
-        // Joining stops the watch: the call shows who is in it.
         let _joined = watching.join(&address).unwrap();
         present(&updates, &[]);
         let (you, members) = entered(&updates);
         assert_eq!(ids(&members), [hearing, you]);
     }
 
-    /// What the speaker takes from the ring now, as `(was a leave, member)`.
     fn take(ring: &mut Consumer<Downlink>) -> Vec<(bool, MemberId)> {
         std::iter::from_fn(|| ring.pop().ok())
             .map(|delivered| match delivered {
@@ -978,7 +872,6 @@ mod tests {
         deliveries.frame(second, packet());
         deliveries.left(first);
         deliveries.left(second);
-        // A frame the full ring refuses is lost.
         deliveries.frame(third, packet());
         assert_eq!(take(&mut speaker), [(false, first), (false, second)]);
 
@@ -992,7 +885,6 @@ mod tests {
     fn dropping_waits_for_the_listener() {
         let (engine, updates) = engine();
         drop(engine);
-        // The listener, holding the only sender, is gone with its thread.
         assert_eq!(updates.try_recv().unwrap_err(), mpsc::TryRecvError::Disconnected);
     }
 }

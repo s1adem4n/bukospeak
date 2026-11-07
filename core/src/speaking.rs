@@ -1,22 +1,16 @@
-//! Who speaks right now, written by the audio callbacks and read by the engine's watcher.
-
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 use bukospeak_proto::MemberId;
 
 use crate::playout::VOICES;
 
-/// Lock-free, so the realtime callbacks can write it every frame.
 #[derive(Default)]
 pub struct Speaking {
-    /// The members whose voice plays, in voice order; 0 marks a free slot, since the server
-    /// never hands out id 0.
     voices: [AtomicU16; VOICES],
     you: AtomicBool,
 }
 
 impl Speaking {
-    /// For the speaker, after each frame it rendered.
     pub fn set_voices(&self, members: impl Iterator<Item = MemberId>) {
         let mut members = members.map(|member| member.0);
         for voice in &self.voices {
@@ -24,12 +18,10 @@ impl Speaking {
         }
     }
 
-    /// For the microphone, after each frame it captured.
     pub fn set_you(&self, speaking: bool) {
         self.you.store(speaking, Ordering::Relaxed);
     }
 
-    /// Everyone speaking, `you` among them if this member does, in id order.
     pub fn members(&self, you: MemberId) -> Vec<MemberId> {
         let mut members: Vec<MemberId> =
             self.voices.iter().map(|voice| voice.load(Ordering::Relaxed)).filter(|&id| id != 0).map(MemberId).collect();

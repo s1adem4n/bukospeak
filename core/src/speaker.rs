@@ -1,5 +1,3 @@
-//! The render callback's end of a call: the network task's frames in, the mix out.
-
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -14,15 +12,12 @@ use crate::microphone::Settings;
 use crate::playout::Mixer;
 use crate::speaking::Speaking;
 
-/// What the network task hands the speaker.
 #[expect(clippy::large_enum_variant, reason = "the ring holds frames by value, so delivering one never allocates")]
 pub(crate) enum Downlink {
     Frame(MemberId, Packet),
     Left(MemberId),
 }
 
-/// What the platform's render callback plays: 48 kHz mono, in buffers of any length. Nothing
-/// here allocates, locks or waits.
 pub struct Speaker {
     mixer: Mixer,
     downlink: Consumer<Downlink>,
@@ -30,9 +25,7 @@ pub struct Speaker {
     played: usize,
     speaking: Arc<Speaking>,
     settings: Arc<Settings>,
-    /// Where the mix goes for the microphone, if its echo is the engine's to cancel.
     tap: Option<Tap>,
-    /// Whether the platform's audio stopped calling [`pull`](Self::pull) since it last did.
     stopped: bool,
 }
 
@@ -47,8 +40,6 @@ impl Speaker {
         Self { mixer, downlink, frame: [0.0; FRAME_SAMPLES], played: FRAME_SAMPLES, speaking, settings, tap, stopped: false }
     }
 
-    /// Fills samples for the platform to play, the first of them at `plays`, as the platform
-    /// tells it.
     pub fn pull(&mut self, mut samples: &mut [f32], plays: Instant) {
         if self.stopped {
             self.stopped = false;
@@ -69,8 +60,6 @@ impl Speaker {
         }
     }
 
-    /// For when the platform's audio stops calling [`pull`](Self::pull): nobody shows as
-    /// speaking meanwhile, and what arrived by the time it resumes is too late to play.
     pub fn stopped(&mut self) {
         if let Some(tap) = &mut self.tap {
             tap.stopped();
@@ -89,11 +78,10 @@ impl Speaker {
         self.played = FRAME_SAMPLES;
     }
 
-    /// Mixes the next frame.
     fn render(&mut self) {
         while let Ok(delivered) = self.downlink.pop() {
             match delivered {
-                // Every other member the server admits has a voice, so the insert can't fail.
+                // The server admits no more members than there are voices.
                 Downlink::Frame(from, packet) => _ = self.mixer.insert(from, packet),
                 Downlink::Left(member) => self.mixer.remove(member),
             }

@@ -1,5 +1,3 @@
-//! Signals for tests, at 48 kHz in −1.0..=1.0, and packets of them as they arrive.
-
 use std::f32::consts::{PI, TAU};
 
 use bukospeak_proto::audio::{FRAME_DURATION, FRAME_SAMPLES, Level, SAMPLE_RATE};
@@ -9,11 +7,8 @@ use crate::jitter::Packet;
 
 const RATE: f32 = SAMPLE_RATE as f32;
 
-/// A synthetic voice that RNNoise takes for speech: a 120 Hz pulse train with vibrato, shaped
-/// by the formants of an "a" and spoken in four syllables a second, peaking at `peak`.
 pub fn voice(samples: usize, peak: f32) -> Vec<f32> {
-    // Frequency and bandwidth of the first three formants of "a", in Hz.
-    const FORMANTS: [(f32, f32); 3] = [(700.0, 130.0), (1220.0, 70.0), (2600.0, 160.0)];
+    const A_FORMANTS_HZ_AND_BANDWIDTH: [(f32, f32); 3] = [(700.0, 130.0), (1220.0, 70.0), (2600.0, 160.0)];
     let mut resonators = [(0.0f32, 0.0f32); 3];
     let mut phase = 0.0;
     let voice: Vec<f32> = (0..samples)
@@ -26,7 +21,7 @@ pub fn voice(samples: usize, peak: f32) -> Vec<f32> {
             } else {
                 0.0
             };
-            let shaped: f32 = FORMANTS
+            let shaped: f32 = A_FORMANTS_HZ_AND_BANDWIDTH
                 .iter()
                 .zip(&mut resonators)
                 .map(|(&(frequency, bandwidth), (last, before))| {
@@ -43,12 +38,10 @@ pub fn voice(samples: usize, peak: f32) -> Vec<f32> {
     voice.iter().map(|sample| sample / loudest * peak).collect()
 }
 
-/// White noise of uniform amplitude up to `peak`, the same on every run.
 pub fn noise(samples: usize, peak: f32) -> Vec<f32> {
     noise_from(0x2545_f491, samples, peak)
 }
 
-/// Another [`noise`], unrelated to it, from the nonzero `seed`.
 pub fn noise_from(seed: u32, samples: usize, peak: f32) -> Vec<f32> {
     let mut state = seed;
     (0..samples)
@@ -61,7 +54,6 @@ pub fn noise_from(seed: u32, samples: usize, peak: f32) -> Vec<f32> {
         .collect()
 }
 
-/// A talkspurt of a sine as the sender would encode it, its frames arriving 10 ms apart.
 pub fn talkspurt(frames: u32, frequency: f32, amplitude: f32) -> Vec<Packet> {
     let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip).unwrap();
     encoder.set_bitrate(Bitrate::Bits(48_000)).unwrap();

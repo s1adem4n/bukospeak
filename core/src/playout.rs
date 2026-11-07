@@ -1,9 +1,3 @@
-//! Every sender's voice, decoded and mixed into the frame the output device plays next.
-//!
-//! The render callback owns the mixer: it inserts the frames the network task hands over and
-//! renders one 10 ms frame at a time. All voices and their decoders exist from the start, so
-//! nothing here allocates after construction.
-
 use bukospeak_proto::MemberId;
 use bukospeak_proto::audio::{FRAME_SAMPLES, SAMPLE_RATE};
 use opus::{Channels, Decoder};
@@ -11,11 +5,11 @@ use opus::{Channels, Decoder};
 use crate::jitter::{self, JitterBuffer, Packet, Playout};
 use crate::limiter::limit;
 
-/// The voices a mixer holds: the server admits 16 members, and one of them is this one.
+// The server admits 16 members, one of them this one.
 pub const VOICES: usize = 15;
 
-/// From 5 on libopus conceals lost frames with its neural model, which keeps the voice instead
-/// of fading into noise; more buys only its enhancers, which leave 10 ms frames as they are.
+// From 5 on, libopus conceals loss with its neural model; more buys only enhancers that leave
+// 10 ms frames as they are.
 const DECODER_COMPLEXITY: i32 = 5;
 
 pub struct Mixer {
@@ -30,14 +24,11 @@ struct Voice {
     undecodable: u64,
 }
 
-/// How a member's voice fares, for diagnostics.
 #[cfg_attr(not(test), expect(dead_code, reason = "the apps show it once they have a diagnostics view"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoiceStats {
     pub jitter: jitter::Stats,
-    /// The frames its jitter buffer aims to hold.
     pub target: u32,
-    /// Frames the decoder rejected, or that weren't 10 ms long, and were left silent.
     pub undecodable: u64,
 }
 
@@ -53,8 +44,6 @@ impl Mixer {
         Ok(Self { voices, decoded: [0.0; FRAME_SAMPLES] })
     }
 
-    /// Hands a frame to its sender's voice, giving the sender a free voice on its first frame.
-    /// False if every voice is taken by someone else.
     pub fn insert(&mut self, from: MemberId, packet: Packet) -> bool {
         let voice = match self.voices.iter().position(|voice| voice.member == Some(from)) {
             Some(index) => &mut self.voices[index],
@@ -70,7 +59,6 @@ impl Mixer {
         true
     }
 
-    /// Frees a member's voice once it left the channel.
     pub fn remove(&mut self, member: MemberId) {
         if let Some(voice) = self.voices.iter_mut().find(|voice| voice.member == Some(member)) {
             voice.reset();
@@ -78,13 +66,10 @@ impl Mixer {
         }
     }
 
-    /// Forgets every voice's frames and decoder state, as after the audio engine was interrupted.
     pub fn flush(&mut self) {
         self.voices.iter_mut().for_each(Voice::reset);
     }
 
-    /// Mixes the next 10 ms of every voice into `mix`, at `volume` times their level; the
-    /// limiter keeps the loud mix below full scale.
     pub fn render(&mut self, mix: &mut [f32; FRAME_SAMPLES], volume: f32) {
         mix.fill(0.0);
         for voice in self.voices.iter_mut().filter(|voice| voice.member.is_some()) {
@@ -104,7 +89,6 @@ impl Mixer {
         mix.iter_mut().for_each(|sample| *sample = limit(*sample * volume));
     }
 
-    /// The members whose voice is playing.
     pub fn speaking(&self) -> impl Iterator<Item = MemberId> + '_ {
         self.voices.iter().filter(|voice| voice.buffer.is_playing()).filter_map(|voice| voice.member)
     }
@@ -119,7 +103,6 @@ impl Mixer {
 impl Voice {
     fn reset(&mut self) {
         self.buffer.flush();
-        // libopus resets a decoder it created without fail.
         self.decoder.reset_state().expect("resetting a decoder succeeds");
     }
 }
@@ -137,8 +120,6 @@ mod tests {
         (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
     }
 
-    /// Plays the senders' frames as they arrive, one 10 ms frame at a time, and returns each
-    /// rendered frame's RMS and who spoke during it.
     fn play(mixer: &mut Mixer, senders: &[(MemberId, Vec<Packet>)], frames: u64) -> Vec<(f32, Vec<MemberId>)> {
         play_at(mixer, senders, frames, 1.0)
     }
@@ -164,8 +145,6 @@ mod tests {
         let mut mixer = Mixer::new().unwrap();
         let speaker = MemberId(7);
         let rendered = play(&mut mixer, &[(speaker, talkspurt(50, 440.0, 0.5))], 60);
-        // A sine of amplitude 0.5 has an RMS of 0.35. Playout starts a frame late, at its target
-        // of two frames, and Opus fades in over the first.
         for (rms, speaking) in &rendered[3..50] {
             assert!((0.33..0.38).contains(rms), "rms {rms}");
             assert_eq!(speaking, &[speaker]);
@@ -181,21 +160,17 @@ mod tests {
         let mut mixer = Mixer::new().unwrap();
         let senders = [(MemberId(1), talkspurt(50, 440.0, 0.9)), (MemberId(2), talkspurt(50, 660.0, 0.9))];
         let (rms, speaking) = &play(&mut mixer, &senders, 50)[20];
-        // Each sine alone has an RMS of 0.64; their sum peaks at 1.8, which the limiter bends
-        // below full scale (`play` checks every sample), so the mix is louder but not twice so.
         assert!((0.64..0.9).contains(rms), "rms {rms}");
         assert_eq!(speaking, &[MemberId(1), MemberId(2)]);
     }
 
     #[test]
     fn the_volume_scales_the_mix_and_the_limiter_still_bends_it() {
-        // A sine of amplitude 0.2 has an RMS of 0.14.
         let level =
             |volume, amplitude| play_at(&mut Mixer::new().unwrap(), &[(MemberId(1), talkspurt(50, 440.0, amplitude))], 30, volume)[20].0;
         let (half, double) = (level(0.5, 0.2), level(2.0, 0.2));
         assert!((0.065..0.075).contains(&half), "rms {half} at half the volume");
         assert!((0.27..0.3).contains(&double), "rms {double} at twice the volume");
-        // Twice a loud voice peaks at 1.8, which the limiter bends below full scale.
         assert!(level(2.0, 0.9) < 1.0);
     }
 
@@ -204,7 +179,6 @@ mod tests {
         let mut mixer = Mixer::new().unwrap();
         let packets = talkspurt(50, 440.0, 0.5).into_iter().filter(|packet| packet.index != 20).collect();
         let rendered = play(&mut mixer, &[(MemberId(1), packets)], 50);
-        // Frame 20 plays at tick 21, recovered from frame 21's FEC.
         assert!(rendered[21].0 > 0.2, "the lost frame is near silent: {}", rendered[21].0);
         let stats = mixer.stats(MemberId(1)).unwrap();
         assert_eq!((stats.jitter.recovered, stats.undecodable), (1, 0));
@@ -237,7 +211,6 @@ mod tests {
     #[test]
     fn an_undecodable_frame_is_counted_and_left_silent() {
         let mut mixer = Mixer::new().unwrap();
-        // A TOC byte announcing a 20 ms frame, which the mixer can't fit into 10 ms.
         let garbage = Packet::new(0, true, Level::new(20), 0, &[0xff, 0xff, 0xff]).unwrap();
         mixer.insert(MemberId(1), garbage);
         assert_eq!(play(&mut mixer, &[], 1)[0].0, 0.0);

@@ -13,7 +13,6 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use tokio::sync::mpsc;
 
-/// How long a join may take, from resolving the server to its Welcome.
 pub const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
@@ -60,21 +59,18 @@ impl From<quinn::ReadError> for Error {
     }
 }
 
-/// What happens in the channel after the join.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Joined(Member),
-    /// A member muted or unmuted, or is reconnecting or back; this member too.
     Changed(Member),
     Left(MemberId),
     Audio(audio::Frame),
 }
 
-/// A member's place in the channel, from the join until [`Session::leave`] or the connection is lost.
 pub struct Session {
     endpoint: Endpoint,
     connection: Connection,
-    // Kept open: finishing it tells the server the member left.
+    // Finishing it tells the server the member left.
     send: SendStream,
     control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
     you: MemberId,
@@ -82,9 +78,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// Joins the channel of `server`, as `host:port`, muted or not, in the place it still holds
-    /// for this device if it does; fails if the server doesn't welcome this member within
-    /// [`JOIN_TIMEOUT`].
     pub async fn join(server: &str, muted: bool) -> Result<Self, Error> {
         let (opened, answer) = Opened::with(server, &ClientMessage::Hello { version: PROTOCOL_VERSION, muted }).await?;
         let ServerMessage::Welcome { you, members } = answer else {
@@ -98,28 +91,22 @@ impl Session {
         self.you
     }
 
-    /// Everyone in the channel at the join, this member included; [`Event`]s tell what changes.
     pub fn members(&self) -> &[Member] {
         &self.members
     }
 
-    /// A handle that sends this member's audio, for the thread that encodes it.
     pub fn audio_sender(&self) -> AudioSender {
         AudioSender { connection: Arc::new(Mutex::new(self.connection.clone())) }
     }
 
-    /// How many datagrams came over the connection so far, keep-alives' acknowledgements among
-    /// them: while it stands still, nothing comes from the server.
     pub fn received(&self) -> u64 {
         self.connection.stats().udp_rx.datagrams
     }
 
-    /// Mutes or unmutes this member for the others to see; the microphone's silence is its own.
     pub async fn set_muted(&mut self, muted: bool) -> Result<(), Error> {
         Ok(control::write(&mut self.send, &ClientMessage::Mute { muted }).await?)
     }
 
-    /// The next event; an error means the session is over.
     pub async fn next_event(&mut self) -> Result<Event, Error> {
         loop {
             tokio::select! {
@@ -139,7 +126,6 @@ impl Session {
                     None => return Err(self.connection.closed().await.into()),
                 },
                 datagram = self.connection.read_datagram() => {
-                    // A datagram without a header is noise; the server only relays frames.
                     if let Some(frame) = audio::Frame::decode(&datagram?) {
                         return Ok(Event::Audio(frame));
                     }
@@ -154,10 +140,8 @@ impl Session {
     }
 }
 
-/// Who is in the channel, watched without joining it, from the start until it is dropped or the
-/// connection is lost.
 pub struct Watch {
-    // Kept for the connection: dropping both closes it, which ends the watch at the server.
+    // Dropping them closes the connection, which ends the watch at the server.
     _endpoint: Endpoint,
     _connection: Connection,
     _send: SendStream,
@@ -166,7 +150,6 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Starts watching `server`, or fails if it doesn't answer within [`JOIN_TIMEOUT`].
     pub async fn start(server: &str) -> Result<Self, Error> {
         let (opened, answer) = Opened::with(server, &ClientMessage::Watch { version: PROTOCOL_VERSION }).await?;
         let ServerMessage::Present { members } = answer else {
@@ -176,13 +159,10 @@ impl Watch {
         Ok(Self { _endpoint: endpoint, _connection: connection, _send: send, control, members })
     }
 
-    /// Everyone in the channel, in the order they came.
     pub fn members(&self) -> &[Member] {
         &self.members
     }
 
-    /// Waits until someone joins, changes or leaves, for [`members`](Self::members) to tell who
-    /// is there then; an error means the watch is over.
     pub async fn changed(&mut self) -> Result<(), Error> {
         match self.control.recv().await {
             Some(Ok(ServerMessage::Joined { member })) => self.members.push(member),
@@ -196,18 +176,14 @@ impl Watch {
     }
 }
 
-/// A connection to the server whose first message the server answered.
 pub(crate) struct Opened {
     pub(crate) endpoint: Endpoint,
     pub(crate) connection: Connection,
     pub(crate) send: SendStream,
-    /// The server's messages after its answer.
     pub(crate) control: mpsc::UnboundedReceiver<Result<ServerMessage, control::Error>>,
 }
 
 impl Opened {
-    /// Connects to the server and sends `first`; the server's answer comes along, unless it is
-    /// a Rejected or doesn't come within [`JOIN_TIMEOUT`].
     pub(crate) async fn with(server: &str, first: &ClientMessage) -> Result<(Self, ServerMessage), Error> {
         tokio::time::timeout(JOIN_TIMEOUT, Self::unbounded(server, first)).await.unwrap_or(Err(Error::TimedOut))
     }
@@ -234,26 +210,22 @@ impl Opened {
     }
 }
 
-/// Sends this member's audio over a session's connection; its clones share the connection.
 #[derive(Clone)]
 pub struct AudioSender {
     connection: Arc<Mutex<Connection>>,
 }
 
 impl AudioSender {
-    /// Sends a frame, its `from` left for the server to stamp. A frame the path can't take now is
-    /// dropped, as a late one would be.
     pub fn send(&self, frame: &audio::Frame) -> Result<(), quinn::SendDatagramError> {
         self.connection.lock().expect("the connection lock is never poisoned").send_datagram(Bytes::from(frame.encode()))
     }
 
-    /// Sends over the session's connection from now on, as after joining again.
     pub fn follow(&self, session: &Session) {
         *self.connection.lock().expect("the connection lock is never poisoned") = session.connection.clone();
     }
 }
 
-/// TLS 1.3 that takes any certificate, and keep-alives that hold the path open.
+// The tailnet vouches for the server; TLS, which QUIC can't do without, has nothing to add.
 fn client_config() -> quinn::ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = AnyCertificate { algorithms: provider.signature_verification_algorithms };
@@ -274,9 +246,6 @@ fn client_config() -> quinn::ClientConfig {
     client
 }
 
-/// Takes the certificate the server presents, whichever it is: the tailnet already vouches that
-/// the server is the one asked for, and TLS has nothing to add. The handshake's signatures are
-/// still checked, as TLS can't go on without.
 #[derive(Debug)]
 struct AnyCertificate {
     algorithms: WebPkiSupportedAlgorithms,
@@ -317,26 +286,22 @@ impl ServerCertVerifier for AnyCertificate {
     }
 }
 
-/// Moves the server's control messages into a channel, which `next_event` can wait on beside
-/// datagrams: a read cut off mid-message would lose its part.
+// A read cut off mid-message by select! would lose its part, so a task of its own reads.
 async fn read_control(mut recv: RecvStream, forward: mpsc::UnboundedSender<Result<ServerMessage, control::Error>>) {
     while let Some(message) = control::read(&mut recv).await.transpose() {
         let failed = message.is_err();
-        // A failed send means the session is gone; a failed read ends the stream.
         if forward.send(message).is_err() || failed {
             return;
         }
     }
 }
 
-/// Puts the member in the place of the one with its id, if there is one.
 pub(crate) fn replace(members: &mut [Member], member: Member) {
     if let Some(old) = members.iter_mut().find(|old| old.id == member.id) {
         *old = member;
     }
 }
 
-/// The any-address of the server's family, so the endpoint can reach it.
 fn unspecified_like(server: SocketAddr) -> SocketAddr {
     match server {
         SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),

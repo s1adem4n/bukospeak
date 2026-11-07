@@ -1,5 +1,3 @@
-//! The client side shared by the apps: the engine, and the session and audio processing it runs.
-
 mod capture;
 mod channel;
 mod conditioner;
@@ -22,7 +20,6 @@ mod speaking;
 mod suppression;
 mod uplink;
 
-/// Lets tests assert that the realtime paths don't allocate.
 #[cfg(test)]
 #[global_allocator]
 static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;

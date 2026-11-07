@@ -1,58 +1,40 @@
-//! A sender's frames, from the order and pace the network delivers them to one frame per 10 ms.
-//!
-//! The render callback owns one buffer per sender, so nothing here allocates or blocks after
-//! construction. The buffer waits for its target delay before a talkspurt starts and keeps
-//! close to it while playing: holding too much, it drops the quietest of the next frames; too
-//! little, it inserts concealment before a quiet frame, or wherever it runs dry. Its target
-//! follows the arrival jitter of the last two seconds.
-
 use bukospeak_proto::audio::{FRAME_DURATION, Level, MAX_OPUS_LEN};
 
-/// Frames the buffer can hold: well beyond the longest target.
 const SLOTS: usize = 64;
 
-/// The fewest frames a talkspurt starts with: one to play and one to recover a loss from by FEC.
+// One frame to play and one to recover a loss from by FEC.
 const MIN_TARGET: u32 = 2;
 pub(crate) const MAX_TARGET: u32 = 20;
 
-/// Frames beyond the target the buffer tolerates before it drops one.
 const HEADROOM: u32 = 2;
 
-/// Frames ahead among which a drop looks for the quietest.
 const DROP_WINDOW: u32 = 5;
 
-/// Frames played between two adjustments, so they stay inaudible.
+// Adjustments this far apart stay inaudible.
 const ADJUST_EVERY: u32 = 10;
 
-/// A frame at least this far below full scale is quiet enough to insert concealment before.
 const QUIET: Level = Level::new(45);
 
-/// Concealed frames in a row after which the talkspurt counts as over: its last frame was lost.
+// The talkspurt's last frame was lost.
 const GIVE_UP_AFTER: u32 = 10;
 
-/// A gap in the frames ahead longer than this is a new talkspurt or a long outage: the buffer
-/// starts over rather than concealing through it.
 const MAX_GAP: u32 = 5;
 
 const FRAME_US: u64 = FRAME_DURATION.as_micros() as u64;
 
-// A packet's length is stored as a u16.
 const _: () = assert!(MAX_OPUS_LEN <= u16::MAX as usize);
 
-/// A frame as the buffer holds it: fixed size, so storing it never allocates.
 #[derive(Clone, Copy, Debug)]
 pub struct Packet {
     pub index: u32,
     pub last: bool,
     pub level: Level,
-    /// When it arrived, in microseconds on the receiver's monotonic clock.
     pub arrival_us: u64,
     len: u16,
     opus: [u8; MAX_OPUS_LEN],
 }
 
 impl Packet {
-    /// None if the Opus packet is longer than [`MAX_OPUS_LEN`].
     pub fn new(index: u32, last: bool, level: Level, arrival_us: u64, opus: &[u8]) -> Option<Self> {
         let mut bytes = [0; MAX_OPUS_LEN];
         bytes.get_mut(..opus.len())?.copy_from_slice(opus);
@@ -64,42 +46,26 @@ impl Packet {
     }
 }
 
-/// What to play for the next 10 ms.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Playout<'a> {
-    /// The sender is quiet.
     Silent,
-    /// Decode this Opus packet.
     Frame(&'a [u8]),
-    /// The frame is lost and the next one is here: decode the next frame's Opus packet for the
-    /// copy of the lost one it carries (in-band FEC).
     Fec(&'a [u8]),
-    /// The frame is lost, late or inserted: conceal it with Opus' loss concealment.
     Conceal,
 }
 
-/// What the buffer did with a sender's frames since it was created.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
-    /// Frames played as they arrived.
     pub played: u64,
-    /// Lost frames recovered by FEC.
     pub recovered: u64,
-    /// Lost frames concealed.
     pub concealed: u64,
-    /// Frames skipped because the buffer held too many.
     pub dropped: u64,
-    /// Concealed frames played in addition, because the buffer held too few or waited for a late one.
     pub inserted: u64,
-    /// Frames that arrived after their turn or beyond the window held, and were thrown away.
     pub discarded: u64,
 }
 
-/// One sender's jitter buffer: [`insert`](Self::insert) frames as they arrive and
-/// [`pop`](Self::pop) what to play every 10 ms.
 pub struct JitterBuffer {
-    /// Frames by index modulo [`SLOTS`]. A slot keeps its frame until another overwrites it;
-    /// whether the frame is still to play follows from the state.
+    // A slot keeps its frame until another overwrites it; the state tells whether it's pending.
     slots: [Option<Packet>; SLOTS],
     state: State,
     since_adjustment: u32,
@@ -109,10 +75,8 @@ pub struct JitterBuffer {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
-    /// Between talkspurts. Frames up to `over` belong to the last one and don't start another;
-    /// it is None until the first frame arrives.
+    // Frames up to `over` belong to the last talkspurt and don't start another.
     Idle { over: Option<u32>, waited: u32 },
-    /// `next` plays next; `concealed` frames in a row were concealed before it.
     Playing { next: u32, concealed: u32 },
 }
 
@@ -129,7 +93,6 @@ impl Default for JitterBuffer {
 }
 
 impl JitterBuffer {
-    /// Takes a frame that arrived, unless its turn has passed or it lies beyond the window held.
     pub fn insert(&mut self, packet: Packet) {
         // A late frame still tells how much the delay spreads.
         self.jitter.observe(packet.index, packet.arrival_us);
@@ -137,16 +100,16 @@ impl JitterBuffer {
             && distance(over, packet.index) <= -(SLOTS as i64)
             && self.oldest_pending().is_none()
         {
-            // Far behind the last talkspurt is no straggler: the sender's timeline started over,
-            // and the delays measured on the old one don't compare with the new.
+            // Far behind the last talkspurt, the sender's timeline started over: the old delays
+            // don't compare.
             self.state = State::Idle { over: None, waited };
             self.jitter = Jitter::default();
         }
         if let State::Idle { over, waited } = self.state
             && self.oldest_pending().is_none()
         {
-            // The first frame of a talkspurt anchors the window of pending frames, leaving room
-            // for earlier ones that arrive after it, but not for the last talkspurt's.
+            // Leaves room in the window for earlier frames that arrive later, but not for the last
+            // talkspurt's.
             let anchor = packet.index.wrapping_sub(SLOTS as u32 / 2);
             let over = over.filter(|&over| distance(over, anchor) < 0).unwrap_or(anchor);
             self.state = State::Idle { over: Some(over), waited };
@@ -154,7 +117,7 @@ impl JitterBuffer {
         if let State::Idle { over: Some(over), waited } = self.state
             && distance(over, packet.index) > SLOTS as i64
         {
-            // A frame beyond the window moves it on: the frames it pushes out are too old to wait for.
+            // The frames it pushes out of the window are too old to wait for.
             self.state = State::Idle { over: Some(packet.index.wrapping_sub(SLOTS as u32)), waited };
         }
         if !self.is_pending(packet.index) {
@@ -164,7 +127,6 @@ impl JitterBuffer {
         self.slots[slot(packet.index)] = Some(packet);
     }
 
-    /// The next 10 ms; the render callback asks once per frame it plays.
     pub fn pop(&mut self) -> Playout<'_> {
         self.since_adjustment = self.since_adjustment.saturating_add(1);
         let (next, concealed) = match self.state {
@@ -172,7 +134,6 @@ impl JitterBuffer {
             State::Idle { over, waited } => match self.start(waited) {
                 Some(next) => (next, 0),
                 None => {
-                    // Waiting counts from the talkspurt's first frame on.
                     let waited = if self.oldest_pending().is_some() { waited + 1 } else { 0 };
                     self.state = State::Idle { over, waited };
                     return Playout::Silent;
@@ -181,12 +142,11 @@ impl JitterBuffer {
         };
 
         if let Some(&Packet { level, last, .. }) = self.pending(next) {
-            // Dropping the last frame would lose the talkspurt's end.
             if !last && self.should_drop(next, level) {
                 self.since_adjustment = 0;
                 self.stats.dropped += 1;
                 self.state = State::Playing { next: next.wrapping_add(1), concealed: 0 };
-                // The frame after it takes its 10 ms; no second adjustment follows so soon.
+                // The next frame takes its 10 ms; no second adjustment follows so soon.
                 return self.pop();
             }
             if self.should_insert(next, level) {
@@ -206,10 +166,9 @@ impl JitterBuffer {
         }
 
         match self.oldest_pending() {
-            // Nothing ahead: the frame is late, or the talkspurt's last one was lost. Waiting
-            // for it inserts a frame.
+            // The frame is late, or the talkspurt's last was lost: waiting for it inserts a frame.
             None => self.conceal(next, concealed, true),
-            // Starting over at the frames ahead: those in the gap are too late to play.
+            // The frames in the gap are too late to play.
             Some(oldest) if distance(next, oldest) > i64::from(MAX_GAP) => {
                 self.state = State::Idle { over: Some(oldest.wrapping_sub(1)), waited: 0 };
                 Playout::Silent
@@ -218,12 +177,10 @@ impl JitterBuffer {
         }
     }
 
-    /// Whether a talkspurt is playing, which is when its sender counts as speaking.
     pub fn is_playing(&self) -> bool {
         matches!(self.state, State::Playing { .. })
     }
 
-    /// The frames the buffer aims to hold.
     pub fn target(&self) -> u32 {
         self.jitter.target()
     }
@@ -233,14 +190,11 @@ impl JitterBuffer {
         self.stats
     }
 
-    /// Forgets every frame, as after the audio engine was interrupted.
     pub fn flush(&mut self) {
         self.slots = [None; SLOTS];
         self.state = State::Idle { over: None, waited: 0 };
     }
 
-    /// The first frame of a talkspurt once enough of it is held: its target delay, its last
-    /// frame, or a wait as long as the target, whichever comes first.
     fn start(&mut self, waited: u32) -> Option<u32> {
         let (oldest, newest) = (self.oldest_pending()?, self.newest_pending()?);
         let held = distance(oldest, newest) as u32 + 1;
@@ -260,13 +214,10 @@ impl JitterBuffer {
         Playout::Frame(self.opus(index))
     }
 
-    /// The Opus packet of a frame known to be held.
     fn opus(&self, index: u32) -> &[u8] {
         self.slots[slot(index)].as_ref().expect("the frame is held").opus()
     }
 
-    /// Conceals a frame, inserted or lost, with `next` to play after it; or gives up on the
-    /// talkspurt, `next` included.
     fn conceal(&mut self, next: u32, concealed: u32, inserted: bool) -> Playout<'static> {
         if concealed >= GIVE_UP_AFTER {
             self.state = State::Idle { over: Some(next), waited: 0 };
@@ -281,7 +232,6 @@ impl JitterBuffer {
         Playout::Conceal
     }
 
-    /// Frames held from `next` on, counting the gaps between them.
     fn ahead(&self, next: u32) -> u32 {
         // A next talkspurt held already doesn't make this one too full.
         let end = self.pending_frames().filter(|packet| packet.last).map(|packet| packet.index).min_by_key(|&index| distance(next, index));
@@ -297,16 +247,15 @@ impl JitterBuffer {
         (1..DROP_WINDOW).filter_map(|offset| self.pending(next.wrapping_add(offset))).all(|packet| packet.level <= level)
     }
 
-    /// Not once the talkspurt's last frame is held: then the buffer runs dry on purpose.
     fn should_insert(&self, next: u32, level: Level) -> bool {
         self.ahead(next) + 1 < self.target()
             && level >= QUIET
             && self.since_adjustment >= ADJUST_EVERY
+            // Once the talkspurt's last frame is held, the buffer runs dry on purpose.
             && !self.pending_frames().any(|packet| packet.last)
     }
 
-    /// Whether a frame with this index is still to play: it lies in the window of [`SLOTS`]
-    /// frames after the last one played, so pending frames never share a slot.
+    // Within SLOTS frames of the last played, so pending frames never share a slot.
     fn is_pending(&self, index: u32) -> bool {
         match self.state {
             State::Playing { next, .. } => (0..SLOTS as i64).contains(&distance(next, index)),
@@ -333,7 +282,6 @@ impl JitterBuffer {
         self.pending_frames().map(|packet| packet.index).max_by_key(|&index| distance(reference, index))
     }
 
-    /// The point the window of pending frames starts at, which orders them on the wrapping timeline.
     fn reference(&self) -> Option<u32> {
         match self.state {
             State::Playing { next, .. } => Some(next),
@@ -342,7 +290,6 @@ impl JitterBuffer {
     }
 }
 
-/// How far `to` lies after `from` on a timeline that wraps around.
 fn distance(from: u32, to: u32) -> i64 {
     i64::from(to.wrapping_sub(from) as i32)
 }
@@ -351,17 +298,12 @@ fn slot(index: u32) -> usize {
     index as usize % SLOTS
 }
 
-/// The spread of the arrival delay over the last 200 frames received, two seconds of speech, in
-/// [`Jitter::BUCKETS`] buckets of [`Jitter::BUCKET_FRAMES`]. Counting frames rather than time
-/// keeps the estimate through pauses, so a talkspurt starts with the delay the last one needed.
-///
-/// A frame's relative delay is its arrival time minus its place on the sender's timeline. The
-/// clocks' offset cancels out of the spread, and their drift barely shows in two seconds.
+// Counts frames rather than time, so a talkspurt starts with the delay the last one needed. The
+// clocks' offset cancels out of the spread, and their drift barely shows in 200 frames.
 #[derive(Default)]
 struct Jitter {
     buckets: [Option<Bucket>; Jitter::BUCKETS],
     received: u64,
-    /// The last frame's index, and its place on a timeline that doesn't wrap around.
     last: Option<(u32, i64)>,
 }
 
@@ -413,7 +355,6 @@ mod tests {
 
     const SECOND_US: u64 = 1_000_000;
 
-    /// How long each played frame waited after it was sent, in milliseconds.
     fn delays_ms(played: &[Played], drift_ppm: f64) -> Vec<f64> {
         played
             .iter()
@@ -469,7 +410,6 @@ mod tests {
         let drift_ppm = 1000.0;
         let simulation = Simulation { drift_ppm, ..Simulation::default() };
         let (played, buffer) = simulation.run(0..12_000, 125 * SECOND_US);
-        // 1000 ppm over 120 s are 12 frames: without drops the delay would have grown by 120 ms.
         let delays = delays_ms(&played, drift_ppm);
         let latest = delays[delays.len() - 100..].iter().copied().fold(f64::MIN, f64::max);
         assert!(latest <= 20.0 + f64::from((MIN_TARGET + HEADROOM + 1) * 10), "delay grew to {latest} ms");
@@ -569,7 +509,6 @@ mod tests {
     #[test]
     fn a_talkspurt_s_last_frame_is_never_dropped() {
         let mut buffer = JitterBuffer::default();
-        // The quietest frame in reach, with the next talkspurt held far enough ahead to drop.
         for index in (0..12).chain([20]) {
             let level = Level::new(if index == 11 { 90 } else { 20 });
             buffer.insert(Packet::new(index, index == 11, level, u64::from(index) * FRAME_US, &index.to_be_bytes()).unwrap());
@@ -582,7 +521,6 @@ mod tests {
     #[test]
     fn a_talkspurt_drains_its_end_without_inserting() {
         let mut buffer = JitterBuffer::default();
-        // Early frames come 50 ms late now and then, which raises the target to 6.
         let arrival_us = |index: u32| u64::from(index) * FRAME_US + if index < 20 && index % 4 == 3 { 50_000 } else { 0 };
         let mut arrivals: Vec<u32> = (0..=60).collect();
         arrivals.sort_by_key(|&index| arrival_us(index));

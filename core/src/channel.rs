@@ -1,6 +1,3 @@
-//! The channel as this member sees it, kept from the engine's events: who is in it, who speaks,
-//! and whether the call is up; and what to tell the user aloud about each change.
-
 use std::{fmt, mem};
 
 use bukospeak_proto::MemberId;
@@ -8,58 +5,36 @@ use bukospeak_proto::control::Member;
 
 use crate::session::{self, Error};
 
-/// What happens in the calls, in order; the events between an [`Entered`](Event::Entered) and
-/// the next [`Ended`](Event::Ended) or [`Lost`](Event::Lost) are one call's.
 #[derive(Debug)]
 pub(crate) enum Event {
-    /// The `call`th join of the engine started, or joined again, with everyone in the channel,
-    /// this member included.
-    Entered {
-        call: u64,
-        you: MemberId,
-        members: Vec<Member>,
-    },
+    Entered { call: u64, you: MemberId, members: Vec<Member> },
     Joined(Member),
-    /// A member muted or unmuted, or is reconnecting or back.
     Changed(Member),
     Left(MemberId),
-    /// Who speaks now, in id order, this member among them; sent when it changes.
     Speaking(Vec<MemberId>),
-    /// Nothing came from the server for a while, or the connection was lost and the engine joins
-    /// again.
     Reconnecting,
-    /// Something came from the server again before the connection was lost.
     Heard,
-    /// The call ended with a leave.
     Ended,
-    /// The call ended without a leave.
     Lost(Lost),
-    /// Who is in the channel, watched from outside it; empty when the watch stopped or broke.
     Present(Vec<Member>),
 }
 
-/// Why a call ended without a leave.
 #[derive(Debug, thiserror::Error)]
 pub enum Lost {
-    /// The connection was lost, and joining again failed.
     #[error("{connection}; joining again failed: {rejoin}")]
     Unrecovered { connection: Error, rejoin: Error },
-    /// This device joined again elsewhere, which took the call's place in the channel.
     #[error("this device joined again elsewhere")]
     Replaced,
 }
 
-/// Whether this member is in the channel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum State {
     #[default]
     Out,
     Connected,
-    /// Nothing comes from the server, or the connection was lost and the engine joins again.
     Reconnecting,
 }
 
-/// The channel as this member sees it.
 #[derive(Clone, Debug, Default)]
 pub struct Channel {
     call: u64,
@@ -71,14 +46,10 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// A channel as given rather than as the engine's events made it, to show one without a
-    /// call: `you`, if in it, among `members`, and `speaking` of them speaking.
     pub fn shown(state: State, you: Option<MemberId>, members: Vec<Member>, speaking: Vec<MemberId>) -> Self {
         Self { call: 0, state, you, members, speaking, present: Vec::new() }
     }
 
-    /// Which of the engine's joins the call is, counting from 1; 0 before the first. It stays
-    /// once the call is over, so that its last updates tell it too.
     pub fn call(&self) -> u64 {
         self.call
     }
@@ -87,28 +58,22 @@ impl Channel {
         self.state
     }
 
-    /// This member's id, while in the channel.
     pub fn you(&self) -> Option<MemberId> {
         self.you
     }
 
-    /// Everyone in the channel, this member included, in the order they came; kept while
-    /// joining again, empty when out.
     pub fn members(&self) -> &[Member] {
         &self.members
     }
 
-    /// Who speaks now, in id order, this member among them.
     pub fn speaking(&self) -> &[MemberId] {
         &self.speaking
     }
 
-    /// Who is in the channel while the engine watches it from outside, in the order they came.
     pub fn present(&self) -> &[Member] {
         &self.present
     }
 
-    /// Follows the event, and tells what to say aloud about it, if anything.
     pub(crate) fn apply(&mut self, event: &Event) -> Option<Announcement> {
         match event {
             Event::Entered { call, you, members } => {
@@ -144,7 +109,7 @@ impl Channel {
                 self.state = State::Connected;
                 Some(Announcement::Reconnected)
             }
-            // Who is present is the watch's, which may have started again before the leave ended.
+            // The watch may have started again before the leave ended.
             Event::Ended | Event::Lost(_) => {
                 *self = Self { call: self.call, present: mem::take(&mut self.present), ..Self::default() };
                 None
@@ -157,16 +122,11 @@ impl Channel {
     }
 }
 
-/// What to tell the user aloud about a change, as TeamSpeak does; its text is German.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announcement {
-    /// Someone else joined, by name.
     Joined(String),
-    /// Someone else left, by name.
     Left(String),
-    /// Nothing comes from the server, or the connection was lost and the engine joins again.
     Reconnecting,
-    /// The server is heard again, or the engine joined again after the connection was lost.
     Reconnected,
 }
 
@@ -256,7 +216,6 @@ mod tests {
         let mut channel = Channel::default();
         channel.apply(&entered(1, &[member(1, "first")]));
         assert_eq!(channel.apply(&Event::Reconnecting), Some(Announcement::Reconnecting));
-        // Then the connection is lost too.
         assert_eq!(channel.apply(&Event::Reconnecting), None);
         assert_eq!(channel.state(), State::Reconnecting);
 
@@ -287,7 +246,6 @@ mod tests {
             let mut channel = Channel::default();
             channel.apply(&Event::Present(vec![member(1, "first")]));
             channel.apply(&entered(2, &[member(1, "first"), member(2, "second")]));
-            // The watch, started again on leaving, tells who is there before the leave ends.
             channel.apply(&Event::Present(vec![member(1, "first"), member(2, "second")]));
             channel.apply(&end);
             assert_eq!(channel.present(), [member(1, "first"), member(2, "second")]);

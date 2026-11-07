@@ -1,10 +1,3 @@
-//! The capture callback's end of a call: microphone samples in, frames for the uplink out.
-//!
-//! It frames the samples, takes out the rumble and the speaker's echo where the engine
-//! conditions the signal, numbers the frames on the sender's timeline, and hands them to the
-//! uplink thread, which processes the rest, as a callback might not in time. Nothing here
-//! allocates, locks or waits; it wakes the uplink thread when there is a frame to process.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::Thread;
@@ -17,11 +10,9 @@ use crate::capture::Captured;
 use crate::conditioner::{Conditioning, Filter};
 use crate::echo::Tap;
 
-/// The engine's settings the capture and the speaker follow.
 pub(crate) struct Settings {
     pub echo_cancellation: AtomicBool,
     pub muted: AtomicBool,
-    /// The gain on what the speaker plays, as an `f32`'s bits.
     pub volume: AtomicU32,
 }
 
@@ -31,18 +22,14 @@ impl Default for Settings {
     }
 }
 
-/// What the platform's capture callback feeds: 48 kHz mono, in buffers of any length.
 pub struct Microphone {
-    /// None where the platform's audio conditions the signal.
     filter: Option<Filter>,
     frame: [f32; FRAME_SAMPLES],
     filled: usize,
     next_index: u32,
-    /// When the platform's audio last stopped calling [`push`](Self::push), until it resumes.
     stopped_at: Option<Instant>,
     settings: Arc<Settings>,
-    // Fields drop in order: the ring is abandoned before the uplink is woken a last time, so it
-    // sees that and ends.
+    // Fields drop in order: the ring is abandoned before the uplink's last wake-up, so it ends.
     frames: Producer<Captured>,
     uplink: Uplink,
 }
@@ -56,8 +43,6 @@ impl Drop for Uplink {
 }
 
 impl Microphone {
-    /// Makes the microphone, and where the engine conditions the signal, the speaker's end of
-    /// what it played, whose echo the microphone cancels.
     pub(crate) fn new(
         conditioning: Conditioning,
         frames: Producer<Captured>,
@@ -84,16 +69,13 @@ impl Microphone {
         (microphone, tap)
     }
 
-    /// Takes samples the platform captured, the first of them at `captured`, as the platform
-    /// tells it.
     pub fn push(&mut self, mut samples: &[f32], captured: Instant) {
         if let Some(filter) = &mut self.filter {
             filter.captured(samples.len(), captured);
         }
         if let Some(stopped_at) = self.stopped_at.take() {
-            // The frames meanwhile count as not captured, so the index stays the sender's clock:
-            // listeners measure delay against it. Truncated, the count wraps as the index does
-            // after 497 days anyway.
+            // The index is the sender's clock, which listeners measure delay against; truncated,
+            // the count wraps as the index would.
             self.next_index = self.next_index.wrapping_add((stopped_at.elapsed().as_micros() / FRAME_DURATION.as_micros()) as u32);
         }
         let queued = Instant::now();
@@ -115,9 +97,6 @@ impl Microphone {
         }
     }
 
-    /// Tells the uplink that the platform's audio stopped calling [`push`](Self::push), so it
-    /// ends the speech the input cut short. Once it resumes, the frames meanwhile count as not
-    /// captured.
     pub fn stopped(&mut self) {
         self.filled = 0;
         self.stopped_at = Some(Instant::now());
@@ -125,8 +104,7 @@ impl Microphone {
             filter.stopped();
         }
         let index = self.take_index();
-        // Frames leave the ring's last slot free, so a full ring ends in a stop already, with
-        // only lost frames after it: this one would tell the uplink nothing new.
+        // Frames leave the last slot free, so a full ring ends in a stop already.
         let _ = self.frames.push(Captured::Stopped { index });
         self.uplink.0.unpark();
     }
@@ -134,12 +112,10 @@ impl Microphone {
     fn hand_over(&mut self, queued: Instant) {
         let index = self.take_index();
         let mut samples = if self.settings.muted.load(Ordering::Relaxed) {
-            // Muted, the microphone hears silence, and the gate ends speech as in a pause.
             [0.0; FRAME_SAMPLES]
         } else {
-            // A NaN, infinite or huge sample from a faulty driver would turn RNNoise's state to NaN
-            // for good, and NaN in its spectrum is undefined behavior in its FFT: clip to full
-            // scale, as an integer device would, and take NaN for silence.
+            // A faulty driver's NaN or huge sample would turn RNNoise's state to NaN for good, and
+            // NaN is undefined behavior in its FFT.
             self.frame.map(|sample| if sample.is_nan() { 0.0 } else { sample.clamp(-1.0, 1.0) })
         };
         // Filtered even if it is lost, so the echo canceller's timeline stays the input's.
@@ -147,17 +123,13 @@ impl Microphone {
             filter.set_echo_cancellation(self.settings.echo_cancellation.load(Ordering::Relaxed));
             filter.filter(&mut samples);
         }
-        // The ring's last slot is kept for a stop, so the uplink always learns where the input
-        // stopped. Without room beyond it the uplink fell far behind: the frame is lost, as it
-        // would be on the way, and its missing index tells the uplink so.
+        // The last slot is kept for a stop. Without room beyond it the uplink fell far behind, and
+        // the frame is lost; its missing index tells the uplink so.
         if self.frames.slots() > 1 {
-            // With a slot free, the push can't fail.
             let _ = self.frames.push(Captured::Frame { index, queued, samples });
         }
     }
 
-    /// The next frame's index. It counts a frame lost on the way to the uplink too, so the
-    /// timeline stays true.
     fn take_index(&mut self) -> u32 {
         let index = self.next_index;
         self.next_index = self.next_index.wrapping_add(1);
@@ -195,7 +167,6 @@ mod tests {
     fn buffers_of_any_length_are_framed_and_numbered_in_order() {
         let (mut microphone, mut captured) = microphone(1000, Conditioning::Platform, Arc::default());
         let signal = voice(SAMPLE_RATE as usize, 0.3);
-        // 441 samples, as a 44.1 kHz device's 10 ms would be, never line up with a frame.
         for buffer in signal.chunks(441) {
             microphone.push(buffer, Instant::now());
         }
@@ -238,7 +209,6 @@ mod tests {
 
         thread::sleep(Duration::from_millis(500));
         microphone.push(&voice(SAMPLE_RATE as usize, 0.3), Instant::now());
-        // The samples before the stop that didn't fill a frame are dropped.
         let resumed = index(&drain(&mut captured)[0]);
         assert!(resumed >= 101 + 50, "resumed at frame {resumed}");
     }
@@ -250,7 +220,6 @@ mod tests {
         microphone.stopped();
         assert_eq!(drain(&mut captured).iter().map(index).collect::<Vec<_>>(), [0, 1, 3], "the third frame is lost");
 
-        // A stop in the last slot already ends what came before; the frames after it are lost.
         microphone.push(&[0.1; 3 * FRAME_SAMPLES], Instant::now());
         microphone.stopped();
         microphone.push(&[0.1; FRAME_SAMPLES], Instant::now());

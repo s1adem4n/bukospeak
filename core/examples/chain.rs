@@ -1,11 +1,3 @@
-//! Runs a recording through the capture and plays it as a listener hears it:
-//! `chain IN.wav OUT.wav [--platform] [--raw | --rnnoise]`, 48 kHz mono in and out.
-//!
-//! The capture conditions the signal as on the desktop unless `--platform` says the platform's
-//! audio did, as on the iPhone. It suppresses noise with DeepFilterNet3 where the feature
-//! `deepfilter` builds it in, else or with `--rnnoise` with RNNoise; `--raw` sends the signal
-//! without noise suppression. It prints how much later the listener hears the recording.
-
 use std::error::Error;
 use std::time::Duration;
 
@@ -13,8 +5,7 @@ use bukospeak_core::harness::{self, Options};
 use bukospeak_core::proto::audio::SAMPLE_RATE;
 use bukospeak_core::{Conditioning, Suppression};
 
-/// The excerpt the delay is measured on, in seconds.
-const EXCERPT: (usize, usize) = (5, 10);
+const EXCERPT_SECONDS: (usize, usize) = (5, 10);
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,7 +42,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     writer.finalize()?;
 
     let rate = SAMPLE_RATE as usize;
-    if let (Some(captured), Some(heard)) = (recording.get(EXCERPT.0 * rate..EXCERPT.1 * rate), played.get(EXCERPT.0 * rate..)) {
+    if let (Some(captured), Some(heard)) =
+        (recording.get(EXCERPT_SECONDS.0 * rate..EXCERPT_SECONDS.1 * rate), played.get(EXCERPT_SECONDS.0 * rate..))
+    {
         println!("delay {:?}", harness::delay(captured, heard, Duration::from_millis(100)));
     }
     Ok(())

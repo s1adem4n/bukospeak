@@ -1,82 +1,55 @@
-//! Voice activation: whether a captured frame is speech worth sending.
-//!
-//! A frame counts as voice when RNNoise finds it likely speech and it stands out from the noise
-//! floor, the quietest the room was without speech in the last 1.5 s, both measured after noise
-//! suppression: game audio from the room's speakers may sound like speech, but stays near the
-//! floor. The gate holds open through short pauses, so words aren't cut apart, and the capture
-//! sends a short pre-roll when it opens, so their onsets aren't either.
-
 use bukospeak_proto::audio::Level;
 
-/// RNNoise's voice probability above which a frame may be speech.
 const VOICE_PROBABILITY: f32 = 0.6;
 
-/// How far a frame must stand above the noise floor to be speech, in dB.
+// After suppression, game audio from the room's speakers may sound like speech, but stays near
+// the floor.
 const ABOVE_FLOOR_DB: f32 = 9.0;
 
-/// Frames quieter than this are never speech, however clean the room.
 const QUIETEST_VOICE_DBOV: f32 = -55.0;
 
-/// Frames the gate stays open after the last voice: 300 ms.
+// 300 ms, so words aren't cut apart.
 const HOLD: u32 = 30;
 
-/// Frames before RNNoise tells speech once its input starts, as after the microphone opened or
-/// was unmuted: its first frame comes out faded in by its window. From the next on its voice
-/// probability and output are what they'd be had it run all along.
+// RNNoise's first frame comes out faded in by its window.
 const WARM_UP: u32 = 1;
 
-/// Frames the denoiser needs to learn the room's noise once its input starts: 200 ms. It lets
-/// up to 8 dB more of it through for the first 100 ms, which would raise the floor; and noise
-/// may seem speech to it at times, which only a floor heard before tells apart meanwhile.
+// Until the denoiser learned the room's noise, it lets more through and may take noise for speech.
 pub const SETTLE: u32 = 20;
 
-/// The floor is the quietest frame without speech in this many stretches of
-/// [`FLOOR_STRETCH`] frames: 1.5 s, long enough to span the pauses between words. A stretch
-/// without one keeps what it had, so sound that is all likely speech, like game music, doesn't
-/// make the gate forget the room.
+// 1.5 s spans the pauses between words. A stretch without a quiet frame keeps its old one, so game
+// music RNNoise takes for speech doesn't make the gate forget the room.
 const FLOOR_STRETCHES: usize = 15;
 const FLOOR_STRETCH: u32 = 10;
 
-/// What to do with a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// Not speech: don't send it.
     Quiet,
-    /// Speech starts: send the pre-roll, then this frame.
     Opens,
-    /// Speech goes on: send it.
     Speaks,
-    /// The pause outlasted the hold: send it as the talkspurt's last frame.
     Closes,
 }
 
 pub struct Gate {
-    /// Frames left before the gate closes, or None while it is closed.
     open_for: Option<u32>,
-    /// Frames since the input started, up to [`SETTLE`].
     started: u32,
-    /// The quietest frame without speech in each recent stretch, in dBov.
     quietest: [Option<f32>; FLOOR_STRETCHES],
-    /// Whether the current stretch had a frame without speech yet.
-    heard: bool,
-    /// Frames the floor followed, which tells the stretch.
+    stretch_has_quiet: bool,
     frames: u32,
 }
 
 impl Default for Gate {
     fn default() -> Self {
-        Self { open_for: None, started: 0, quietest: [None; FLOOR_STRETCHES], heard: false, frames: 0 }
+        Self { open_for: None, started: 0, quietest: [None; FLOOR_STRETCHES], stretch_has_quiet: false, frames: 0 }
     }
 }
 
 impl Gate {
-    /// Decides on a frame by RNNoise's voice probability for it, its level after noise
-    /// suppression, and whether it was captured with a `signal`, rather than digital silence.
     pub fn decide(&mut self, voice_probability: f32, level: Level, signal: bool) -> Decision {
         let dbov = -f32::from(level.minus_dbov());
         let likely_speech = voice_probability >= VOICE_PROBABILITY;
-        // Digital silence captured is no signal rather than a quiet room: the input starts anew
-        // after it. Silence the suppression made of noise is the room, as it sounds.
+        // Digital silence captured means the input stopped; silence the suppression made of noise
+        // is the room.
         let started = if !signal {
             self.started = 0;
             None
@@ -89,10 +62,8 @@ impl Gate {
             self.track_floor(dbov, likely_speech);
         }
         let floor = self.floor_dbov();
-        // Once unmuted, the floor from before tells speech; in a room not heard yet, the
-        // denoiser settles first.
+        // After unmuting, the floor heard before tells speech; in a new room the denoiser settles first.
         let ready = started.is_some_and(|frames| frames == SETTLE || frames >= WARM_UP && floor.is_some());
-        // Before the room was heard without speech, its floor is unknown and doesn't count.
         let above_floor = floor.is_none_or(|floor| dbov >= floor + ABOVE_FLOOR_DB);
         let voice = ready && likely_speech && dbov >= QUIETEST_VOICE_DBOV && above_floor;
 
@@ -107,8 +78,6 @@ impl Gate {
         decision
     }
 
-    /// Closes the gate for input that stopped, so the next frame starts anew, as after digital
-    /// silence; whether it was open, with a talkspurt to end.
     pub fn end(&mut self) -> bool {
         self.started = 0;
         self.open_for.take().is_some()
@@ -117,12 +86,12 @@ impl Gate {
     fn track_floor(&mut self, dbov: f32, likely_speech: bool) {
         let stretch = (self.frames / FLOOR_STRETCH) as usize % FLOOR_STRETCHES;
         if self.frames.is_multiple_of(FLOOR_STRETCH) {
-            self.heard = false;
+            self.stretch_has_quiet = false;
         }
         if !likely_speech {
-            let quietest = self.quietest[stretch].filter(|_| self.heard).map_or(dbov, |quietest| quietest.min(dbov));
+            let quietest = self.quietest[stretch].filter(|_| self.stretch_has_quiet).map_or(dbov, |quietest| quietest.min(dbov));
             self.quietest[stretch] = Some(quietest);
-            self.heard = true;
+            self.stretch_has_quiet = true;
         }
         // Wrapping after 497 days starts a stretch early, which the floor doesn't mind.
         self.frames = self.frames.wrapping_add(1);
@@ -144,7 +113,6 @@ mod tests {
         Level::new(dbov)
     }
 
-    /// A gate past the denoiser's settling, in a room it hasn't heard without speech yet.
     fn settled() -> Gate {
         Gate { started: SETTLE, ..Gate::default() }
     }
@@ -222,11 +190,9 @@ mod tests {
     #[test]
     fn speech_like_sound_near_a_risen_floor_stays_quiet_while_louder_speech_opens() {
         let mut gate = settled();
-        // Game audio at -30 dBov sets the floor, ...
         for _ in 0..200 {
             assert_eq!(gate.decide(NOISE, level(30), true), Decision::Quiet);
         }
-        // ... so a voice line in the game at that level, or a little louder, stays quiet.
         assert_eq!(gate.decide(SPEECH, level(30), true), Decision::Quiet);
         assert_eq!(gate.decide(SPEECH, level(25), true), Decision::Quiet);
         assert_eq!(gate.decide(SPEECH, level(15), true), Decision::Opens);
@@ -245,7 +211,6 @@ mod tests {
         for _ in 0..200 {
             gate.decide(NOISE, level(35), true);
         }
-        // Game music RNNoise takes for speech, a little above the floor, for longer than the floor spans.
         for _ in 0..1000 {
             assert_eq!(gate.decide(SPEECH, level(30), true), Decision::Quiet);
         }
@@ -311,12 +276,10 @@ mod tests {
         for _ in 0..200 {
             gate.decide(NOISE, level(60), true);
         }
-        // The game starts.
         for _ in 0..150 {
             gate.decide(NOISE, level(30), true);
         }
         assert_eq!(gate.decide(SPEECH, level(25), true), Decision::Quiet);
-        // The game stops.
         for _ in 0..30 {
             gate.decide(NOISE, level(60), true);
         }
