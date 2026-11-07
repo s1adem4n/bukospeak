@@ -1,14 +1,11 @@
 import SwiftUI
 
-/// A member: their avatar in a ring that lights up and lifts while they speak, and their name;
-/// faded while they reconnect.
 struct MemberTile: View {
     let member: Member
     let speaks: Bool
     let isMuted: Bool
 
     private static let avatar: CGFloat = 72
-    /// The space between the avatar and its ring, and the ring's width.
     private static let gap: CGFloat = 4
     private static let ring: CGFloat = 3
 

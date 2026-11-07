@@ -1,14 +1,10 @@
 import SwiftUI
 
-/// The channel: before a call the start screen, in a call who is in it and the controls. The
-/// settings and the first launch's welcome come up over it.
 struct ChannelView: View {
     @Environment(Call.self) private var call
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsSettings = false
-    /// Whether the welcome sheet asks for what a join needs, as on the first launch.
     @State private var isOnboarding = false
-    /// Where the logo on the start screen becomes the microphone button of the call.
     @Namespace private var stage
 
     var body: some View {
@@ -53,19 +49,16 @@ struct ChannelView: View {
 
     private var isInCall: Bool {
         switch call.phase {
-        // Joining shows the channel at once, with who the start screen showed.
         case .joining, .connected, .reconnecting: true
         case .idle, .failed: false
         }
     }
 
-    /// The server the start screen watches while it shows in the foreground.
     private var watched: String? {
         guard scenePhase == .active, !isInCall else { return nil }
         return call.settings.server
     }
 
-    /// Without a server, joining opens the settings to fill it in.
     private func join() {
         if call.settings.isComplete {
             Task { await call.join() }

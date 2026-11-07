@@ -1,6 +1,5 @@
 import SwiftUI
 
-/// The logo: a silver stage microphone, `height` high.
 struct BrandMark: View {
     let height: CGFloat
 

@@ -3,60 +3,43 @@ import CallKit
 import Observation
 import os
 
-/// The call, which joins and leaves the channel through CallKit: the system treats it like a
-/// phone call, so it keeps the app and the microphone while the screen is locked and gives
-/// them back after another call.
+// Through CallKit the system keeps the app and microphone while the screen is locked and
+// gives them back after another call.
 @Observable
 final class Call: NSObject {
     enum Phase: Equatable {
         case idle
         case joining
         case connected
-        /// Nothing comes from the server, or the connection was lost and the engine joins again.
         case reconnecting
         case failed(String)
     }
 
     private(set) var phase = Phase.idle
-    /// Everyone in the channel, this member included.
     private(set) var members: [Member] = []
     private(set) var speaking: Set<UInt16> = []
     private(set) var you: UInt16?
     private(set) var isMuted = false
-    /// Whether another call holds this one.
     private(set) var isHeld = false
-    /// Who is in the channel, watched from the start screen.
     private(set) var present: [Member] = []
-    /// When the call came up, joining again within it included; nil out of a call.
     private(set) var since: Date?
 
     @ObservationIgnored let settings: Settings
     @ObservationIgnored private let engine: Engine
     @ObservationIgnored private let controller = CXCallController()
-    /// Made on the first join: a provider tells the system the app makes calls.
     @ObservationIgnored private lazy var provider: CXProvider = {
         let provider = CXProvider(configuration: Self.configuration)
         provider.setDelegate(self, queue: nil)
         return provider
     }()
-    /// The call CallKit knows, from asking it to start until it ended.
     @ObservationIgnored private var id: UUID?
-    /// Whether CallKit activated the audio session for the call.
     @ObservationIgnored private var isSessionActive = false
-    /// Whether an interruption took the active session away.
     @ObservationIgnored private var isInterrupted = false
-    /// Whether the call plays on the microphone and speaker.
     @ObservationIgnored private var isPlaying = false
-    /// The engine's call left last: updates of it or of one before, still on their way, are
-    /// stale.
     @ObservationIgnored private var leftCall: UInt64 = 0
-    /// The engine's state of the call, which may join again before its join came back here.
     @ObservationIgnored private var engineState = ChannelUpdate.State.out
-    /// The leave of the call before, which a join waits for.
     @ObservationIgnored private var leaving: Task<Void, Never>?
-    /// The call's join, under way from the tap while CallKit starts the call.
     @ObservationIgnored private var joining: Task<Result<Void, EngineError>, Never>?
-    /// When the user tapped to join, for the log to tell how long each step of the join took.
     @ObservationIgnored private var tapped = ContinuousClock.now
 
     private static let log = Logger(subsystem: "digital.buko.BukoSpeak", category: "call")
@@ -88,12 +71,10 @@ final class Call: NSObject {
         }
     }
 
-    /// Starts a call that joins the channel.
     func join() async {
         guard id == nil, phase != .joining else { return }
         tapped = .now
         phase = .joining
-        // Who the start screen showed, until the server tells who is in the channel.
         members = present
         await leaving?.value
         guard await AudioSession.microphoneAllowed() else {
@@ -103,12 +84,11 @@ final class Call: NSObject {
         }
         let id = UUID()
         self.id = id
-        // Under way while CallKit starts the call, which takes about as long as the join.
+        // Runs while CallKit starts the call, which takes about as long.
         joining = Task { await joinChannel() }
         let start = CXStartCallAction(call: id, handle: CXHandle(type: .generic, value: "BukoSpeak"))
-        // Configured again before every call: iOS can otherwise hold on to a stale audio session
-        // for the provider and never activate the new call's
-        // (https://developer.apple.com/forums/thread/837211).
+        // Set before every call: iOS may otherwise keep a stale audio session and never
+        // activate the new call's (https://developer.apple.com/forums/thread/837211).
         provider.configuration = Self.configuration
         do {
             try await controller.request(CXTransaction(action: start))
@@ -118,7 +98,6 @@ final class Call: NSObject {
         }
     }
 
-    /// Ends the call: over on the screen at once, while CallKit takes a moment to hear of it.
     func leave() async {
         guard let id else { return }
         end(failure: nil)
@@ -130,7 +109,6 @@ final class Call: NSObject {
         await request(CXSetMutedCallAction(call: id, muted: !isMuted))
     }
 
-    /// Watches who is in the channel while `on`, for the start screen: only out of a call.
     func watch(_ on: Bool) {
         if on, id == nil, settings.isComplete {
             engine.watch(server: settings.server.trimmingCharacters(in: .whitespaces))
@@ -139,12 +117,10 @@ final class Call: NSObject {
         }
     }
 
-    /// Applies the noise suppression setting to the call.
     func noiseSuppressionChanged() {
         engine.setNoiseSuppression(settings.noiseSuppression)
     }
 
-    /// Applies the volume setting to the call.
     func volumeChanged() {
         engine.setVolume(settings.volume)
     }
@@ -158,7 +134,6 @@ final class Call: NSObject {
         return configuration
     }
 
-    /// What the call can do: be held for another call, nothing more.
     private static var capabilities: CXCallUpdate {
         let update = CXCallUpdate()
         update.localizedCallerName = "BukoSpeak"
@@ -178,7 +153,6 @@ final class Call: NSObject {
         }
     }
 
-    /// Joins the channel with the settings.
     private func joinChannel() async -> Result<Void, EngineError> {
         engine.setNoiseSuppression(settings.noiseSuppression)
         engine.setMuted(isMuted)
@@ -191,13 +165,11 @@ final class Call: NSObject {
         }
     }
 
-    /// Logs a step of the join, with how long after the tap it came.
     private func logStep(_ step: String) {
         let milliseconds = Int((ContinuousClock.now - tapped) / .milliseconds(1))
         Self.log.info("\(step, privacy: .public): \(milliseconds) ms after the tap")
     }
 
-    /// Follows the engine's state once the join came back.
     private func connected() {
         phase = engineState == .reconnecting ? .reconnecting : .connected
         if since == nil { since = .now }
@@ -205,9 +177,8 @@ final class Call: NSObject {
     }
 
     private func update(_ update: ChannelUpdate) {
-        // Watched out of a call, so before the guard for one.
         if present != update.present { present = update.present }
-        // Out of a call, or of one left whose last updates still arrive.
+        // Updates of a call already left can still arrive.
         guard id != nil, update.call > leftCall else { return }
         let changed = update.state != engineState
         engineState = update.state
@@ -225,9 +196,7 @@ final class Call: NSObject {
         }
     }
 
-    /// Plays the call on the microphone and speaker exactly while it is up, not held and its
-    /// audio session active: CallKit may activate the session before the join is done. It plays
-    /// on while reconnecting, which a dropout of seconds may be, and the engine keeps them.
+    // CallKit may activate the session before the join is done.
     private func updateAudio() {
         let isUp = phase == .connected || phase == .reconnecting
         let plays = isUp && !isHeld && isSessionActive && !isInterrupted
@@ -244,7 +213,6 @@ final class Call: NSObject {
         isPlaying = plays
     }
 
-    /// Ends the call the audio was started for if it didn't start, unless that call is over.
     private func audioStarted(_ failure: AudioError?, for call: UUID?) {
         guard id == call else { return }
         if let failure {
@@ -254,23 +222,19 @@ final class Call: NSObject {
         logStep("the call's audio plays")
     }
 
-    /// Ends a call that is up, after telling CallKit it failed.
     private func fail(_ reason: String) {
         guard let id else { return }
         provider.reportCall(with: id, endedAt: nil, reason: .failed)
         end(failure: reason)
     }
 
-    /// Forgets the call, with why if it failed, and leaves the channel: the app shows the call
-    /// over at once, while the leave stops the audio, waits for the server, and a join waits for
-    /// the leave.
     private func end(failure: String?) {
         // First, so a join under way sees the call is over.
         id = nil
         // Not cancelled: the leave below waits for it, then leaves the call it joined.
         joining = nil
-        // The leave stops the audio off the main thread: disposing the voice unit takes long
-        // enough to freeze the screen.
+        // The leave stops the audio off the main thread: disposing the voice unit freezes
+        // the screen.
         isPlaying = false
         engineState = .out
         members = []
@@ -325,8 +289,7 @@ final class Call: NSObject {
         }
     }
 
-    /// Activates the audio session again after it was taken away, the one case CallKit leaves
-    /// to the app; if that fails, the call waits for CallKit to activate it.
+    // The one reactivation CallKit leaves to the app; on failure the call waits for CallKit.
     private func reactivateSession() {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
@@ -340,7 +303,6 @@ final class Call: NSObject {
 
 extension Call: @MainActor CXProviderDelegate {
     func providerDidReset(_ provider: CXProvider) {
-        // CallKit ended every call.
         isSessionActive = false
         end(failure: nil)
     }
@@ -417,7 +379,6 @@ extension Call: @MainActor CXCallObserverDelegate {
 }
 
 extension EngineError {
-    /// What to tell the user, or `otherwise` for a failure the engine doesn't tell apart.
     func text(otherwise: String) -> String {
         switch reason {
         case .stranger: "Nicht im Tailnet des Servers"

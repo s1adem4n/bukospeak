@@ -1,7 +1,5 @@
 import SwiftUI
 
-/// A member's initial on a color of their own, the same their name gets in the desktop app; a
-/// silhouette without a name.
 struct Avatar: View {
     let name: String
     let size: CGFloat
@@ -23,8 +21,7 @@ struct Avatar: View {
         .overlay { Circle().strokeBorder(.primary.opacity(0.08), lineWidth: 1) }
     }
 
-    /// The background and the initial's color: a hue from the name, deep in the dark and pale in
-    /// the light, as the desktop app picks them.
+    // As the desktop app picks them, so a name gets the same colors in both.
     private var colors: (Color, Color) {
         guard !name.isEmpty else { return (Color(.systemGray4), Color(.systemGray)) }
         let hue = Self.hues[Int(Self.hash(name) % UInt32(Self.hues.count))] / 360
@@ -35,14 +32,12 @@ struct Avatar: View {
 
     private static let hues: [Double] = [212, 258, 328, 18, 40, 152, 184, 352]
 
-    /// FNV-1a of the name's UTF-8: the desktop app's hash, so a name gets the same hue in both.
     private static func hash(_ name: String) -> UInt32 {
         name.utf8.reduce(0x811c_9dc5) { hash, byte in (hash ^ UInt32(byte)) &* 0x0100_0193 }
     }
 }
 
 extension Color {
-    /// A color by hue, saturation and lightness, as the desktop app's colors are given.
     fileprivate init(hue: Double, saturation: Double, lightness: Double) {
         let brightness = lightness + saturation * min(lightness, 1 - lightness)
         self.init(hue: hue, saturation: brightness == 0 ? 0 : 2 * (1 - lightness / brightness), brightness: brightness)

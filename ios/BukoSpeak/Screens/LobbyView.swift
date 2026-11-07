@@ -1,10 +1,7 @@
 import SwiftUI
 
-/// The start screen, out of a call: the logo in its light, the server and who is in the channel
-/// there, and the button to join; after a failed call, why, and the button to join again.
 struct LobbyView: View {
     @Environment(Call.self) private var call
-    /// Where the logo becomes the call's microphone button.
     let stage: Namespace.ID
     let join: () -> Void
 
@@ -47,13 +44,11 @@ struct LobbyView: View {
         call.settings.server.trimmingCharacters(in: .whitespaces)
     }
 
-    /// Why the last call failed.
     private var failure: String? {
         guard case .failed(let message) = call.phase else { return nil }
         return message
     }
 
-    /// Who is in the channel, before joining it.
     @ViewBuilder private var present: some View {
         if !call.present.isEmpty {
             VStack(spacing: 10) {

@@ -1,6 +1,5 @@
 import SwiftUI
 
-/// The light the logo stands in on the start screen: a soft cone from above.
 struct Spotlight: View {
     var body: some View {
         EllipticalGradient(

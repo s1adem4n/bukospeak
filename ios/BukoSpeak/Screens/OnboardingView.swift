@@ -1,6 +1,5 @@
 import SwiftUI
 
-/// The first launch's sheet: where the channel is, until there is enough to join.
 struct OnboardingView: View {
     @Environment(Call.self) private var call
     @Environment(\.dismiss) private var dismiss

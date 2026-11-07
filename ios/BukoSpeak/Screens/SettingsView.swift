@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// How the call sounds, and the server: in the desktop app's order, each kept as it is changed.
+// In the desktop app's order.
 struct SettingsView: View {
     @Environment(Call.self) private var call
     @Environment(\.dismiss) private var dismiss
