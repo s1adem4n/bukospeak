@@ -1,5 +1,8 @@
+use std::path::Path;
+use std::sync::Arc;
+
 use crate::audio::{self, Direction};
-use crate::games;
+use crate::games::{self, Chosen, Listing, Program};
 use crate::install::Progress;
 use crate::settings::Suppression;
 use bukospeak_core::MAX_VOLUME;
@@ -9,8 +12,12 @@ use gpui::{
 };
 
 use crate::ui::client::Client;
-use crate::ui::kit::menu::{Item, Menu};
-use crate::ui::kit::{self, InlineField, InlineFieldEvent, InputLevel, Slider, SliderEvent, Spinner, Switch, h_flex, v_flex};
+use crate::ui::glyph::Glyph;
+use crate::ui::kit::menu::{Entries, Item, Menu, Place, Popover};
+use crate::ui::kit::{
+    self, AppIcon, Button, Icon, InlineField, InlineFieldEvent, InputLevel, Size, Slider, SliderEvent, Spinner, Switch, Variant, h_flex,
+    v_flex,
+};
 use crate::ui::theme::{self, ActiveTokens, Typeset};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,7 +43,7 @@ fn choices(devices: impl IntoIterator<Item = (String, String)>, kept: Option<&st
 enum Opened {
     Device(Direction),
     Suppression,
-    Games,
+    AddGame,
 }
 
 const SUPPRESSIONS: [(Suppression, &str); 4] = [
@@ -52,11 +59,12 @@ pub struct Settings {
     inputs: Vec<Choice>,
     outputs: Vec<Choice>,
     volume: Entity<Slider>,
-    programs: Vec<String>,
+    programs: Listing,
     level: Entity<InputLevel>,
     menu: Option<(Opened, Entity<Menu>, Subscription)>,
     _subscriptions: Vec<Subscription>,
-    _listing: Task<()>,
+    _devices: Task<()>,
+    _programs: Task<()>,
 }
 
 impl Settings {
@@ -81,10 +89,10 @@ impl Settings {
                 settings.client.update(cx, |client, cx| client.set_volume(event.value as u16, event.done, cx));
             }),
         ];
-        let host = std::sync::Arc::clone(client.read(cx).host());
-        let listing = cx.spawn(async move |settings, cx| {
-            // Listing asks the sound server and the system: not on the window's thread.
-            let (inputs, outputs, programs) = cx
+        let host = Arc::clone(client.read(cx).host());
+        let devices = cx.spawn(async move |settings, cx| {
+            // Listing asks the sound server: not on the window's thread.
+            let (inputs, outputs) = cx
                 .background_spawn(async move {
                     let list = |direction| {
                         host.devices(direction).unwrap_or_else(|error| {
@@ -92,7 +100,7 @@ impl Settings {
                             Vec::new()
                         })
                     };
-                    (list(Direction::Input), list(Direction::Output), host.programs())
+                    (list(Direction::Input), list(Direction::Output))
                 })
                 .await;
             let _ = settings.update(cx, |settings, cx| {
@@ -100,12 +108,11 @@ impl Settings {
                 let read = settings.client.read(cx);
                 settings.inputs = choices(named(inputs), read.settings.device_id(Direction::Input));
                 settings.outputs = choices(named(outputs), read.settings.device_id(Direction::Output));
-                settings.programs = programs;
                 cx.notify();
             });
         });
-        Self {
-            programs: Vec::new(),
+        let mut settings = Self {
+            programs: Listing::default(),
             inputs: kept_choice(kept_input),
             outputs: kept_choice(kept_output),
             client,
@@ -114,8 +121,51 @@ impl Settings {
             level,
             menu: None,
             _subscriptions: subscriptions,
-            _listing: listing,
+            _devices: devices,
+            _programs: Task::ready(()),
+        };
+        settings._programs = settings.watch_programs(cx);
+        settings
+    }
+
+    /// Lists the programs now and then every few seconds, so what runs shows as it starts.
+    fn watch_programs(&self, cx: &mut Context<Self>) -> Task<()> {
+        let host = Arc::clone(self.client.read(cx).host());
+        cx.spawn(async move |settings, cx| {
+            loop {
+                let Ok(chosen) = settings.read_with(cx, |settings, cx| settings.client.read(cx).settings.games.clone()) else {
+                    return;
+                };
+                let host = host.clone();
+                // Listing asks the system and reads programs' files: not on the window's thread.
+                let programs = cx.background_spawn(async move { host.programs(&chosen) }).await;
+                if settings.update(cx, |settings, cx| settings.listed(programs, cx)).is_err() {
+                    return;
+                }
+                cx.background_executor().timer(games::LOOK).await;
+            }
+        })
+    }
+
+    fn listed(&mut self, programs: Listing, cx: &mut Context<Self>) {
+        self.programs = programs;
+        if let Some((Opened::AddGame, menu, _)) = &self.menu {
+            let entries = self.games_to_add(cx);
+            menu.update(cx, |menu, cx| menu.set_entries(entries, cx));
         }
+        cx.notify();
+    }
+
+    /// Chooses `game` or lets it go, shown at once; the listing that follows confirms it.
+    fn set_game(&mut self, game: &str, on: bool, cx: &mut Context<Self>) {
+        self.client.update(cx, |client, cx| client.set_game(game, on, cx));
+        if on {
+            self.programs.choose(game)
+        } else {
+            self.programs.unchoose(game)
+        }
+        self._programs = self.watch_programs(cx);
+        cx.notify();
     }
 
     fn render_device(&self, direction: Direction, cx: &mut Context<Self>) -> AnyElement {
@@ -144,7 +194,7 @@ impl Settings {
         };
         let kept = self.client.read(cx).settings.device_id(direction).map(str::to_owned);
         let client = self.client.downgrade();
-        let menu = Menu::open(window, cx, |menu| {
+        let menu = Menu::open(window, cx, {
             let item = |choice: &Choice| {
                 let (client, id) = (client.clone(), choice.id.clone());
                 Item::new(choice.title.clone(), move |_, cx| {
@@ -154,9 +204,7 @@ impl Settings {
                 .disabled(choice.missing)
             };
             let (standard, devices) = choices.split_first().expect("the default is a choice");
-            let menu = menu.item(item(standard));
-            let menu = if devices.is_empty() { menu } else { menu.separator() };
-            devices.iter().fold(menu, |menu, choice| menu.item(item(choice)))
+            devices.iter().fold(Entries::default().item(item(standard)).separator(), |entries, choice| entries.item(item(choice)))
         });
         self.show(Opened::Device(direction), menu, cx);
     }
@@ -202,7 +250,7 @@ impl Settings {
         let read = self.client.read(cx);
         let (chosen, nvidia) = (read.settings.suppression, read.nvidia.is_some());
         let client = self.client.downgrade();
-        let menu = Menu::open(window, cx, |menu| {
+        let menu = Menu::open(window, cx, {
             let item = |&(suppression, title): &(Suppression, &'static str)| {
                 let client = client.clone();
                 Item::new(title, move |_, cx| {
@@ -211,45 +259,98 @@ impl Settings {
                 .checked(suppression == chosen)
             };
             let (built_in, nvidias) = SUPPRESSIONS.split_at(2);
-            let menu = built_in.iter().fold(menu, |menu, choice| menu.item(item(choice)));
+            let entries = built_in.iter().fold(Entries::default(), |entries, choice| entries.item(item(choice)));
             match nvidia {
-                true => nvidias.iter().fold(menu.separator().heading("NVIDIA"), |menu, choice| menu.item(item(choice))),
-                false => menu,
+                true => nvidias.iter().fold(entries.separator().heading("NVIDIA"), |entries, choice| entries.item(item(choice))),
+                false => entries,
             }
         });
         self.show(Opened::Suppression, menu, cx);
     }
 
-    fn render_games(&self, cx: &mut Context<Self>) -> AnyElement {
-        let games = &self.client.read(cx).settings.games;
-        let chosen = match games.as_slice() {
-            [] => "Keinem".to_owned(),
-            games => games.iter().map(|game| games::title(game)).collect::<Vec<_>>().join(", "),
-        };
-        let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::Games).map(|(_, menu, _)| menu);
-        kit::menu_row("games", "Beitreten bei", chosen, open, cx.listener(|settings, _, window, cx| settings.open_games(window, cx)), cx)
+    /// The games chosen, one row each, and the row that adds one.
+    fn render_games(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut rows: Vec<AnyElement> =
+            self.programs.chosen.iter().enumerate().map(|(index, chosen)| self.render_chosen(index, chosen, cx)).collect();
+        rows.push(self.render_add_game(cx));
+        rows
     }
 
-    fn open_games(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kept = self.client.read(cx).settings.games.clone();
-        let running: Vec<String> =
-            self.programs.iter().filter(|program| !kept.iter().any(|game| game.eq_ignore_ascii_case(program))).cloned().collect();
-        let client = self.client.downgrade();
-        let menu = Menu::open(window, cx, |menu| {
-            let item = |program: &String, on: bool| {
-                let (client, program) = (client.clone(), program.clone());
-                Item::new(games::title(&program).to_owned(), move |_, cx| {
-                    let _ = client.update(cx, |client, cx| client.set_game(&program, !on, cx));
-                })
-                .checked(on)
-            };
-            let menu = kept.iter().fold(menu, |menu, game| menu.item(item(game, true)));
-            match running.is_empty() {
-                true => menu,
-                false => running.iter().fold(menu.separator().heading("Läuft gerade"), |menu, program| menu.item(item(program, false))),
-            }
-        });
-        self.show(Opened::Games, menu, cx);
+    fn render_chosen(&self, index: usize, chosen: &Chosen, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = cx.tokens();
+        let Program { game, title, icon, .. } = &chosen.program;
+        let row: SharedString = format!("game-{index}").into();
+        let game = game.clone();
+        let remove = Button::new(("remove-game", index), Variant::Ghost)
+            .size(Size::Small)
+            .square()
+            .icon(Glyph::Close)
+            .name("Entfernen")
+            .on_click(cx.listener(move |settings, _, _, cx| settings.set_game(&game, false, cx)));
+        // Where the pointer is, the button that removes the game takes the dot's place at the end.
+        let end = h_flex()
+            .flex_none()
+            .relative()
+            .size(theme::CONTROL_SM)
+            .justify_end()
+            .children(chosen.runs.then(|| div().group_hover(row.clone(), |style| style.opacity(0.)).child(kit::dot(tokens.speaking))))
+            .child(div().absolute().inset_0().opacity(0.).group_hover(row.clone(), |style| style.opacity(1.)).child(remove));
+        h_flex()
+            .group(row)
+            .h(theme::ROW)
+            .px(kit::panel_inset() - theme::PANEL_PAD)
+            .gap(theme::INLINE)
+            .child(AppIcon::new(title.clone(), icon.clone(), theme::APP_ICON))
+            .child(div().flex_1().min_w_0().truncate().text_color(tokens.text).child(title.clone()))
+            .child(end)
+            .into_any_element()
+    }
+
+    fn render_add_game(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = cx.tokens();
+        let open = self.menu.as_ref().filter(|(shown, ..)| *shown == Opened::AddGame).map(|(_, menu, _)| menu);
+        let mark = div()
+            .flex_none()
+            .size(theme::APP_ICON.size)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(theme::APP_ICON.radius)
+            .border_1()
+            .border_dashed()
+            .border_color(tokens.seat)
+            .child(Icon::new(Glyph::Add).size(theme::ICON_SM));
+        let row = kit::row_button("add-game")
+            .gap(theme::INLINE)
+            .child(mark)
+            .child("Spiel hinzufügen")
+            .on_click(cx.listener(|settings, _, window, cx| settings.open_games_to_add(window, cx)));
+        div().relative().child(row).children(open.map(|menu| Popover::new(menu, Place::Under))).into_any_element()
+    }
+
+    fn open_games_to_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.games_to_add(cx);
+        let menu = Menu::open_searchable("Suchen", window, cx, entries);
+        self.show(Opened::AddGame, menu, cx);
+    }
+
+    /// The programs running and not chosen: the games in launchers' libraries, then the others
+    /// with their files' names.
+    fn games_to_add(&self, cx: &Context<Self>) -> Entries {
+        let settings = cx.entity().downgrade();
+        let item = |program: &Program| {
+            let (settings, game) = (settings.clone(), program.game.clone());
+            Item::new(program.title.clone(), move |_, cx| {
+                let _ = settings.update(cx, |settings, cx| settings.set_game(&game, true, cx));
+            })
+            .icon(AppIcon::new(program.title.clone(), program.icon.clone(), theme::APP_ICON_SM))
+        };
+        let (in_library, others): (Vec<&Program>, Vec<&Program>) = self.programs.others.iter().partition(|program| program.in_library);
+        let entries = in_library.into_iter().fold(Entries::default().heading("Spiele"), |entries, program| entries.item(item(program)));
+        others.into_iter().fold(entries.separator().heading("Andere Programme"), |entries, program| {
+            let file = Path::new(&program.game).file_name().unwrap_or_default().to_string_lossy().into_owned();
+            entries.item(item(program).detail(file))
+        })
     }
 
     fn render_level(&self, cx: &App) -> AnyElement {
@@ -299,11 +400,13 @@ impl Render for Settings {
             self.render_suppression(cx),
             self.render_switch("echo", "Echounterdrückung", echo, Client::set_echo_cancellation, cx),
         ];
-        let output = [self.render_device(Direction::Output, cx), self.render_volume(cx)];
+        let speaker = [self.render_device(Direction::Output, cx), self.render_volume(cx)];
+        let games = self.render_games(cx);
         let start = self.client.read(cx).settings.start_with_system;
-        let automatic =
-            [self.render_switch("start", "Mit dem System starten", start, Client::set_start_with_system, cx), self.render_games(cx)];
-        let connection = [kit::row("Server", cx).child(self.server.clone()).into_any_element()];
+        let app = [
+            kit::row("Server", cx).child(self.server.clone()).into_any_element(),
+            self.render_switch("start", "Mit dem System starten", start, Client::set_start_with_system, cx),
+        ];
         div().id("settings").flex_1().min_h_0().overflow_y_scroll().child(
             v_flex()
                 .px(theme::GUTTER)
@@ -311,9 +414,9 @@ impl Render for Settings {
                 .pb(theme::GUTTER)
                 .gap(theme::SECTION)
                 .child(kit::group("Mikrofon", microphone, cx))
-                .child(kit::group("Ausgabe", output, cx))
-                .child(kit::group("Automatisch", automatic, cx))
-                .child(kit::group("Verbindung", connection, cx)),
+                .child(kit::group("Lautsprecher", speaker, cx))
+                .child(kit::group("Beitreten, wenn läuft", games, cx))
+                .child(kit::group("App", app, cx)),
         )
     }
 }

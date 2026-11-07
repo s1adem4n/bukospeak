@@ -144,6 +144,6 @@ pub fn all() -> Vec<Scene> {
             ..scene("settings-suppression", "the settings, the menu of noise suppressions open", idle())
         },
         Scene { steps: "click settings; click input", ..scene("settings-input", "the settings, the menu of microphones open", idle()) },
-        Scene { steps: "click settings; click games", ..scene("settings-games", "the settings, the menu of games open", idle()) },
+        Scene { steps: "click settings; click add-game", ..scene("settings-games", "the settings, the games to add open", idle()) },
     ]
 }

@@ -1,7 +1,9 @@
+use std::path::{MAIN_SEPARATOR_STR, PathBuf};
 use std::thread;
 
 use crate::audio::{self, Device, DeviceId, Direction};
 use crate::autostart;
+use crate::games::{self, Listing, Program};
 use crate::install::{self, Progress};
 use crate::nvidia::Architecture;
 use crate::settings::{self, Settings};
@@ -39,8 +41,20 @@ impl Host for Staged {
         Ok(())
     }
 
-    fn programs(&self) -> Vec<String> {
-        ["FortniteClient-Win64-Shipping.exe", "chrome.exe", "Spotify.exe"].map(str::to_owned).to_vec()
+    fn programs(&self, chosen: &[String]) -> Listing {
+        let program = |folders: &[&str], title: &str, in_library| {
+            let mut path = PathBuf::from(MAIN_SEPARATOR_STR);
+            path.extend(folders);
+            Program { game: path.to_string_lossy().into_owned(), title: title.to_owned(), in_library, icon: None }
+        };
+        let running = vec![
+            program(&["Epic Games", "Fortnite", games::FORTNITE], "Fortnite", true),
+            program(&["SteamLibrary", "steamapps", "common", "Counter-Strike Global Offensive", "cs2.exe"], "Counter-Strike 2", true),
+            program(&["SteamLibrary", "steamapps", "common", "rocketleague", "RocketLeague.exe"], "Rocket League", true),
+            program(&["Program Files", "Google", "Chrome", "chrome.exe"], "Google Chrome", false),
+            program(&["Program Files", "Spotify", "Spotify.exe"], "Spotify", false),
+        ];
+        games::listing(chosen, running, |game| program(&[game], game, false))
     }
 
     fn card(&self) -> Option<Architecture> {

@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use crate::ui::kit::h_flex;
-use crate::ui::kit::menu::{Item, Menu, Place, Popover};
+use crate::ui::kit::menu::{Entries, Item, Menu, Place, Popover};
 use crate::ui::marks::Mark;
 use crate::ui::theme;
 use edit::{Kind, Text};
@@ -391,14 +391,15 @@ impl TextField {
         self.focus(window, cx);
         let field = cx.entity().downgrade();
         let takes = self.selected_text().is_some();
-        let menu = Menu::open(window, cx, |menu| {
+        let menu = Menu::open(window, cx, {
             let item = |label: &'static str, edit: fn(&mut TextField, &mut Window, &mut Context<TextField>)| {
                 let field = field.clone();
                 Item::new(label, move |window, cx| {
                     let _ = field.update(cx, |field, cx| edit(field, window, cx));
                 })
             };
-            menu.item(item("Ausschneiden", |field, window, cx| field.cut(window, cx)).disabled(!takes))
+            Entries::default()
+                .item(item("Ausschneiden", |field, window, cx| field.cut(window, cx)).disabled(!takes))
                 .item(item("Kopieren", |field, _, cx| field.copy(cx)).disabled(!takes))
                 .item(item("Einfügen", |field, window, cx| field.paste(window, cx)))
                 .separator()

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::call::Phase;
@@ -24,6 +25,8 @@ pub struct Channel {
     client: Entity<Client>,
     updater: Option<Entity<Updater>>,
     clock: Option<Task<()>>,
+    settled: HashSet<u16>,
+    update_was_ready: bool,
     _client: Subscription,
     _updater: Option<Subscription>,
 }
@@ -34,10 +37,15 @@ impl Channel {
     pub fn new(client: Entity<Client>, updater: Option<Entity<Updater>>, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&client, |channel, _, cx| {
             channel.follow_clock(cx);
+            let present = channel.member_ids(cx);
+            channel.settled.retain(|id| present.contains(id));
             cx.notify();
         });
         let updated = updater.as_ref().map(|updater| cx.observe(updater, |_, _, cx| cx.notify()));
-        let mut channel = Self { client, updater, clock: None, _client: observed, _updater: updated };
+        let update_was_ready = updater.as_ref().is_some_and(|updater| matches!(updater.read(cx).state(), State::Ready { .. }));
+        let mut channel =
+            Self { client, updater, clock: None, settled: HashSet::new(), update_was_ready, _client: observed, _updater: updated };
+        channel.settled = channel.member_ids(cx);
         channel.follow_clock(cx);
         channel
     }
@@ -81,6 +89,7 @@ impl Channel {
                         // One's own as set here, before the server tells it back.
                         muted: if Some(member.id) == you { call.is_muted() } else { member.muted },
                         reconnecting: member.reconnecting,
+                        arrives: !self.settled.contains(&member.id.0),
                     })
                 })
                 .collect();
@@ -96,11 +105,22 @@ impl Channel {
                     speaks: false,
                     muted: member.muted,
                     reconnecting: member.reconnecting,
+                    arrives: !self.settled.contains(&member.id.0),
                 })
             });
             let you = Seat::Waiting { joining: *call.phase() == Phase::Joining };
             present.chain([you]).collect()
         }
+    }
+
+    fn member_ids(&self, cx: &App) -> HashSet<u16> {
+        self.seats(cx)
+            .into_iter()
+            .filter_map(|seat| match seat {
+                Seat::Member(member) => Some(member.id),
+                Seat::Waiting { .. } | Seat::Empty => None,
+            })
+            .collect()
     }
 
     fn render_stage(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -133,32 +153,43 @@ impl Channel {
             .min_h_0()
             .overflow_y_scroll()
             .px(theme::GUTTER)
-            .when(reconnecting, |stage| stage.opacity(theme::RECONNECTING_OPACITY))
             .child(v_flex().py(theme::GAP).gap(theme::GAP).when(centered, |rows| rows.size_full().justify_center()).children(rows))
+            .with_spring("reconnecting", SpringAnimation::new(theme::DIM).to(reconnecting), |stage, dim| {
+                stage.opacity(dimmed(dim.clamp(0. ..=1.).0))
+            })
     }
 
-    fn render_update(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_update(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let updater = self.updater.clone()?;
         let State::Ready { version } = updater.read(cx).state() else {
             return None;
         };
         let tokens = cx.tokens();
+        let callout = kit::callout(Icon::new(Glyph::Download).size(theme::ICON_SM).color(tokens.speaking), cx)
+            .relative()
+            .py(theme::PANEL_PAD)
+            .pr(theme::PANEL_PAD)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().truncate().font_weight(FontWeight::MEDIUM).child(format!("Update {version} bereit")))
+                    .child(div().truncate().typeset(theme::TEXT_SM).text_color(tokens.text_muted).child("Nach dem Verlassen")),
+            )
+            .child(
+                Button::new("update", Variant::Raised)
+                    .label("Jetzt updaten")
+                    .on_click(move |_, _, cx| updater.update(cx, |updater, cx| updater.install(cx))),
+            );
+        if self.update_was_ready {
+            return Some(callout.into_any_element());
+        }
         Some(
-            kit::callout(Icon::new(Glyph::Download).size(theme::ICON_SM).color(tokens.speaking), cx)
-                .py(theme::PANEL_PAD)
-                .pr(theme::PANEL_PAD)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().truncate().font_weight(FontWeight::MEDIUM).child(format!("Update {version} bereit")))
-                        .child(div().truncate().typeset(theme::TEXT_SM).text_color(tokens.text_muted).child("Nach dem Verlassen")),
-                )
-                .child(
-                    Button::new("update", Variant::Raised)
-                        .label("Jetzt updaten")
-                        .on_click(move |_, _, cx| updater.update(cx, |updater, cx| updater.install(cx))),
-                ),
+            callout
+                .with_animation("update", Animation::new(theme::APPEAR).with_easing(ease_out_quint()), |callout, delta| {
+                    callout.opacity(delta).top(theme::RISE * (1. - delta))
+                })
+                .into_any_element(),
         )
     }
 
@@ -254,6 +285,7 @@ struct Member {
     speaks: bool,
     muted: bool,
     reconnecting: bool,
+    arrives: bool,
 }
 
 impl Seat {
@@ -280,9 +312,11 @@ impl Seat {
                     tokens.text_muted,
                 ));
                 let you = if *joining {
+                    let breathe = pulsating_between(theme::WAITING_OPACITY, 1.);
                     you.with_animation(
                         "joining",
-                        Animation::new(PULSE).repeat().with_easing(pulsating_between(theme::WAITING_OPACITY, 1.)),
+                        // pulsating_between starts halfway up its range; from its low point the tile leaves its resting dimness without a jump.
+                        Animation::new(PULSE).repeat().with_easing(move |delta| breathe((delta + 0.75) % 1.)),
                         |you, delta| you.opacity(delta),
                     )
                     .into_any_element()
@@ -298,7 +332,7 @@ impl Seat {
 
 impl Member {
     fn render(&self, place: gpui::Div, layout: Seats, tokens: Tokens) -> AnyElement {
-        let Self { id, name, speaks, muted, reconnecting } = self.clone();
+        let Self { id, name, speaks, muted, reconnecting, arrives } = self.clone();
         let badge = match (reconnecting, muted) {
             (true, _) => Some((Glyph::Reconnecting, tokens.text_muted)),
             (false, true) => Some((Glyph::MicOff, tokens.danger)),
@@ -328,14 +362,17 @@ impl Member {
             .border_1()
             .border_color(tokens.hairline)
             .shadow(theme::depth::tile(&tokens))
-            .when(reconnecting, |tile| tile.opacity(theme::RECONNECTING_OPACITY))
             .child(avatar)
             .child(name_line(name, layout, tokens.text_muted))
-            .child(ring);
+            .child(ring)
+            .with_spring(("reconnecting", u64::from(id)), SpringAnimation::new(theme::DIM).to(reconnecting), |tile, dim| {
+                tile.opacity(dimmed(dim.clamp(0. ..=1.).0))
+            });
+        let place = place.id(("seat", u64::from(id))).mark(self.name.clone()).child(tile);
+        if !arrives {
+            return place.into_any_element();
+        }
         place
-            .id(("seat", u64::from(id)))
-            .mark(self.name.clone())
-            .child(tile)
             .with_animation(("appear", u64::from(id)), Animation::new(theme::APPEAR).with_easing(ease_out_quint()), |place, delta| {
                 place.opacity(delta).top(theme::RISE * (1. - delta))
             })
@@ -345,6 +382,10 @@ impl Member {
 
 fn name_line(name: SharedString, layout: Seats, color: gpui::Hsla) -> impl IntoElement {
     div().max_w_full().px(theme::TILE_INSET).truncate().typeset(layout.name).font_weight(FontWeight::MEDIUM).text_color(color).child(name)
+}
+
+fn dimmed(dim: f32) -> f32 {
+    1. - (1. - theme::RECONNECTING_OPACITY) * dim
 }
 
 fn clock(elapsed: Duration) -> String {

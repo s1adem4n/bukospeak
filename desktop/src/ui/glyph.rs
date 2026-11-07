@@ -40,6 +40,8 @@ glyphs! {
     Check => "check",
     Minimize => "minus",
     Close => "x",
+    Add => "plus",
+    Search => "search",
 }
 
 impl Glyph {

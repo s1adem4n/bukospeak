@@ -1,6 +1,8 @@
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use crate::audio::{self, Device, Direction};
+use crate::games::{self, Listing};
 use crate::install::{self, Progress};
 use crate::nvidia::{self, Architecture};
 use crate::settings::{self, Settings};
@@ -13,7 +15,8 @@ pub trait Host: Send + Sync + 'static {
 
     fn start_with_system(&self, on: bool) -> Result<(), autostart::Error>;
 
-    fn programs(&self) -> Vec<String>;
+    /// The games of `chosen`, as the settings keep them, and the other programs running.
+    fn programs(&self, chosen: &[String]) -> Listing;
 
     fn card(&self) -> Option<Architecture>;
 
@@ -24,11 +27,12 @@ pub trait Host: Send + Sync + 'static {
 
 pub struct Desktop {
     settings: PathBuf,
+    programs: Mutex<games::Programs>,
 }
 
 impl Desktop {
     pub fn new(settings: PathBuf) -> Self {
-        Self { settings }
+        Self { settings, programs: Mutex::default() }
     }
 }
 
@@ -50,10 +54,12 @@ impl Host for Desktop {
         autostart::set(on)
     }
 
-    fn programs(&self) -> Vec<String> {
-        crate::games::running().unwrap_or_else(|error| {
+    fn programs(&self, chosen: &[String]) -> Listing {
+        // What a listing that panicked left is only what files said of programs, still true.
+        let mut programs = self.programs.lock().unwrap_or_else(PoisonError::into_inner);
+        programs.list(chosen).unwrap_or_else(|error| {
             tracing::warn!("{error}");
-            Vec::new()
+            Listing::default()
         })
     }
 

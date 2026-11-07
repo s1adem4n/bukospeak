@@ -80,6 +80,17 @@ pub const AVATAR: AvatarSize = AvatarSize { size: step(12.), initial: TEXT_XL, b
 pub const AVATAR_LG: AvatarSize = AvatarSize { size: step(16.), initial: TEXT_2XL, badge: step(6.) };
 pub const AVATAR_XL: AvatarSize = AvatarSize { size: step(20.), initial: TEXT_3XL, badge: step(7.) };
 pub const BADGE_EDGE: Pixels = step(0.5);
+
+/// A program's icon in a settings row, and in a menu's item.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AppIconSize {
+    pub size: Pixels,
+    pub radius: Pixels,
+    pub initial: Type,
+}
+
+pub const APP_ICON: AppIconSize = AppIconSize { size: step(6.), radius: step(1.5), initial: TEXT_SM };
+pub const APP_ICON_SM: AppIconSize = AppIconSize { size: step(5.), radius: step(1.25), initial: TEXT_XS };
 pub const SPEAKING_EDGE: Pixels = step(0.5);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,6 +138,8 @@ pub const DOT: Pixels = step(1.75);
 pub const DOT_HALO: Pixels = step(0.75);
 pub const MENU: Pixels = step(56.);
 pub const MENU_ITEM: Pixels = CONTROL_SM;
+/// The most a menu's items take of the window before they scroll: a dozen of them.
+pub const MENU_LIST: Pixels = step(84.);
 pub const MENU_SEPARATOR: Pixels = step(1.);
 pub const MENU_RISE: Pixels = step(1.);
 pub const TOOLTIP_OFFSET: Size<Pixels> = Size { width: step(2.), height: step(2.5) };

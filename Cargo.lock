@@ -900,6 +900,7 @@ dependencies = [
  "tray-icon",
  "unicode-segmentation",
  "velopack",
+ "windows 0.62.2",
  "zstd",
 ]
 

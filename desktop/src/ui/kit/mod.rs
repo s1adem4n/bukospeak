@@ -1,3 +1,4 @@
+mod app_icon;
 mod avatar;
 mod button;
 mod field;
@@ -11,6 +12,7 @@ mod tooltip;
 
 use std::sync::{Arc, LazyLock};
 
+pub use app_icon::AppIcon;
 pub use avatar::Avatar;
 pub use button::{Button, Size, Variant, icon_inset};
 pub use field::{Field, InlineField, InlineFieldEvent};
@@ -87,6 +89,20 @@ pub fn row(label: &'static str, cx: &App) -> Div {
         .child(div().flex_none().child(label))
 }
 
+/// A row of a list that is a button as a whole.
+pub fn row_button(id: &'static str) -> Button {
+    // Its surface lies as far inside the row as the row inside the panel's sides, so its corners
+    // nest in the panel's.
+    Button::new(id, Variant::Ghost)
+        .w_full()
+        .my(theme::PANEL_PAD)
+        .h(theme::ROW - theme::PANEL_PAD * 2.)
+        // The button's own edge lies inside the panel's.
+        .px(panel_inset() - theme::PANEL_PAD - theme::HAIRLINE)
+        .justify_start()
+        .font_weight(FontWeight::NORMAL)
+}
+
 pub fn menu_row(
     id: &'static str,
     label: &'static str,
@@ -96,16 +112,8 @@ pub fn menu_row(
     cx: &App,
 ) -> AnyElement {
     let tokens = cx.tokens();
-    // Its surface lies as far inside the row as the row inside the panel's sides, so its corners
-    // nest in the panel's.
-    let row = Button::new(id, Variant::Ghost)
-        .w_full()
-        .my(theme::PANEL_PAD)
-        .h(theme::ROW - theme::PANEL_PAD * 2.)
-        // The button's own edge lies inside the panel's.
-        .px(panel_inset() - theme::PANEL_PAD - theme::HAIRLINE)
+    let row = row_button(id)
         .gap(theme::GAP)
-        .font_weight(FontWeight::NORMAL)
         .child(div().flex_none().text_color(tokens.text).child(label))
         // A long value, as a device's name, gives way to the label and is cut short.
         .child(
